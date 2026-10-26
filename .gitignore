@@ -1,0 +1,22 @@
+web-export/
+node_modules/
+.qa/
+.versions/*.jsonl
+.exports/
+.local-builds/
+.build_result.json
+.tesana_dirty
+*.log
+.DS_Store
+.vite/
+.dream-loop/
+.tesana/asset-jobs/
+
+# Build artifacts (added by engine migration)
+desktop-export/
+.canvas/
+
+# Local
+dist/
+public/decoders/
+*.zip

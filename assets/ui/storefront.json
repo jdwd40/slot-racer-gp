@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "generated_at": "2026-10-26T20:21:35Z",
+  "tagline": "Hold the throttle, read the bends, and race three AI rivals around a miniature slot-car circuit.",
+  "description": "**Slot Rush GP** turns a tabletop slot-car set into a top-down race. Four miniature cars line up on a two-lane black track beside a packed grandstand, a pit lane with service bays, and green grassy scenery. Watch the red start lights come on, then go for it.\n\nYour car follows its slot on its own, so the skill is all in speed control. Hold W or Up to accelerate, release to slow, and press S or Down to brake harder. Press Space to request a lane change and P to request a pit stop. Push too hard into a bend and your car can fly out of its slot.\n\nThe HUD tracks your race position, lap count, race time with last and best laps, plus throttle and fuel gauges. A minimap shows the full circuit, your marker, rival cars and the pit entrance. Fuel runs down as you race, so plan your pit stops. You can zoom in or out, switch between the follow camera and a full-circuit view, and pause anytime.\n\nTake on Red Comet, Blue Arrow and Green Viper in a 13-lap race and fight your way to the front.",
+  "theme": {
+    "color_theme": "forest",
+    "font_family": "monospace",
+    "border_radius": "medium"
+  },
+  "category_slug": "racing",
+  "tag_slugs": [
+    "slot-cars",
+    "top-down",
+    "racing",
+    "pit-stops",
+    "tabletop",
+    "arcade"
+  ]
+}
