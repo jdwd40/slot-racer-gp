@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: Type check, tests and production build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Install dependencies from the lockfile
+        run: npm ci
+
+      - name: TypeScript check
+        run: npm run typecheck
+
+      - name: Regression tests
+        # vitest run fails when no test files are found, so an empty suite cannot pass
+        run: npm test
+
+      - name: Production build
+        run: npm run build
+
+      - name: Build output summary
+        run: du -sh dist && find dist -type f | sort
