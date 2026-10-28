@@ -65,6 +65,8 @@
     { "id": "res.again", "text": "Race Again" },
     { "id": "res.est", "text": "running" },
     { "id": "ui.sound", "text": "Sound" },
+    { "id": "ui.noWebgl", "text": "This game needs WebGL, which your browser could not start." },
+    { "id": "ui.noWebglHint", "text": "Try a current version of Chrome, Firefox, Edge or Safari, make sure hardware acceleration is enabled, then reload the page." },
     { "id": "title.track", "text": "Choose a circuit" },
     { "id": "title.len", "text": "{n} m per lap" },
     { "id": "pause.menu", "text": "Change circuit" },
