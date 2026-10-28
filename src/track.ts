@@ -337,8 +337,10 @@ export const TRACK_EDGE = 0.6; // track surface extends this far beyond the lane
 // Pit lane (on the right / outside of the main straight; every circuit's
 // segment 0 is a main straight of at least ~36 units)
 export const PIT_IN0 = 3, PIT_IN1 = 8;
-export const BAYS = [10.5, 13.5, 16.5, 19.5];
+export const BAYS = [12.5, 15.5, 18.5, 21.5];
 export const BAY_HALF = 1.15;
+/** stop-and-go penalty box: a marked stretch of pit lane between the entry ramp and the first service bay */
+export const PEN_S = 9.3, PEN_HALF = 1.1;
 export const FINISH_S = 23;
 export const PIT_OUT0 = 25, PIT_OUT1 = 31;
 export const PIT_D = -2.6;

@@ -81,3 +81,43 @@ small { color: #9ca3af; font-weight: 500; }
 .track small { font-size: 11px; line-height: 1.3; color: #9ca3af; }
 .track em { font-style: normal; font-size: 11px; color: #c084fc; font-weight: 700; }
 .card.title { max-height: 94vh; overflow-y: auto; }
+
+.setup { display: flex; gap: 28px; justify-content: center; align-items: flex-start; margin: 4px 0 10px; flex-wrap: wrap; }
+.setup .lbl2 { display: block; }
+.ini input { width: 92px; font: inherit; font-weight: 800; font-size: 18px; letter-spacing: 3px; text-align: center; text-transform: uppercase; padding: 6px 8px; border-radius: 10px; border: 2px solid rgba(255,255,255,0.18); background: rgba(255,255,255,0.06); color: #ffe066; outline: none; }
+.ini input:focus { border-color: #ffd23f; }
+.cars { display: flex; gap: 8px; }
+.car { display: flex; align-items: center; gap: 6px; padding: 6px 10px; border-radius: 10px; border: 2px solid rgba(255,255,255,0.12); background: rgba(255,255,255,0.04); color: #f4f4f5; font: inherit; font-size: 12px; font-weight: 700; cursor: pointer; }
+.car i { width: 14px; height: 14px; border-radius: 4px; }
+.car.sel { border-color: #ffd23f; background: rgba(255,210,63,0.12); }
+.row.wrap { flex-wrap: wrap; }
+.cta.small { font-size: 13px; padding: 10px 14px; }
+.round { font-size: 11px; letter-spacing: 1.5px; color: #c084fc; font-weight: 800; margin-top: 2px; }
+.btn.off { opacity: 0.45; }
+.tabs { display: flex; gap: 6px; justify-content: center; flex-wrap: wrap; margin: 6px 0; }
+.tab { font: inherit; font-size: 12px; font-weight: 700; padding: 6px 10px; border-radius: 8px; border: 1px solid rgba(255,255,255,0.14); background: rgba(255,255,255,0.05); color: #d1d5db; cursor: pointer; }
+.tab.sel { background: #ffd23f; color: #1a1205; border-color: #ffd23f; }
+.tab.kind.sel { background: #22d3ee; border-color: #22d3ee; color: #062a33; }
+.boards table, .champ table { min-width: 460px; }
+.results tr.fresh td { color: #ffe066; font-weight: 800; }
+.results td.empty { text-align: center; color: #9ca3af; padding: 18px; }
+.card h3 { margin: 10px 0 2px; font-size: 14px; letter-spacing: 1px; text-transform: uppercase; color: #9ca3af; }
+.rounds { display: flex; gap: 6px; justify-content: center; flex-wrap: wrap; margin: 4px 0 8px; }
+.rchip { font-size: 11px; font-weight: 700; padding: 4px 8px; border-radius: 8px; background: rgba(255,255,255,0.06); color: #9ca3af; }
+.rchip.done { color: #4ade80; background: rgba(74,222,128,0.12); }
+.rchip.next { color: #ffe066; background: rgba(255,224,102,0.14); }
+.card.results { max-height: 94vh; overflow-y: auto; }
+
+/* penalty flags beside driver names */
+.flag { display: inline-block; margin-left: 5px; font-size: 11px; font-weight: 900; letter-spacing: 0; color: #ffd23f; vertical-align: baseline; }
+.flag.final { color: #fb923c; }
+.flag.sg { padding: 1px 5px; border-radius: 5px; background: #dc2626; color: #fff; font-size: 10px; }
+.flag.tp { padding: 1px 5px; border-radius: 5px; background: rgba(220,38,38,0.25); color: #fca5a5; font-size: 10px; }
+.results td .flag:first-child { margin-left: 0; }
+/* pre-race rival lineup */
+.lineup { display: flex; gap: 10px; justify-content: center; flex-wrap: wrap; margin: 4px 0 12px; }
+.rival { display: flex; gap: 8px; align-items: flex-start; text-align: left; width: 215px; padding: 7px 10px; border-radius: 12px; background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.1); }
+.rival > i { flex: none; width: 14px; height: 14px; border-radius: 4px; margin-top: 2px; }
+.rival b { font-size: 13px; }
+.rival em { font-style: normal; font-size: 10px; font-weight: 800; letter-spacing: 1px; text-transform: uppercase; color: #c084fc; margin-left: 6px; }
+.rival small { display: block; font-size: 10.5px; line-height: 1.3; color: #9ca3af; margin-top: 2px; }

@@ -1,13 +1,15 @@
 import * as THREE from 'three';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 import * as T from './track';
-import { Race, LAPS, RaceEvent } from './race';
+import { Race, LAPS, RaceEvent, DRIVERS, PERSONAS, PEN, DEF } from './race';
 import { buildWorld, disposeWorld, arrowGeometry, World } from './world';
 import { Y0 } from './gfx';
 import { makeCar, CarVisual } from './carModel';
-import { Hud, fmt, carLabel } from './hud';
+import { Hud, fmt, carLabel, flags } from './hud';
 import { Sfx } from './audio';
 import { t, onLangChange } from './i18n';
+import * as R from './records';
+import { GhostRecorder, GhostPlayer } from './ghost';
 
 interface TesanaLike { gameplay: { levelStart: (o: object) => boolean; death: (o: object) => boolean; levelComplete: (o: object) => boolean; }; track: (n: string, o: object) => boolean; }
 const tesana = (): TesanaLike | undefined => (window as unknown as { Tesana?: TesanaLike }).Tesana;
@@ -50,12 +52,33 @@ let world: World = buildWorld();
 scene.add(world.root);
 
 // ------------------------------------------------------------ cars
-let race = new Race();
-const visuals: CarVisual[] = race.cars.map((c, i) => {
-  const v = makeCar(c.color, [7, 11, 3, 24][i], c.isPlayer);
-  scene.add(v.group);
-  return v;
-});
+type Mode = 'race' | 'practice' | 'champ';
+let mode: Mode = 'race';
+let carId = R.savedCar();
+function newRace(): Race { return new Race({ practice: mode === 'practice', playerColor: R.livery(carId).color }); }
+let race = newRace();
+let visuals: CarVisual[] = [];
+function disposeVisual(v: CarVisual): void {
+  v.group.traverse((o) => { const m = o as THREE.Mesh; if (m.isMesh) { m.geometry.dispose(); (Array.isArray(m.material) ? m.material : [m.material]).forEach((x) => x.dispose()); } });
+  v.group.removeFromParent();
+}
+/** (re)create car visuals for the cars of the current race */
+function rebuildVisuals(): void {
+  visuals.forEach(disposeVisual);
+  visuals = race.cars.map((c) => { const v = makeCar(c.color, [7, 11, 3, 24][c.idx], c.isPlayer); scene.add(v.group); return v; });
+}
+rebuildVisuals();
+function setRace(r: Race): void { race = r; laneArrowKey = ''; lastCrossed = 0; rebuildVisuals(); }
+
+// practice ghost + records
+const recorder = new GhostRecorder();
+const ghost = new GhostPlayer(scene);
+let pbMs = 0;
+let lastCrossed = 0;
+let pendingLap: Extract<RaceEvent, { type: 'lap' }> | null = null;
+const freshIds = new Set<string>();
+let champ: R.Championship | null = R.loadChamp();
+let champRoundSaved = false;
 
 // lane-change / pit arrows
 const arrowMat = new THREE.MeshBasicMaterial({ color: 0xffd23f, transparent: true, opacity: 0.85, depthWrite: false, side: THREE.DoubleSide });
@@ -84,8 +107,10 @@ const overlay = document.createElement('div');
 overlay.className = 'overlay';
 app.appendChild(overlay);
 
-type Screen = 'title' | 'race' | 'pause' | 'results';
+type Screen = 'title' | 'race' | 'pause' | 'results' | 'boards' | 'champ';
 let screen: Screen = 'title';
+let lbTrack = T.DEF.id;
+let lbKind: R.BoardKind = 'practice';
 
 function controlsHtml(): string {
   const row = (k: string, id: string): string => `<div class="krow"><span class="keys">${k}</span><span>${t(id)}</span></div>`;
@@ -98,6 +123,7 @@ function controlsHtml(): string {
     ${row('<kbd>+</kbd><kbd>−</kbd> / 🖱', 'ctl.zoom')}
     ${row('<kbd>Esc</kbd>', 'ctl.pause')}
     ${row('<kbd>R</kbd>', 'ctl.restart')}
+    ${row('<kbd>G</kbd>', 'ctl.ghost')}
   </div>`;
 }
 
@@ -135,14 +161,24 @@ function applyTrack(id: string): void {
   pitArrow.geometry = pitArrowGeo();
   laneArrow.visible = false; laneArrowKey = '';
   hud.rebuildMini();
-  race = new Race();
+  setRace(newRace());
   camTarget.set(T.BOUNDS.cx, 0, -T.BOUNDS.cy - 2);
   curSpan = fullSpan();
+}
+
+/** pre-race lineup: the three rivals and their driving styles */
+function lineupHtml(): string {
+  return `<div class="lineup">${DRIVERS.slice(1).map((d) => `<div class="rival">${colorDot(d.color)}<div><b>${d.name}</b><em>${t(`persona.${d.persona}.name`)}</em><small>${t(`persona.${d.persona}.desc`)}</small></div></div>`).join('')}</div>`;
+}
+
+function carPickerHtml(): string {
+  return `<div class="cars">${R.LIVERIES.map((l) => `<button class="car ${l.id === carId ? 'sel' : ''}" data-car="${l.id}" title="${l.name}"><i style="background:#${l.color.toString(16).padStart(6, '0')}"></i>${l.name}</button>`).join('')}</div>`;
 }
 
 function showTitle(): void {
   screen = 'title';
   camMode = 'full';
+  mode = 'race';
   overlay.className = 'overlay show';
   const cards = T.TRACKS.map((d) => `<button class="track ${d.id === T.DEF.id ? 'sel' : ''}" data-id="${d.id}">
       ${trackSvg(d)}
@@ -150,79 +186,221 @@ function showTitle(): void {
       <small>${t(`track.${d.id}.desc`)}</small>
       <em>${t('title.len', { n: Math.round(T.layout(d, 4).L) })}</em>
     </button>`).join('');
+  const nRounds = R.CHAMP_TRACKS.length;
+  let champBtns = `<button class="cta alt" id="o-champ">${t('title.champ')}</button>`;
+  if (champ && !R.champDone(champ)) champBtns = `<button class="cta alt" id="o-champ-cont">${t('title.champContinue', { n: champ.rounds.length + 1, m: nRounds })}</button><button class="cta alt small" id="o-champ">${t('title.champNew')}</button>`;
+  else if (champ) champBtns = `<button class="cta alt" id="o-champ-view">${t('title.champView')}</button><button class="cta alt small" id="o-champ">${t('title.champNew')}</button>`;
   overlay.innerHTML = `<div class="card title">
     <div class="logo">${t('title.name')}</div>
     <div class="tag">${t('title.tag')}</div>
     <p>${t('title.goal', { n: LAPS })}</p>
+    <div class="setup">
+      <label class="ini"><span class="lbl2">${t('title.initials')}</span><input id="o-ini" maxlength="${R.MAX_INITIALS}" placeholder="${R.ANON}" value="${R.savedInitialsRaw().replace(/"/g, '')}" autocomplete="off" spellcheck="false"></label>
+      <div><span class="lbl2">${t('title.car')}</span>${carPickerHtml()}</div>
+    </div>
+    <div class="lbl2">${t('title.rivals')}</div>
+    ${lineupHtml()}
     <div class="lbl2">${t('title.track')}</div>
     <div class="tracks">${cards}</div>
     ${controlsHtml()}
-    <button class="cta" id="o-start">${t('title.start')}</button>
+    <div class="row wrap">
+      <button class="cta" id="o-start">${t('title.start')}</button>
+      <button class="cta alt" id="o-practice">${t('title.practice')}</button>
+      ${champBtns}
+      <button class="cta alt" id="o-boards">${t('title.boards')}</button>
+    </div>
   </div>`;
   overlay.querySelectorAll<HTMLElement>('.track').forEach((b) => b.addEventListener('click', () => {
     sfx.init();
     applyTrack(b.dataset.id!);
     overlay.querySelectorAll('.track').forEach((x) => x.classList.toggle('sel', x === b));
   }));
-  overlay.querySelector('#o-start')!.addEventListener('click', () => { sfx.init(); startRace(); });
+  overlay.querySelectorAll<HTMLElement>('.car').forEach((b) => b.addEventListener('click', () => {
+    carId = b.dataset.car!; R.saveCar(carId);
+    overlay.querySelectorAll('.car').forEach((x) => x.classList.toggle('sel', x === b));
+    setRace(newRace());
+  }));
+  const ini = overlay.querySelector<HTMLInputElement>('#o-ini')!;
+  ini.addEventListener('input', () => R.saveInitialsRaw(ini.value));
+  ini.addEventListener('keydown', (e) => { if (e.key === 'Enter') ini.blur(); e.stopPropagation(); });
+  overlay.querySelector('#o-start')!.addEventListener('click', () => { sfx.init(); startSession('race'); });
+  overlay.querySelector('#o-practice')!.addEventListener('click', () => { sfx.init(); startSession('practice'); });
+  overlay.querySelector('#o-champ')!.addEventListener('click', () => { sfx.init(); champ = R.newChamp(carId, R.currentInitials()); startChampRound(); });
+  overlay.querySelector('#o-champ-cont')?.addEventListener('click', () => { sfx.init(); startChampRound(); });
+  overlay.querySelector('#o-champ-view')?.addEventListener('click', () => { sfx.init(); showChamp(null); });
+  overlay.querySelector('#o-boards')!.addEventListener('click', () => { sfx.init(); showBoards(); });
 }
 
 function showPause(): void {
   screen = 'pause';
   overlay.className = 'overlay show';
+  const title = mode === 'practice' ? t('prac.title') : mode === 'champ' && champ ? t('champ.round', { n: champ.rounds.length + 1, m: R.CHAMP_TRACKS.length }) : t('pause.title');
   overlay.innerHTML = `<div class="card">
-    <h2>${t('pause.title')}</h2>
+    <h2>${title}</h2>
+    ${mode === 'practice' ? `<p>${t('prac.hint')}</p>` : ''}
     ${controlsHtml()}
     <div class="row"><button class="cta" id="o-resume">${t('pause.resume')}</button><button class="cta alt" id="o-restart">${t('pause.restart')}</button><button class="cta alt" id="o-menu">${t('pause.menu')}</button></div>
   </div>`;
   overlay.querySelector('#o-resume')!.addEventListener('click', resume);
-  overlay.querySelector('#o-restart')!.addEventListener('click', startRace);
+  overlay.querySelector('#o-restart')!.addEventListener('click', restartSession);
   overlay.querySelector('#o-menu')!.addEventListener('click', toMenu);
 }
 
 function resume(): void { screen = 'race'; overlay.className = 'overlay'; overlay.innerHTML = ''; }
 
+function colorDot(c: number): string { return `<i style="background:#${c.toString(16).padStart(6, '0')}"></i>`; }
+
 function showResults(): void {
+  if (mode === 'champ') { recordChampRound(); showChamp(race); return; }
   screen = 'results';
   const res = race.results();
   const pos = res.findIndex((r) => r.car.isPlayer) + 1;
   const winner = res[0].time;
-  const rows = res.map((r, i) => `<tr class="${r.car.isPlayer ? 'me' : ''}"><td>${i + 1}</td><td><i style="background:#${r.car.color.toString(16).padStart(6, '0')}"></i>${carLabel(r.car)}</td>
+  const rows = res.map((r, i) => `<tr class="${r.car.isPlayer ? 'me' : ''}"><td>${i + 1}</td><td>${colorDot(r.car.color)}${carLabel(r.car)}</td>
     <td class="mono">${i === 0 ? fmt(r.time) : '+' + (r.time - winner).toFixed(1) + 's'}${r.est ? ` <small>(${t('res.est')})</small>` : ''}</td>
-    <td class="mono">${fmt(r.car.bestLap)}</td><td>${r.car.pitStops}</td></tr>`).join('');
+    <td class="mono">${fmt(r.car.bestLap)}</td><td>${r.car.pitStops}</td><td>${flags(r.car) || '–'}</td></tr>`).join('');
   overlay.className = 'overlay show';
   overlay.innerHTML = `<div class="card results">
     <h2>${pos === 1 ? '🏆 ' + t('res.win') : t('res.title')}</h2>
     <div class="place">${t('res.youPlace', { n: pos })}</div>
-    <table><thead><tr><th>#</th><th>${t('res.driver')}</th><th>${t('res.time')}</th><th>${t('res.best')}</th><th>${t('res.pits')}</th></tr></thead><tbody>${rows}</tbody></table>
+    <table><thead><tr><th>#</th><th>${t('res.driver')}</th><th>${t('res.time')}</th><th>${t('res.best')}</th><th>${t('res.pits')}</th><th>${t('res.pen')}</th></tr></thead><tbody>${rows}</tbody></table>
     <div class="row"><button class="cta" id="o-again">${t('res.again')} <small>(R)</small></button><button class="cta alt" id="o-menu">${t('pause.menu')}</button></div>
   </div>`;
-  overlay.querySelector('#o-again')!.addEventListener('click', startRace);
+  overlay.querySelector('#o-again')!.addEventListener('click', restartSession);
   overlay.querySelector('#o-menu')!.addEventListener('click', toMenu);
   tesana()?.track('race_finished', { position: pos, value: Math.round(race.player.finishTime * 10) / 10, track: levelId() });
 }
 
+// ---- championship
+const driverName = (idx: number): string => (idx === 0 ? t('hud.you') : ['', 'Red Comet', 'Blue Arrow', 'Green Viper'][idx]);
+const driverColor = (idx: number): number => (idx === 0 ? R.livery(champ?.car ?? carId).color : [0, 0xe8322a, 0x2a6df0, 0x22b04b][idx]);
+
+/** Store the finished round's result once (points are never awarded twice). */
+function recordChampRound(): void {
+  if (!champ || champRoundSaved || R.champDone(champ) || race.phase !== 'done') return;
+  const order = race.results().map((r) => ({ idx: r.car.idx, dnf: !r.car.finished && (r.car.mode === 'tow' || r.car.fuel <= 0), time: Math.round(r.time * 10) / 10 }));
+  champ.rounds.push({ track: T.DEF.id, order });
+  R.saveChamp(champ);
+  champRoundSaved = true;
+}
+
+function startChampRound(): void {
+  if (!champ || R.champDone(champ)) { showTitle(); return; }
+  carId = champ.car;
+  applyTrack(R.CHAMP_TRACKS[champ.rounds.length]);
+  champRoundSaved = false;
+  startSession('champ');
+}
+
+/** Round results + cumulative standings (after a race), or the final table. */
+function showChamp(finished: Race | null): void {
+  if (!champ) { showTitle(); return; }
+  screen = 'champ';
+  camMode = 'full';
+  const c = champ;
+  const nR = R.CHAMP_TRACKS.length;
+  const done = R.champDone(c);
+  const last = c.rounds[c.rounds.length - 1];
+  let roundHtml = '';
+  if (finished && last) {
+    const rows = last.order.map((o, i) => `<tr class="${o.idx === 0 ? 'me' : ''}"><td>${i + 1}</td><td>${colorDot(driverColor(o.idx))}${driverName(o.idx)}</td><td class="mono">${o.dnf ? t('champ.dnf') : fmt(o.time)}</td><td class="mono">${o.dnf ? 0 : R.CHAMP_POINTS[i]}</td></tr>`).join('');
+    roundHtml = `<h3>${t('champ.roundResults')} · ${t(`track.${last.track}.name`)}</h3>
+      <table><thead><tr><th>#</th><th>${t('res.driver')}</th><th>${t('res.time')}</th><th>${t('champ.points')}</th></tr></thead><tbody>${rows}</tbody></table>`;
+  }
+  const st = R.standings(c, 4);
+  const stRows = st.map((x, i) => `<tr class="${x.idx === 0 ? 'me' : ''}"><td>${i + 1}</td><td>${colorDot(driverColor(x.idx))}${driverName(x.idx)}</td><td class="mono">${x.points}</td><td class="mono">${x.wins}</td><td class="mono">${x.seconds}</td></tr>`).join('');
+  const roundsLine = R.CHAMP_TRACKS.map((id, i) => `<span class="rchip ${i < c.rounds.length ? 'done' : ''} ${i === c.rounds.length && !done ? 'next' : ''}">${i + 1}. ${t(`track.${id}.name`)}</span>`).join('');
+  const champion = st[0];
+  const head = done ? `<h2>🏆 ${t('champ.final')}</h2><div class="place">${champion.idx === 0 ? t('champ.youChampion') : t('champ.champion', { name: driverName(champion.idx) })}</div>` : `<h2>${t('champ.title')}</h2><div class="place">${t('champ.round', { n: c.rounds.length, m: nR })}</div>`;
+  overlay.className = 'overlay show';
+  overlay.innerHTML = `<div class="card results champ">
+    ${head}
+    <div class="rounds">${roundsLine}</div>
+    ${roundHtml}
+    <h3>${done ? t('champ.final') : t('champ.standings')}</h3>
+    <table><thead><tr><th>#</th><th>${t('res.driver')}</th><th>${t('champ.points')}</th><th>${t('champ.wins')}</th><th>${t('champ.seconds')}</th></tr></thead><tbody>${stRows}</tbody></table>
+    <div class="row">${done ? '' : `<button class="cta" id="o-next">${t('champ.continue', { n: c.rounds.length + 1 })}</button>`}<button class="cta alt" id="o-menu">${t('champ.menu')}</button></div>
+  </div>`;
+  overlay.querySelector('#o-next')?.addEventListener('click', () => { sfx.init(); startChampRound(); });
+  overlay.querySelector('#o-menu')!.addEventListener('click', toMenu);
+}
+
+// ---- leaderboards
+function showBoards(): void {
+  screen = 'boards';
+  overlay.className = 'overlay show';
+  const tabs = T.TRACKS.map((d) => `<button class="tab ${d.id === lbTrack ? 'sel' : ''}" data-id="${d.id}">${t(`track.${d.id}.name`)}</button>`).join('');
+  const kinds = (['practice', 'race'] as R.BoardKind[]).map((k) => `<button class="tab kind ${k === lbKind ? 'sel' : ''}" data-kind="${k}">${t(`boards.${k}`)}</button>`).join('');
+  const rows = R.board(lbKind, lbTrack);
+  const body = rows.length ? rows.map((r, i) => `<tr class="${freshIds.has(r.id) ? 'fresh' : ''}"><td>${i + 1}</td><td>${r.initials}</td><td>${colorDot(R.livery(r.car).color)}${R.livery(r.car).name}</td><td class="mono">${R.fmtMs(r.ms)}</td><td>${freshIds.has(r.id) ? `<span class="chip yel">${t('boards.new')}</span>` : ''}</td></tr>`).join('')
+    : `<tr><td colspan="5" class="empty">${t('boards.empty')}</td></tr>`;
+  overlay.innerHTML = `<div class="card results boards">
+    <h2>${t('boards.title')}</h2>
+    <p>${t('boards.hint')}</p>
+    <div class="tabs">${tabs}</div>
+    <div class="tabs">${kinds}</div>
+    <table><thead><tr><th>${t('boards.rank')}</th><th>${t('boards.initials')}</th><th>${t('boards.car')}</th><th>${t('boards.time')}</th><th></th></tr></thead><tbody>${body}</tbody></table>
+    <div class="row"><button class="cta alt" id="o-back">${t('boards.back')}</button></div>
+  </div>`;
+  overlay.querySelectorAll<HTMLElement>('.tab[data-id]').forEach((b) => b.addEventListener('click', () => { lbTrack = b.dataset.id!; showBoards(); }));
+  overlay.querySelectorAll<HTMLElement>('.tab[data-kind]').forEach((b) => b.addEventListener('click', () => { lbKind = b.dataset.kind as R.BoardKind; showBoards(); }));
+  overlay.querySelector('#o-back')!.addEventListener('click', showTitle);
+}
+
 /** Back to the title screen with a fresh grid on the current circuit. */
 function toMenu(): void {
-  race = new Race();
-  laneArrowKey = '';
+  mode = 'race';
+  recorder.stop(); ghost.setData(null);
+  setRace(newRace());
   showTitle();
 }
 
-function startRace(): void {
-  race = new Race();
-  laneArrowKey = '';
+function startSession(m: Mode): void {
+  mode = m;
+  setRace(newRace());
   camMode = 'follow';
+  recorder.stop(); pendingLap = null;
+  if (mode === 'practice') {
+    const g = R.loadGhost(T.DEF.id, carId, R.currentInitials());
+    ghost.setData(g); pbMs = g ? g.ms : 0;
+  } else { ghost.setData(null); pbMs = 0; }
   resume();
-  tesana()?.gameplay.levelStart({ levelId: levelId(), levelIndex: levelIndex() });
+  tesana()?.gameplay.levelStart({ levelId: levelId(), levelIndex: levelIndex(), mode });
   camLead.set(0, 0);
   const p = race.player;
   camTarget.set(p.x, 0, -p.y);
 }
+/** restart the current session (race, practice or championship round) */
+function restartSession(): void { startSession(mode); }
+function startRace(): void { startSession(mode === 'practice' ? 'practice' : mode); }
+
+/** timing-line crossing by the player: finish the recording of the lap just done, start the next */
+function onPlayerCross(): void {
+  const p = race.player;
+  if (mode !== 'practice') return;
+  const lap = pendingLap;
+  if (recorder.active && lap) {
+    if (lap.valid) {
+      const ms = lap.time * 1000;
+      const data = recorder.finish(p, race.raceTime, T.DEF.id, carId, R.currentInitials(), ms);
+      const rec = R.submitLap('practice', T.DEF.id, R.currentInitials(), carId, ms);
+      if (rec) freshIds.add(rec.id);
+      if (pbMs === 0 || ms < pbMs) {
+        const first = pbMs === 0;
+        pbMs = Math.round(ms);
+        R.saveGhost(data); ghost.setData(data);
+        hud.toast(t(first ? 'msg.pbFirst' : 'msg.newPb', { time: R.fmtMs(ms) }), 'good'); sfx.good(); hud.goFlash(t('msg.pbFlash'));
+      }
+    } else { hud.toast(t('msg.lapInvalid'), 'warn'); }
+  }
+  pendingLap = null;
+  recorder.start(p);
+  if (ghost.data) ghost.launch(p.lapStartT);
+}
 
 onLangChange(() => {
   hud.relabel();
-  if (screen === 'title') showTitle(); else if (screen === 'pause') showPause(); else if (screen === 'results') showResults();
+  if (screen === 'title') showTitle(); else if (screen === 'pause') showPause(); else if (screen === 'results') showResults(); else if (screen === 'boards') showBoards(); else if (screen === 'champ') showChamp(null);
 });
 
 // ------------------------------------------------------------ input
@@ -234,19 +412,22 @@ window.addEventListener('keydown', (e) => {
   keys.add(k);
   sfx.init();
   if (screen === 'title') {
-    if (k === 'Enter' || k === 'Space') startRace();
+    if ((e.target as HTMLElement)?.tagName === 'INPUT') return;
+    if (k === 'Enter' || k === 'Space') startSession('race');
     const n = ['Digit1', 'Digit2', 'Digit3', 'Digit4', 'Digit5'].indexOf(k);
     if (n >= 0 && n < T.TRACKS.length) { applyTrack(T.TRACKS[n].id); showTitle(); }
     return;
   }
-  if (k === 'KeyR') { startRace(); return; }
+  if (screen === 'boards' || screen === 'champ') { if (k === 'Escape') showTitle(); return; }
+  if (k === 'KeyR') { restartSession(); return; }
+  if (k === 'KeyG') toggleGhost();
   if (k === 'KeyC') toggleView();
   if (k === 'Equal' || k === 'NumpadAdd') zoomBy(0.8);
   if (k === 'Minus' || k === 'NumpadSubtract') zoomBy(1.25);
   if (k === 'KeyM') toggleSound();
   if (k === 'Escape') { if (screen === 'race') showPause(); else if (screen === 'pause') resume(); return; }
   if (screen === 'pause' && k === 'Enter') { resume(); return; }
-  if (screen === 'results' && k === 'Enter') { startRace(); return; }
+  if (screen === 'results' && k === 'Enter') { restartSession(); return; }
   if (screen !== 'race') return;
   if (k === 'Space') race.requestLane();
   if (k === 'KeyP') race.requestPit();
@@ -261,6 +442,8 @@ hud.el['b-zout'].addEventListener('click', () => zoomBy(1.25));
 hud.el['b-snd'].addEventListener('click', () => { sfx.init(); toggleSound(); });
 hud.el['b-pause'].addEventListener('click', () => { if (screen === 'race') showPause(); else if (screen === 'pause') resume(); });
 function toggleSound(): void { sfx.setMuted(!sfx.muted); hud.el['b-snd'].textContent = sfx.muted ? '🔇' : '🔊'; }
+hud.el['b-ghost'].addEventListener('click', () => { sfx.init(); toggleGhost(); });
+function toggleGhost(): void { ghost.shown = !ghost.shown; hud.el['b-ghost'].classList.toggle('off', !ghost.shown); }
 
 // ------------------------------------------------------------ camera
 let camMode: 'follow' | 'full' = 'full';
@@ -336,8 +519,25 @@ function handle(e: RaceEvent): void {
       break;
     case 'switch': if (e.car.isPlayer || dist2(e.car) < 200) sfx.click(); break;
     case 'tow': if (e.car.isPlayer) tesana()?.gameplay.death({ levelId: levelId(), x: e.car.x, y: e.car.y, name: 'out_of_fuel' }); break;
+    case 'offence': {
+      if (!e.car.isPlayer) { if (e.stop) hud.toast(t('pen.aiStop', { name: e.car.name }), 'info'); break; }
+      const reason = t(e.cause === 'cut' ? 'pen.reasonCut' : 'pen.reasonRear', { name: carLabel(e.other) });
+      if (e.n === 1) { hud.toast(t('pen.warn1', { reason }), 'warn'); sfx.beep(); }
+      else if (e.n === 2) { hud.toast(t('pen.warn2', { reason }), 'bad'); hud.goFlash(t('pen.flashFinal')); sfx.bad(); }
+      else if (e.n === 3 || e.car.sgOwed <= PEN.stopSeconds) { hud.toast(t('pen.stop', { reason, k: e.car.sgChances }), 'bad'); hud.goFlash(t('pen.flashStop')); sfx.bad(); }
+      else { hud.toast(t('pen.stopAdd', { n: PEN.stopSeconds, reason }), 'bad'); sfx.bad(); }
+      break;
+    }
+    case 'served': if (!e.car.isPlayer) hud.toast(t('pen.aiServed', { name: e.car.name }), 'info'); break;
+    case 'timePen': if (!e.car.isPlayer) hud.toast(t('pen.aiTime', { name: e.car.name, n: e.secs }), 'info'); break;
     case 'lap':
-      if (e.car === p && e.best && p.lapsDone > 1 && !p.finished) hud.toast(t('msg.bestLap', { time: fmt(e.time) }), 'good');
+      if (e.car !== p) break;
+      if (mode === 'practice') { pendingLap = e; break; }
+      if (e.valid && !p.finished) {
+        const rec = R.submitLap('race', T.DEF.id, R.currentInitials(), carId, e.time * 1000);
+        if (rec) { freshIds.add(rec.id); const rank = R.board('race', T.DEF.id).findIndex((r) => r.id === rec.id) + 1; hud.toast(t('msg.boardEntry', { n: rank, time: R.fmtMs(e.time * 1000) }), 'good'); break; }
+      }
+      if (e.best && p.lapsDone > 1 && !p.finished) hud.toast(t('msg.bestLap', { time: fmt(e.time) }), 'good');
       break;
     case 'finish':
       if (e.car === p) { sfx.fanfare(); hud.goFlash(`P${e.pos}`); tesana()?.gameplay.levelComplete({ levelId: levelId() }); }
@@ -407,6 +607,10 @@ function syncArrows(time: number): void {
     m.color.setHex(mine ? 0x3cff8a : 0x7dd3fc);
     m.opacity = inPit && (free || mine) ? (mine ? 0.45 : 0.25 + Math.sin(time * 7) * 0.15) : 0;
   });
+  // penalty box: pulses red while the player owes a stop-and-go, solid while serving
+  const owes = p.sgOwed > 0 && !p.finished;
+  world.penGlow.opacity = !owes ? 0 : p.sgServing ? 0.5 : 0.25 + Math.sin(time * 7) * 0.15;
+  world.penGlow.color.setHex(p.sgServing ? 0x3cff8a : 0xff4444);
   // gantry lights
   world.startLights.forEach((m, i) => {
     const on = race.phase === 'countdown' && i < race.lights;
@@ -432,6 +636,16 @@ function syncAudio(): void {
 }
 
 // ------------------------------------------------------------ loop
+/** one simulation step: physics, events, timing-line bookkeeping and ghost recording */
+function tick(dt: number): void {
+  race.update(dt, { up: keys.has('KeyW') || keys.has('ArrowUp'), down: keys.has('KeyS') || keys.has('ArrowDown') });
+  for (const e of race.events) handle(e);
+  race.events.length = 0;
+  const p = race.player;
+  if (p.crossed !== lastCrossed) { lastCrossed = p.crossed; onPlayerCross(); }
+  recorder.sample(p, race.raceTime);
+  if (race.phase === 'done' && screen === 'race') showResults();
+}
 let last = performance.now();
 let time = 0;
 showTitle();
@@ -440,22 +654,20 @@ function frame(now: number): void {
   const dt = Math.min(0.05, (now - last) / 1000);
   last = now; time += dt;
   if (screen === 'race' || screen === 'results') {
-    race.update(dt, { up: keys.has('KeyW') || keys.has('ArrowUp'), down: keys.has('KeyS') || keys.has('ArrowDown') });
-    for (const e of race.events) handle(e);
-    race.events.length = 0;
-    if (race.phase === 'done' && screen === 'race') showResults();
+    tick(dt);
   } else if (screen === 'title') {
     // idle: slow orbit-free pan over the grid
   }
   updateCamera(dt);
   syncCars(dt, time);
+  ghost.update(race.raceTime, screen === 'race' ? dt : 0);
   syncArrows(time);
   syncAudio();
-  hud.root.style.display = screen === 'title' ? 'none' : '';
-  hud.update(race, dt, time);
+  hud.root.style.display = screen === 'race' || screen === 'pause' || screen === 'results' ? '' : 'none';
+  hud.update(race, dt, time, { mode, pbMs, round: mode === 'champ' && champ ? `${champ.rounds.length + (champRoundSaved ? 0 : 1)}/${R.CHAMP_TRACKS.length}` : '' });
   renderer.render(scene, camera);
 }
 requestAnimationFrame(frame);
 
 // debug/test hooks
-(window as unknown as { __game: unknown }).__game = { get race() { return race; }, T, startRace, applyTrack, setView: (m: 'follow' | 'full') => { camMode = m; }, zoom: (span: number) => { camMode = 'follow'; followSpan = span; curSpan = span; }, snapCam: () => { const p = race.player; camLead.set(0, 0); camTarget.set(p.x, 0, -p.y); }, info: () => ({ calls: renderer.info.render.calls, tris: renderer.info.render.triangles, objects: world.root.children.length }) };
+(window as unknown as { __game: unknown }).__game = { get race() { return race; }, T, R, PEN, DEF, PERSONAS, startRace, applyTrack, startSession, showTitle, showBoards, get mode() { return mode; }, get champ() { return champ; }, get ghost() { return ghost; }, get recorder() { return recorder; }, get pbMs() { return pbMs; }, get screen() { return screen; }, advance: (sec: number) => { for (let t = 0; t < sec && (screen === 'race' || screen === 'results'); t += 1 / 60) tick(1 / 60); }, setView: (m: 'follow' | 'full') => { camMode = m; }, zoom: (span: number) => { camMode = 'follow'; followSpan = span; curSpan = span; }, snapCam: () => { const p = race.player; camLead.set(0, 0); camTarget.set(p.x, 0, -p.y); }, info: () => ({ calls: renderer.info.render.calls, tris: renderer.info.render.triangles, objects: world.root.children.length }) };

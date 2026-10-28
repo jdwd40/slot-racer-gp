@@ -8,6 +8,8 @@ export interface World {
   root: THREE.Group;
   startLights: THREE.MeshStandardMaterial[];
   bayGlow: THREE.MeshBasicMaterial[];
+  /** stop-and-go penalty box highlight */
+  penGlow: THREE.MeshBasicMaterial;
   crowd: THREE.InstancedMesh[];
   /** materials of everything that sits on bridge decks; faded while the player drives underneath */
   bridgeMats: THREE.Material[];
@@ -311,6 +313,21 @@ export function buildWorld(): World {
   for (let s = T.PIT_IN0 - 6; s < T.PIT_IN0; s += 1.5) {
     root.add(mesh(ribbon(s, s + 0.7, () => -T.LANE_HALF - T.TRACK_EDGE + 0.12, () => -T.LANE_HALF - T.TRACK_EDGE + 0.04, Y0 + 0.0035, 0.35), cyan));
   }
+  // stop-and-go penalty box: hatched yellow/black stretch of pit lane with a STOP board
+  const penGlow = new THREE.MeshBasicMaterial({ color: 0xff4444, transparent: true, opacity: 0, side, depthWrite: false });
+  {
+    const hatch = canvasTex(128, 32, (g) => { g.fillStyle = '#e8c21a'; g.fillRect(0, 0, 128, 32); g.fillStyle = '#17181c'; for (let x = -32; x < 128; x += 32) { g.beginPath(); g.moveTo(x, 32); g.lineTo(x + 16, 32); g.lineTo(x + 48, 0); g.lineTo(x + 32, 0); g.closePath(); g.fill(); } });
+    hatch.wrapS = THREE.RepeatWrapping; hatch.repeat.set(3, 1);
+    const hm = std(0xffffff, 0.6, 0, { map: hatch, side });
+    for (const e of [-1, 1]) root.add(mesh(ribbon(T.PEN_S - T.PEN_HALF, T.PEN_S + T.PEN_HALF, () => T.PIT_D + e * 0.62 - 0.08, () => T.PIT_D + e * 0.62 + 0.08, Y0 + 0.0035, 0.1), hm));
+    for (const e of [-1, 1]) root.add(mesh(ribbon(T.PEN_S + e * T.PEN_HALF - 0.08, T.PEN_S + e * T.PEN_HALF + 0.08, () => T.PIT_D - 0.62, () => T.PIT_D + 0.62, Y0 + 0.0035, 0.1), hm));
+    root.add(mesh(ribbon(T.PEN_S - T.PEN_HALF + 0.1, T.PEN_S + T.PEN_HALF - 0.1, () => T.PIT_D - 0.54, () => T.PIT_D + 0.54, Y0 + 0.0055, 0.3), penGlow, noShadow));
+    const sb = groupAt(T.PEN_S, T.PIT_D - 1.05);
+    const sign = mesh(new THREE.BoxGeometry(0.5, 0.26, 0.03), std(0xffffff, 0.5, 0, { map: textTex(128, 64, '#d62828', '#fff', 'STOP', 'bold 40px Arial') }), castRecv);
+    sign.position.y = 0.7; sb.add(sign);
+    const pole = mesh(new THREE.CylinderGeometry(0.015, 0.015, 0.6, 5), postMat); pole.position.y = 0.3; sb.add(pole);
+    root.add(sb);
+  }
   // service bays
   const bayGlow: THREE.MeshBasicMaterial[] = [];
   for (let j = 0; j < T.BAYS.length; j++) {
@@ -545,7 +562,7 @@ export function buildWorld(): World {
   buildScenery(root, { theme, B, nearTrack, isBlocked, blocked, L });
   mergeStatic(root);
 
-  return { root, startLights, bayGlow, crowd, bridgeMats };
+  return { root, startLights, bayGlow, penGlow, crowd, bridgeMats };
 }
 
 /** Free GPU resources of a world built by buildWorld (geometries, materials, textures). */

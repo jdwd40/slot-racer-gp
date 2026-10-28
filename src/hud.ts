@@ -1,6 +1,9 @@
 import * as T from './track';
 import { Race, LAPS, LOW_FUEL, Car } from './race';
 import { t } from './i18n';
+import { fmtMs } from './records';
+
+export interface HudExtra { mode: 'race' | 'practice' | 'champ'; pbMs: number; round: string; }
 
 export function fmt(sec: number): string {
   if (!isFinite(sec) || sec <= 0) return '–:––.–';
@@ -26,17 +29,19 @@ export class Hud {
       <div class="panel tl">
         <div class="big"><span class="lbl" data-t="hud.pos"></span><span id="h-pos">1/4</span></div>
         <div class="big"><span class="lbl" data-t="hud.lap"></span><span id="h-lap">1/${LAPS}</span></div>
+        <div id="h-round" class="round"></div>
         <div id="h-stand" class="stand"></div>
       </div>
       <div class="panel tc">
         <div><span class="lbl" data-t="hud.time"></span><span id="h-time" class="mono"></span></div>
         <div><span class="lbl" data-t="hud.last"></span><span id="h-last" class="mono"></span></div>
-        <div><span class="lbl" data-t="hud.best"></span><span id="h-best" class="mono best"></span></div>
+        <div><span class="lbl" id="h-bestlbl" data-t="hud.best"></span><span id="h-best" class="mono best"></span></div>
       </div>
       <div class="tr">
         <button id="b-view" class="btn" title="C"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 5V1h4M11 1h4v4M15 11v4h-4M5 15H1v-4"/></svg> <span data-t="hud.view"></span></button>
         <button id="b-zout" class="btn sq" title="-">−</button>
         <button id="b-zin" class="btn sq" title="+">+</button>
+        <button id="b-ghost" class="btn sq" title="G">👻</button>
         <button id="b-snd" class="btn sq" title="M">🔊</button>
         <button id="b-pause" class="btn sq" title="Esc"><svg width="14" height="14" viewBox="0 0 14 14" fill="currentColor"><rect x="2" y="1" width="3.5" height="12" rx="1"/><rect x="8.5" y="1" width="3.5" height="12" rx="1"/></svg></button>
       </div>
@@ -95,18 +100,35 @@ export class Hud {
     const e = this.el['h-go']; e.textContent = text; e.classList.remove('show'); void e.offsetWidth; e.classList.add('show');
   }
 
-  update(race: Race, dt: number, time: number): void {
+  update(race: Race, dt: number, time: number, x: HudExtra = { mode: 'race', pbMs: 0, round: '' }): void {
     const p = race.player;
     const order = race.order();
     const pos = order.indexOf(p) + 1;
-    this.set('h-pos', `${pos}/${race.cars.length}`);
-    this.set('h-lap', `${Math.min(LAPS, Math.max(1, p.lapsDone + 1))}/${LAPS}`);
-    const stand = order.map((c, i) => `<div class="${c.isPlayer ? 'me' : ''}"><b>${i + 1}</b><i style="background:${hex(c.color)}"></i>${c.isPlayer ? t('hud.you') : c.name}${c.mode === 'service' || c.mode === 'bayIn' ? ' ⛽' : ''}${c.finished ? ' 🏁' : ''}</div>`).join('');
+    const practice = x.mode === 'practice';
+    this.el['b-ghost'].style.display = practice ? '' : 'none';
+    this.set('h-round', x.round ? `${t('hud.round')} ${x.round}` : '');
+    this.set('h-pos', practice ? '–' : `${pos}/${race.cars.length}`);
+    this.set('h-lap', practice ? `${Math.max(1, p.lapsDone + 1)}` : `${Math.min(LAPS, Math.max(1, p.lapsDone + 1))}/${LAPS}`);
+    if (practice) {
+      // live lap time, previous lap and the stored personal best (millisecond precision)
+      const live = p.crossed >= 1 && race.phase === 'racing' ? (race.raceTime - p.lapStartT) * 1000 : 0;
+      this.set('h-time', live > 0 ? fmtMs(live) : '0:00.000');
+      this.set('h-last', p.lapsDone > 0 ? fmtMs(p.lastLap * 1000) : fmtMs(0));
+      this.set('h-best', fmtMs(x.pbMs));
+      this.set('h-bestlbl', t('hud.pb'));
+      this.el['h-stand'].style.display = 'none';
+    } else {
+      this.set('h-bestlbl', t('hud.best'));
+      this.el['h-stand'].style.display = '';
+    }
+    const stand = order.map((c, i) => `<div class="${c.isPlayer ? 'me' : ''}"><b>${i + 1}</b><i style="background:${hex(c.color)}"></i>${c.isPlayer ? t('hud.you') : c.name}${flags(c)}${c.mode === 'service' || c.mode === 'bayIn' ? ' ⛽' : ''}${c.finished ? ' 🏁' : ''}</div>`).join('');
     this.set('h-stand', stand, true);
-    const cur = race.phase === 'countdown' ? 0 : p.finished ? p.finishTime : race.raceTime;
-    this.set('h-time', fmt(cur).replace('–:––.–', '0:00.0'));
-    this.set('h-last', fmt(p.lastLap));
-    this.set('h-best', fmt(p.bestLap));
+    if (!practice) {
+      const cur = race.phase === 'countdown' ? 0 : p.finished ? p.finishTime : race.raceTime;
+      this.set('h-time', fmt(cur).replace('–:––.–', '0:00.0'));
+      this.set('h-last', fmt(p.lastLap));
+      this.set('h-best', fmt(p.bestLap));
+    }
     (this.el['h-thr'] as HTMLElement).style.width = `${(p.throttle * 100).toFixed(0)}%`;
     const fe = this.el['h-fuel'] as HTMLElement;
     fe.style.width = `${(p.fuel * 100).toFixed(1)}%`;
@@ -117,6 +139,9 @@ export class Hud {
     // chips
     const chips: string[] = [];
     if (low && !p.finished) chips.push(`<span class="chip red blink">⚠ ${t('hud.lowFuel')}</span>`);
+    if (practice && p.crossed >= 1 && !p.lapValid) chips.push(`<span class="chip org">✕ ${t('hud.lapInvalid')}</span>`);
+    if (p.sgOwed > 0) chips.push(`<span class="chip red blink">■ ${t('hud.sgChip')}</span>`);
+    if (p.timePen > 0) chips.push(`<span class="chip red">⏱ ${t('hud.timePen', { n: p.timePen })}</span>`);
     if (p.laneReq) chips.push(`<span class="chip yel">⇄ ${t('hud.laneArmed')}</span>`);
     if (p.pitReq) chips.push(`<span class="chip cyan">P ${t('hud.pitArmed')}</span>`);
     if (p.squeezeHold) chips.push(`<span class="chip org">▼ ${t('hud.yield')}</span>`);
@@ -125,7 +150,15 @@ export class Hud {
 
     // status line
     let st = '';
-    if (p.mode === 'service') {
+    if (p.sgServing) {
+      st = `<b class="red">${t('hud.sgServing', { n: Math.max(0, p.sgOwed - p.sgServed).toFixed(1) })}</b>`;
+    } else if (p.sgOwed > 0 && !p.finished) {
+      if (p.mode === 'pitlane') st = `<b class="red">${t('hud.sgBox')}</b>`;
+      else {
+        const detail = p.sgChances <= 1 ? t('hud.sgDetail1', { n: Math.round(p.sgOwed) }) : t('hud.sgDetail', { n: Math.round(p.sgOwed), k: p.sgChances });
+        st = `<b class="red">${t('hud.sgOwed')}</b> · ${detail}${p.sgSkipNext ? ` · <small>${t('hud.sgSkip')}</small>` : ''}`;
+      }
+    } else if (p.mode === 'service') {
       st = `<b>${t('hud.refuel', { n: Math.round(p.fuel * 100) })}</b>`;
       if (p.penalty > 0) st += ` · <span class="red">${t('hud.penalty', { n: Math.ceil(p.penalty) })}</span>`;
       else if (p.waitingClear) st += ` · ${t('hud.waitClear')}`;
@@ -207,3 +240,13 @@ export class Hud {
 }
 
 export function carLabel(c: Car): string { return c.isPlayer ? t('hud.you') : c.name; }
+
+/** warning flags, outstanding stop-and-go and time penalty markers shown beside a driver's name */
+export function flags(c: Car): string {
+  let h = '';
+  const w = Math.min(2, c.offences);
+  if (w > 0) h += `<span class="flag ${w === 2 ? 'final' : ''}" title="${w === 2 ? t('pen.flashFinal') : ''}">${'⚑'.repeat(w)}</span>`;
+  if (c.sgOwed > 0) h += `<span class="flag sg">SG</span>`;
+  if (c.timePen > 0) h += `<span class="flag tp">+${c.timePen}s</span>`;
+  return h;
+}
