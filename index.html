@@ -8,20 +8,6 @@
 </head>
 <body>
 <div id="app"></div>
-<script data-tesana-bootstrap type="application/json" id="tesana-bootstrap-data">{"gameId": "ea3fe1a9-e4a5-46c1-9d60-267ddc1145ea", "endpoint": "https://d3cbjx3gy93tul.cloudfront.net"}</script>
-<script data-tesana-bootstrap>
-  // Set the bootstrap BEFORE the SDK loads: its init() reads this
-  // synchronously. Reversing these two tags silently forces the SDK
-  // into its offline path.
-  (function () {
-    try {
-      var d = document.getElementById('tesana-bootstrap-data');
-      var cfg = d ? JSON.parse(d.textContent || '{}') : {};
-      window.__TESANA__ = Object.assign({}, window.__TESANA__ || {}, cfg);
-    } catch (e) { /* malformed bootstrap: the SDK's own offline path takes over */ }
-  })();
-</script>
-<script data-tesana-bootstrap src="https://unpkg.com/@tesana/sdk@1.2.0/dist/tesana.iife.js"></script>
 <script type="module" src="/src/main.ts"></script>
 </body>
 </html>

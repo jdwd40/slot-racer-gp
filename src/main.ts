@@ -7,19 +7,15 @@ import { Y0 } from './gfx';
 import { makeCar, CarVisual } from './carModel';
 import { Hud, fmt, carLabel, flags } from './hud';
 import { Sfx } from './audio';
-import { t, onLangChange } from './i18n';
+import { t } from './i18n';
 import * as R from './records';
 import { GhostRecorder, GhostPlayer } from './ghost';
 
-interface TesanaLike { gameplay: { levelStart: (o: object) => boolean; death: (o: object) => boolean; levelComplete: (o: object) => boolean; }; track: (n: string, o: object) => boolean; }
-const tesana = (): TesanaLike | undefined => (window as unknown as { Tesana?: TesanaLike }).Tesana;
 const TRACK_KEY = 'srgp.track';
 function savedTrack(): string {
   try { return localStorage.getItem(TRACK_KEY) ?? T.TRACKS[0].id; } catch { return T.TRACKS[0].id; }
 }
 T.setTrack(savedTrack());
-const levelId = (): string => T.DEF.id;
-const levelIndex = (): number => T.TRACKS.indexOf(T.DEF);
 
 // ------------------------------------------------------------ renderer / scene
 const app = document.getElementById('app')!;
@@ -268,7 +264,6 @@ function showResults(): void {
   </div>`;
   overlay.querySelector('#o-again')!.addEventListener('click', restartSession);
   overlay.querySelector('#o-menu')!.addEventListener('click', toMenu);
-  tesana()?.track('race_finished', { position: pos, value: Math.round(race.player.finishTime * 10) / 10, track: levelId() });
 }
 
 // ---- championship
@@ -365,7 +360,6 @@ function startSession(m: Mode): void {
     ghost.setData(g); pbMs = g ? g.ms : 0;
   } else { ghost.setData(null); pbMs = 0; }
   resume();
-  tesana()?.gameplay.levelStart({ levelId: levelId(), levelIndex: levelIndex(), mode });
   camLead.set(0, 0);
   const p = race.player;
   camTarget.set(p.x, 0, -p.y);
@@ -397,11 +391,6 @@ function onPlayerCross(): void {
   recorder.start(p);
   if (ghost.data) ghost.launch(p.lapStartT);
 }
-
-onLangChange(() => {
-  hud.relabel();
-  if (screen === 'title') showTitle(); else if (screen === 'pause') showPause(); else if (screen === 'results') showResults(); else if (screen === 'boards') showBoards(); else if (screen === 'champ') showChamp(null);
-});
 
 // ------------------------------------------------------------ input
 const keys = new Set<string>();
@@ -513,12 +502,8 @@ function handle(e: RaceEvent): void {
     case 'light': if (e.n > 0) sfx.light(); break;
     case 'go': sfx.go(); hud.goFlash(t('msg.go')); break;
     case 'bump': if (e.car.isPlayer || dist2(e.car) < 400) sfx.bump(e.power); break;
-    case 'deslot':
-      if (e.car.isPlayer || dist2(e.car) < 600) sfx.crash();
-      if (e.car.isPlayer) tesana()?.gameplay.death({ levelId: levelId(), x: e.car.x, y: e.car.y, name: 'deslot' });
-      break;
+    case 'deslot': if (e.car.isPlayer || dist2(e.car) < 600) sfx.crash(); break;
     case 'switch': if (e.car.isPlayer || dist2(e.car) < 200) sfx.click(); break;
-    case 'tow': if (e.car.isPlayer) tesana()?.gameplay.death({ levelId: levelId(), x: e.car.x, y: e.car.y, name: 'out_of_fuel' }); break;
     case 'offence': {
       if (!e.car.isPlayer) { if (e.stop) hud.toast(t('pen.aiStop', { name: e.car.name }), 'info'); break; }
       const reason = t(e.cause === 'cut' ? 'pen.reasonCut' : 'pen.reasonRear', { name: carLabel(e.other) });
@@ -540,7 +525,7 @@ function handle(e: RaceEvent): void {
       if (e.best && p.lapsDone > 1 && !p.finished) hud.toast(t('msg.bestLap', { time: fmt(e.time) }), 'good');
       break;
     case 'finish':
-      if (e.car === p) { sfx.fanfare(); hud.goFlash(`P${e.pos}`); tesana()?.gameplay.levelComplete({ levelId: levelId() }); }
+      if (e.car === p) { sfx.fanfare(); hud.goFlash(`P${e.pos}`); }
       break;
   }
 }

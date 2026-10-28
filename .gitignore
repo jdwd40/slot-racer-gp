@@ -20,3 +20,11 @@ desktop-export/
 dist/
 public/decoders/
 *.zip
+
+# Tesana export / session-state files (the game has no runtime dependency on them)
+.engine_turns.json
+.storefront_kit_status.json
+.storefront_kit.log
+.tesana_storage_state.json
+assets/ui/.storefront_pass.json
+.tesana/
