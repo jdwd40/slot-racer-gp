@@ -4,9 +4,12 @@ export const LAPS = 13;
 export const ACC = 30, VMAX = 26, COAST = 9, BRAKE = 30, DRAG = 0.006;
 export const AI_GRIP = 36;   // cornering speeds the AI aims for
 export const GRIP = 52;      // real grip of the slot (well above the AI's target, so cars stick)
-export const FUEL_RATE = 1 / (T.L * 7.4); // fuel per unit distance at nominal throttle
+/** fuel per unit distance at nominal throttle (scaled to the active lap length) */
+export function fuelRate(): number { return 1 / (T.L * 7.4); }
 export const REFUEL_RATE = 0.2;           // tank per second
 export const LOW_FUEL = 0.2;
+/** burn multiplier the AI plans with: near full throttle (0.5 + 0.7*thr) plus a safety margin */
+const PLAN_BURN = 1.25;
 
 export type Mode = 'grid' | 'race' | 'pitlane' | 'bayIn' | 'service' | 'bayOut' | 'off' | 'tow';
 
@@ -28,8 +31,8 @@ export interface Car {
   skill: number; skillNow: number; mistakeT: number; pitPlan: boolean; refuelTarget: number; changeCooldown: number;
   lowFuelWarned: boolean;
   serviced: boolean;
-  // render pose (2D)
-  x: number; y: number; h: number; z: number;
+  // render pose (x, y on the mat; z height; roll/pitch from banking and ramps)
+  x: number; y: number; h: number; z: number; roll: number; pitch: number;
   bumpT: number;
 }
 
@@ -87,7 +90,7 @@ export class Race {
         squeezeHold: false, yielding: false, waitingClear: false,
         skill: skills[g.di], skillNow: skills[g.di], mistakeT: rnd(18, 40), pitPlan: false, refuelTarget: 1, changeCooldown: 0,
         lowFuelWarned: false, serviced: false,
-        x: 0, y: 0, h: 0, z: 0, bumpT: 0,
+        x: 0, y: 0, h: 0, z: 0, roll: 0, pitch: 0, bumpT: 0,
       };
       this.cars.push(c);
     }
@@ -220,7 +223,8 @@ export class Race {
     const crossed = (x: number): boolean => { const g = T.gapS(s0, x); return ds > 0 && g >= 0 && g < ds; };
 
     // fuel
-    c.fuel = Math.max(0, c.fuel - c.v * dt * FUEL_RATE * (0.5 + 0.7 * thr));
+    // cars on their cool-down lap after the flag no longer burn fuel (they would otherwise run dry and get towed)
+    if (!c.finished) c.fuel = Math.max(0, c.fuel - c.v * dt * fuelRate() * (0.5 + 0.7 * thr));
     if (c.isPlayer && !c.lowFuelWarned && c.fuel < LOW_FUEL && !c.finished) { c.lowFuelWarned = true; this.pmsg(c, 'msg.lowFuel', 'bad'); }
     if (c.fuel > LOW_FUEL + 0.05) c.lowFuelWarned = false;
 
@@ -265,6 +269,11 @@ export class Race {
       else if (!c.isPlayer && c.pitPlan) {
         const bs = T.BAYS[c.bay];
         if (Math.abs(T.gapS(s, bs)) < 0.45 && c.v < 1.5 && this.bayFree(c.bay, c)) this.enterBay(c, c.bay);
+        else if (T.gapS(s, bs) < -0.45 || !this.bayFree(c.bay, c)) {
+          // own bay passed or occupied: take the next free one ahead, else queue at the last bay
+          const j = this.pickBay(c, s);
+          if (j >= 0) c.bay = j;
+        }
       }
     }
 
@@ -276,7 +285,8 @@ export class Race {
     if (c.mode === 'race') {
       const k2 = T.curvature(s);
       const kl = Math.abs(k2 / (1 - k2 * c.d));
-      const r = (c.v * c.v * kl) / GRIP;
+      // banked sections (new circuits only) give a modest, predictable grip bonus to everyone
+      const r = (c.v * c.v * kl) / (GRIP * T.gripScale(s));
       c.latRatio = r;
       if (r > 1) c.slip += ((r - 1) * 3 + 0.2) * dt; else c.slip = Math.max(0, c.slip - 2.5 * dt);
       const target = Math.max(0, Math.min(1, (r - 0.8) / 0.2)) * 0.6 + c.slip * 0.8;
@@ -357,9 +367,24 @@ export class Race {
     }
   }
 
+  /** first free bay still ahead of s in the pit lane; -1 if none */
+  pickBay(c: Car, s: number): number {
+    for (let j = 0; j < T.BAYS.length; j++) {
+      if (T.gapS(s, T.BAYS[j]) > -0.45 && this.bayFree(j, c)) return j;
+    }
+    return -1;
+  }
+
+  /** fuel the AI needs to reach the flag from here, planned at a realistic burn rate */
+  fuelToFinish(c: Car, s: number): number {
+    const lapsLeft = LAPS - c.lapsDone;
+    return (lapsLeft * T.L - T.ahead(T.FINISH_S, s)) * fuelRate() * PLAN_BURN;
+  }
+
   enterBay(c: Car, j: number): void {
     c.mode = 'bayIn'; c.bay = j; c.bayT = 0; c.v = 0; c.serviceT = 0; c.fuelAtBay = c.fuel;
     c.pitStops++;
+    if (!c.isPlayer) c.refuelTarget = Math.min(1, Math.max(0.3, this.fuelToFinish(c, this.s(c)) + rnd(0.06, 0.2)));
   }
 
   stepBay(c: Car, dt: number, input: Input): void {
@@ -402,9 +427,10 @@ export class Race {
     const outx = Math.sin(p.h) * Math.sign(k || 1), outy = -Math.cos(p.h) * Math.sign(k || 1);
     c.off = {
       x: p.x, y: p.y,
+      z: T.surfZ(s, c.d), vz: 2.5 + c.v * 0.12,
       vx: Math.cos(hd) * c.v * 0.5 + outx * c.v * 0.25,
       vy: Math.sin(hd) * c.v * 0.5 + outy * c.v * 0.25,
-      yaw: hd, spin: -(Math.sign(k) || 1) * (5 + c.v * 0.35), t: 0, z: 0, vz: 2.5 + c.v * 0.12,
+      yaw: hd, spin: -(Math.sign(k) || 1) * (5 + c.v * 0.35), t: 0,
       u0: c.u, lane: c.change ? c.change.to : Math.sign(c.laneSide) || 1,
     };
     c.mode = 'off'; c.slip = 0; c.laneReq = false; c.change = null; c.throttle = 0;
@@ -463,7 +489,8 @@ export class Race {
       target = T.PIT_SPEED;
       if (c.pitPlan) {
         const a = T.gapS(s, T.BAYS[c.bay]);
-        if (a > -0.3) target = Math.min(target, Math.sqrt(2 * 16 * Math.max(0, a)) + 0.4);
+        const free = this.bayFree(c.bay, c);
+        if (a > -0.3) target = Math.min(target, Math.sqrt(2 * 16 * Math.max(0, a - (free ? 0 : 0.8))) + (free ? 0.4 : 0));
       }
     } else {
       const look = s + c.v * 0.16;
@@ -486,14 +513,13 @@ export class Race {
 
     // strategy: fuel + lane choice
     if (!c.finished && c.mode === 'race') {
-      const lapsLeft = LAPS - c.lapsDone;
-      const lapFuel = T.L * FUEL_RATE * 1.0;
-      const toBay = T.ahead(s, T.BAYS[c.bay]);
-      const needFinish = (lapsLeft * T.L - T.ahead(T.FINISH_S, s)) * FUEL_RATE * 1.02;
-      if (!c.pitPlan && c.fuel < needFinish && c.fuel < lapFuel * 1.6) {
+      const lapFuel = T.L * fuelRate() * PLAN_BURN;
+      const needFinish = this.fuelToFinish(c, s);
+      // plan the stop with two laps of fuel in hand (time to find a switch and reach the pit),
+      // and in any case before the last lap's worth is gone
+      if (!c.pitPlan && c.fuel < needFinish && (c.fuel < lapFuel * 2.2 || c.fuel < lapFuel * 1.2 + 0.02)) {
         c.pitPlan = true;
-        const left = needFinish - toBay * FUEL_RATE;
-        c.refuelTarget = Math.min(1, Math.max(0.3, left + rnd(0.05, 0.25)));
+        c.refuelTarget = Math.min(1, Math.max(0.3, needFinish + rnd(0.06, 0.2)));
       }
       c.pitReq = c.pitPlan;
       if (!c.change && !c.laneReq && c.changeCooldown <= 0) {
@@ -541,12 +567,13 @@ export class Race {
   }
 
   pose(c: Car): void {
-    if (c.mode === 'off' && c.off) { c.x = c.off.x; c.y = c.off.y; c.h = c.off.yaw; c.z = c.off.z; return; }
+    if (c.mode === 'off' && c.off) { c.x = c.off.x; c.y = c.off.y; c.h = c.off.yaw; c.z = c.off.z; c.roll *= 0.9; c.pitch *= 0.9; return; }
     const s = this.s(c);
-    const p = T.point(s, c.d);
+    const p = T.point3(s, c.d);
     const wob = c.wobble > 0.02 ? Math.sin(this.t * 38 + c.idx) * c.wobble * 0.2 : 0;
     const jig = c.bumpT > 0 ? Math.sin(this.t * 70) * c.bumpT * 0.3 : 0;
-    c.x = p.x; c.y = p.y; c.h = p.h + c.yawOff + wob + jig; c.z = 0;
+    c.x = p.x; c.y = p.y; c.h = p.h + c.yawOff + wob + jig; c.z = p.z;
+    c.roll = T.rollAt(s); c.pitch = Math.atan(T.slopeZ(s));
   }
 
   results(): { car: Car; time: number; est: boolean }[] {

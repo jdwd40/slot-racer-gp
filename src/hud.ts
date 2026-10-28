@@ -59,12 +59,18 @@ export class Hud {
     this.mini.width = this.mW * dpr; this.mini.height = this.mH * dpr;
     this.mini.style.width = this.mW + 'px'; this.mini.style.height = this.mH + 'px';
     this.mctx.scale(dpr, dpr);
+    this.rebuildMini();
+    this.relabel();
+  }
+
+  /** Recompute the minimap projection for the active track. */
+  rebuildMini(): void {
     const B = T.BOUNDS, pad = 14;
     this.mScale = Math.min((this.mW - pad * 2) / B.w, (this.mH - pad * 2) / B.h);
     this.mOx = this.mW / 2 - B.cx * this.mScale; this.mOy = this.mH / 2 + B.cy * this.mScale;
+    this.miniPts = []; this.miniPit = [];
     for (let s = 0; s <= T.L; s += 0.8) this.miniPts.push(this.mp(T.center(s)));
     for (let s = T.PIT_IN0; s <= T.PIT_OUT1; s += 0.5) this.miniPit.push(this.mp(T.point(s, T.pitD(s))));
-    this.relabel();
   }
 
   mp(p: { x: number; y: number }): { x: number; y: number } { return { x: this.mOx + p.x * this.mScale, y: this.mOy - p.y * this.mScale }; }
@@ -153,6 +159,12 @@ export class Hud {
     line(this.miniPts, 7, '#5b6270', true);
     line(this.miniPts, 4, '#2a2e36', true);
     line(this.miniPit, 2.5, '#6b7280');
+    // banked sweepers
+    for (const b of T.BANKS) {
+      const a: { x: number; y: number }[] = [];
+      for (let s = b.s0; s <= b.s1; s += 0.8) a.push(this.mp(T.center(s)));
+      line(a, 4, '#4a3a2a');
+    }
     // squeeze zone
     const sq: { x: number; y: number }[] = [];
     for (let s = T.SQ_Q1; s <= T.SQ_Q2; s += 0.8) sq.push(this.mp(T.center(s)));
@@ -162,6 +174,12 @@ export class Hud {
       const a: { x: number; y: number }[] = [];
       for (let s = sw.s0; s <= sw.s1; s += 0.8) a.push(this.mp(T.center(s)));
       line(a, 4, '#e5e7eb');
+    }
+    // bridges: raised stretches drawn over everything else
+    for (const r of T.RAISED) {
+      const a: { x: number; y: number }[] = [];
+      for (let s = r.s0; s <= r.s1; s += 0.8) a.push(this.mp(T.center(s)));
+      line(a, 9, '#0b0d10'); line(a, 5, '#8b94a3');
     }
     // finish line
     const f1 = this.mp(T.point(T.FINISH_S, -1.4)), f2 = this.mp(T.point(T.FINISH_S, 1.4));

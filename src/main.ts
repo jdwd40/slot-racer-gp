@@ -2,7 +2,8 @@ import * as THREE from 'three';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 import * as T from './track';
 import { Race, LAPS, RaceEvent } from './race';
-import { buildWorld, arrowGeometry } from './world';
+import { buildWorld, disposeWorld, arrowGeometry, World } from './world';
+import { Y0 } from './gfx';
 import { makeCar, CarVisual } from './carModel';
 import { Hud, fmt, carLabel } from './hud';
 import { Sfx } from './audio';
@@ -10,7 +11,13 @@ import { t, onLangChange } from './i18n';
 
 interface TesanaLike { gameplay: { levelStart: (o: object) => boolean; death: (o: object) => boolean; levelComplete: (o: object) => boolean; }; track: (n: string, o: object) => boolean; }
 const tesana = (): TesanaLike | undefined => (window as unknown as { Tesana?: TesanaLike }).Tesana;
-const LEVEL_ID = 'circuit-1';
+const TRACK_KEY = 'srgp.track';
+function savedTrack(): string {
+  try { return localStorage.getItem(TRACK_KEY) ?? T.TRACKS[0].id; } catch { return T.TRACKS[0].id; }
+}
+T.setTrack(savedTrack());
+const levelId = (): string => T.DEF.id;
+const levelIndex = (): number => T.TRACKS.indexOf(T.DEF);
 
 // ------------------------------------------------------------ renderer / scene
 const app = document.getElementById('app')!;
@@ -39,7 +46,7 @@ sun.shadow.bias = -0.0004;
 sun.shadow.normalBias = 0.02;
 scene.add(sun, sun.target);
 
-const world = buildWorld();
+let world: World = buildWorld();
 scene.add(world.root);
 
 // ------------------------------------------------------------ cars
@@ -56,8 +63,19 @@ const laneArrow = new THREE.Mesh(new THREE.BufferGeometry(), arrowMat);
 laneArrow.visible = false; laneArrow.renderOrder = 5; scene.add(laneArrow);
 let laneArrowKey = '';
 const pitArrowMat = new THREE.MeshBasicMaterial({ color: 0x22d3ee, transparent: true, opacity: 0.85, depthWrite: false, side: THREE.DoubleSide });
-const pitArrow = new THREE.Mesh(arrowGeometry(T.PIT_IN0 - 3.5, T.PIT_IN1 + 1.5, (s) => (s < T.PIT_IN0 ? -T.LANE_HALF : T.pitD(s)), 0.2), pitArrowMat);
+const pitArrowGeo = (): THREE.BufferGeometry => arrowGeometry(T.PIT_IN0 - 3.5, T.PIT_IN1 + 1.5, (s) => (s < T.PIT_IN0 ? -T.LANE_HALF : T.pitD(s)), 0.2);
+const pitArrow = new THREE.Mesh(pitArrowGeo(), pitArrowMat);
 pitArrow.visible = false; pitArrow.renderOrder = 5; scene.add(pitArrow);
+
+// x-ray marker: a ring drawn through the deck while the player is beneath a bridge
+const underRing = new THREE.Mesh(new THREE.RingGeometry(0.9, 1.1, 36), new THREE.MeshBasicMaterial({ color: 0xffe066, transparent: true, opacity: 0.8, depthTest: false, depthWrite: false }));
+underRing.rotation.x = -Math.PI / 2; underRing.renderOrder = 20; underRing.visible = false; scene.add(underRing);
+let bridgeFade = 1;
+/** true while the player's car is on the lower level of a crossing */
+function playerUnderBridge(): boolean {
+  const p = race.player;
+  return T.CROSSINGS.some((c) => p.z < c.zHi - 1 && (c.x - p.x) ** 2 + (c.y - p.y) ** 2 < 4.2 * 4.2);
+}
 
 // ------------------------------------------------------------ HUD / overlays
 const hud = new Hud(app);
@@ -83,16 +101,69 @@ function controlsHtml(): string {
   </div>`;
 }
 
+/** Small SVG map of a circuit for the track picker. */
+function trackSvg(def: T.TrackDef): string {
+  const lay = T.layout(def, 1);
+  const W = 150, H = 96, pad = 10;
+  const sc = Math.min((W - pad * 2) / lay.bounds.w, (H - pad * 2) / lay.bounds.h);
+  const px = (p: { x: number; y: number }): string => `${(W / 2 + (p.x - lay.bounds.cx) * sc).toFixed(1)},${(H / 2 - (p.y - lay.bounds.cy) * sc).toFixed(1)}`;
+  const d = lay.pts.map((p, i) => (i ? 'L' : 'M') + px(p)).join('') + 'Z';
+  // raised stretches (bridges) drawn on top so the crossing reads correctly
+  let bridges = '';
+  let run: string[] = [];
+  const flush = (): void => { if (run.length > 1) bridges += `<path d="M${run.join('L')}" fill="none" stroke="#1b1e24" stroke-width="9" stroke-linecap="round"/><path d="M${run.join('L')}" fill="none" stroke="#8b94a3" stroke-width="5" stroke-linecap="round"/>`; run = []; };
+  for (const p of lay.pts) { if (p.z > 0.05) run.push(px(p)); else flush(); }
+  flush();
+  const fin = px({ x: T.FINISH_S, y: 0 });
+  return `<svg viewBox="0 0 ${W} ${H}" width="${W}" height="${H}">
+    <path d="${d}" fill="none" stroke="#5b6270" stroke-width="7" stroke-linejoin="round"/>
+    <path d="${d}" fill="none" stroke="#2a2e36" stroke-width="4" stroke-linejoin="round"/>
+    ${bridges}
+    <circle cx="${fin.split(',')[0]}" cy="${fin.split(',')[1]}" r="3" fill="#fff"/>
+  </svg>`;
+}
+
+/** Switch the active circuit: rebuild the world, arrows, minimap and a fresh race. */
+function applyTrack(id: string): void {
+  if (T.DEF.id === id && world) return;
+  T.setTrack(id);
+  try { localStorage.setItem(TRACK_KEY, id); } catch { /* ignore */ }
+  disposeWorld(world);
+  world = buildWorld();
+  scene.add(world.root);
+  pitArrow.geometry.dispose();
+  pitArrow.geometry = pitArrowGeo();
+  laneArrow.visible = false; laneArrowKey = '';
+  hud.rebuildMini();
+  race = new Race();
+  camTarget.set(T.BOUNDS.cx, 0, -T.BOUNDS.cy - 2);
+  curSpan = fullSpan();
+}
+
 function showTitle(): void {
   screen = 'title';
+  camMode = 'full';
   overlay.className = 'overlay show';
+  const cards = T.TRACKS.map((d) => `<button class="track ${d.id === T.DEF.id ? 'sel' : ''}" data-id="${d.id}">
+      ${trackSvg(d)}
+      <b>${t(`track.${d.id}.name`)}</b>
+      <small>${t(`track.${d.id}.desc`)}</small>
+      <em>${t('title.len', { n: Math.round(T.layout(d, 4).L) })}</em>
+    </button>`).join('');
   overlay.innerHTML = `<div class="card title">
     <div class="logo">${t('title.name')}</div>
     <div class="tag">${t('title.tag')}</div>
     <p>${t('title.goal', { n: LAPS })}</p>
+    <div class="lbl2">${t('title.track')}</div>
+    <div class="tracks">${cards}</div>
     ${controlsHtml()}
     <button class="cta" id="o-start">${t('title.start')}</button>
   </div>`;
+  overlay.querySelectorAll<HTMLElement>('.track').forEach((b) => b.addEventListener('click', () => {
+    sfx.init();
+    applyTrack(b.dataset.id!);
+    overlay.querySelectorAll('.track').forEach((x) => x.classList.toggle('sel', x === b));
+  }));
   overlay.querySelector('#o-start')!.addEventListener('click', () => { sfx.init(); startRace(); });
 }
 
@@ -102,10 +173,11 @@ function showPause(): void {
   overlay.innerHTML = `<div class="card">
     <h2>${t('pause.title')}</h2>
     ${controlsHtml()}
-    <div class="row"><button class="cta" id="o-resume">${t('pause.resume')}</button><button class="cta alt" id="o-restart">${t('pause.restart')}</button></div>
+    <div class="row"><button class="cta" id="o-resume">${t('pause.resume')}</button><button class="cta alt" id="o-restart">${t('pause.restart')}</button><button class="cta alt" id="o-menu">${t('pause.menu')}</button></div>
   </div>`;
   overlay.querySelector('#o-resume')!.addEventListener('click', resume);
   overlay.querySelector('#o-restart')!.addEventListener('click', startRace);
+  overlay.querySelector('#o-menu')!.addEventListener('click', toMenu);
 }
 
 function resume(): void { screen = 'race'; overlay.className = 'overlay'; overlay.innerHTML = ''; }
@@ -123,10 +195,18 @@ function showResults(): void {
     <h2>${pos === 1 ? '🏆 ' + t('res.win') : t('res.title')}</h2>
     <div class="place">${t('res.youPlace', { n: pos })}</div>
     <table><thead><tr><th>#</th><th>${t('res.driver')}</th><th>${t('res.time')}</th><th>${t('res.best')}</th><th>${t('res.pits')}</th></tr></thead><tbody>${rows}</tbody></table>
-    <button class="cta" id="o-again">${t('res.again')} <small>(R)</small></button>
+    <div class="row"><button class="cta" id="o-again">${t('res.again')} <small>(R)</small></button><button class="cta alt" id="o-menu">${t('pause.menu')}</button></div>
   </div>`;
   overlay.querySelector('#o-again')!.addEventListener('click', startRace);
-  tesana()?.track('race_finished', { position: pos, value: Math.round(race.player.finishTime * 10) / 10 });
+  overlay.querySelector('#o-menu')!.addEventListener('click', toMenu);
+  tesana()?.track('race_finished', { position: pos, value: Math.round(race.player.finishTime * 10) / 10, track: levelId() });
+}
+
+/** Back to the title screen with a fresh grid on the current circuit. */
+function toMenu(): void {
+  race = new Race();
+  laneArrowKey = '';
+  showTitle();
 }
 
 function startRace(): void {
@@ -134,7 +214,7 @@ function startRace(): void {
   laneArrowKey = '';
   camMode = 'follow';
   resume();
-  tesana()?.gameplay.levelStart({ levelId: LEVEL_ID, levelIndex: 0 });
+  tesana()?.gameplay.levelStart({ levelId: levelId(), levelIndex: levelIndex() });
   camLead.set(0, 0);
   const p = race.player;
   camTarget.set(p.x, 0, -p.y);
@@ -153,7 +233,12 @@ window.addEventListener('keydown', (e) => {
   if (e.repeat) { keys.add(k); return; }
   keys.add(k);
   sfx.init();
-  if (screen === 'title') { if (k === 'Enter' || k === 'Space') startRace(); return; }
+  if (screen === 'title') {
+    if (k === 'Enter' || k === 'Space') startRace();
+    const n = ['Digit1', 'Digit2', 'Digit3', 'Digit4', 'Digit5'].indexOf(k);
+    if (n >= 0 && n < T.TRACKS.length) { applyTrack(T.TRACKS[n].id); showTitle(); }
+    return;
+  }
   if (k === 'KeyR') { startRace(); return; }
   if (k === 'KeyC') toggleView();
   if (k === 'Equal' || k === 'NumpadAdd') zoomBy(0.8);
@@ -186,7 +271,7 @@ let curSpan = 20;
 const TILT = THREE.MathUtils.degToRad(13);
 function fullSpan(): number {
   const aspect = window.innerWidth / window.innerHeight;
-  return Math.max(T.BOUNDS.h + 10, (T.BOUNDS.w + 12) / aspect);
+  return Math.max(T.BOUNDS.h + 11, (T.BOUNDS.w + 13) / aspect);
 }
 function toggleView(): void { camMode = camMode === 'follow' ? 'full' : 'follow'; }
 function zoomBy(f: number): void {
@@ -247,15 +332,15 @@ function handle(e: RaceEvent): void {
     case 'bump': if (e.car.isPlayer || dist2(e.car) < 400) sfx.bump(e.power); break;
     case 'deslot':
       if (e.car.isPlayer || dist2(e.car) < 600) sfx.crash();
-      if (e.car.isPlayer) tesana()?.gameplay.death({ levelId: LEVEL_ID, x: e.car.x, y: e.car.y, name: 'deslot' });
+      if (e.car.isPlayer) tesana()?.gameplay.death({ levelId: levelId(), x: e.car.x, y: e.car.y, name: 'deslot' });
       break;
     case 'switch': if (e.car.isPlayer || dist2(e.car) < 200) sfx.click(); break;
-    case 'tow': if (e.car.isPlayer) tesana()?.gameplay.death({ levelId: LEVEL_ID, x: e.car.x, y: e.car.y, name: 'out_of_fuel' }); break;
+    case 'tow': if (e.car.isPlayer) tesana()?.gameplay.death({ levelId: levelId(), x: e.car.x, y: e.car.y, name: 'out_of_fuel' }); break;
     case 'lap':
       if (e.car === p && e.best && p.lapsDone > 1 && !p.finished) hud.toast(t('msg.bestLap', { time: fmt(e.time) }), 'good');
       break;
     case 'finish':
-      if (e.car === p) { sfx.fanfare(); hud.goFlash(`P${e.pos}`); tesana()?.gameplay.levelComplete({ levelId: LEVEL_ID }); }
+      if (e.car === p) { sfx.fanfare(); hud.goFlash(`P${e.pos}`); tesana()?.gameplay.levelComplete({ levelId: levelId() }); }
       break;
   }
 }
@@ -266,7 +351,7 @@ function syncCars(dt: number, time: number): void {
   race.cars.forEach((c, i) => {
     const v = visuals[i];
     v.group.position.set(c.x, c.z, -c.y);
-    v.group.rotation.y = c.h;
+    v.group.rotation.set(c.roll, c.h, c.pitch, 'YXZ');
     // body roll from wobble / crash tumble
     if (c.mode === 'off' && c.off) {
       v.body.rotation.x = Math.sin(c.off.t * 9) * 0.25 * Math.max(0, 1 - c.off.t);
@@ -281,6 +366,17 @@ function syncCars(dt: number, time: number): void {
     v.ring.visible = c.isPlayer && (camMode === 'full' || curSpan > 34);
     if (v.ring.visible) { const sc = 1 + Math.sin(time * 5) * 0.12; v.ring.scale.setScalar(sc * Math.max(1, curSpan / 40)); }
   });
+  // bridge decks turn translucent while the player drives beneath them
+  const under = playerUnderBridge();
+  const target = under ? 0.28 : 1;
+  bridgeFade += (target - bridgeFade) * Math.min(1, dt * 8);
+  for (const m of world.bridgeMats) m.opacity = bridgeFade;
+  const p = race.player;
+  underRing.visible = bridgeFade < 0.97 && p.mode !== 'off';
+  if (underRing.visible) {
+    underRing.position.set(p.x, p.z + Y0 + 0.05, -p.y);
+    (underRing.material as THREE.MeshBasicMaterial).opacity = (1 - bridgeFade) * (0.6 + Math.sin(time * 6) * 0.25);
+  }
 }
 
 function syncArrows(time: number): void {
@@ -362,4 +458,4 @@ function frame(now: number): void {
 requestAnimationFrame(frame);
 
 // debug/test hooks
-(window as unknown as { __game: unknown }).__game = { get race() { return race; }, startRace, setView: (m: 'follow' | 'full') => { camMode = m; } };
+(window as unknown as { __game: unknown }).__game = { get race() { return race; }, T, startRace, applyTrack, setView: (m: 'follow' | 'full') => { camMode = m; }, zoom: (span: number) => { camMode = 'follow'; followSpan = span; curSpan = span; }, snapCam: () => { const p = race.player; camLead.set(0, 0); camTarget.set(p.x, 0, -p.y); }, info: () => ({ calls: renderer.info.render.calls, tris: renderer.info.render.triangles, objects: world.root.children.length }) };

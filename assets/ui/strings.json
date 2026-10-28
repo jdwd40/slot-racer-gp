@@ -64,6 +64,19 @@
     { "id": "res.pits", "text": "Stops" },
     { "id": "res.again", "text": "Race Again" },
     { "id": "res.est", "text": "running" },
-    { "id": "ui.sound", "text": "Sound" }
+    { "id": "ui.sound", "text": "Sound" },
+    { "id": "title.track", "text": "Choose a circuit" },
+    { "id": "title.len", "text": "{n} m per lap" },
+    { "id": "pause.menu", "text": "Change circuit" },
+    { "id": "track.circuit-1.name", "text": "Clubman Park" },
+    { "id": "track.circuit-1.desc", "text": "The classic: squeeze sweeper, tight hairpin and a flowing set of esses." },
+    { "id": "track.circuit-2.name", "text": "Harbour Loop" },
+    { "id": "track.circuit-2.desc", "text": "Fast and flowing: a wide lighthouse hairpin, a quay kink and a long seafront straight." },
+    { "id": "track.circuit-3.name", "text": "Alpine Twist" },
+    { "id": "track.circuit-3.desc", "text": "Technical: summit hairpin, sweeping esses and a stacked pair of tight lefts." },
+    { "id": "track.circuit-4.name", "text": "Workshop Crossing" },
+    { "id": "track.circuit-4.desc", "text": "Figure-of-eight on the workbench: over the bridge, under it a lap later, a chicane and a broad banked bend." },
+    { "id": "track.circuit-5.name", "text": "Highbank Raceway" },
+    { "id": "track.circuit-5.desc", "text": "Flat-out banked sweepers, a tight infield that punishes late braking and a flyover above the back straight." }
   ]
 }
