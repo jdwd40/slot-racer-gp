@@ -18,6 +18,9 @@ desktop-export/
 
 # Local
 dist/
+bundle/
+__pycache__/
+*.pyc
 public/decoders/
 *.zip
 

@@ -22,7 +22,7 @@ npm run typecheck  # tsc --noEmit over src/ and test/
 npm test           # vitest run: the regression suite, once, no watch mode
 ```
 
-The same three steps plus `npm run build` run in GitHub Actions (`.github/workflows/ci.yml`) on pull requests and pushes to `main`. The workflow only checks; it does not deploy.
+The same checks plus `npm run build` run in GitHub Actions (`.github/workflows/ci.yml`) on pull requests and pushes to `main`. Successful pushes to `main` then deploy that exact checked build artifact to the static VPS site; PRs never deploy. See [deployment and rollback](docs/deployment.md).
 
 The tests cover the simulation only (`src/race.ts`, `src/track.ts`, `src/records.ts`): collision penalties, lap counting, lane changes, leaderboards and championship scoring, and a bounded all-AI race on each circuit. Rendering, audio and input are not covered.
 

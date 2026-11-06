@@ -8,19 +8,24 @@ on:
 permissions:
   contents: read
 
+# Never cancel an in-flight main deployment. PR checks may supersede PR checks.
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   check:
     name: Type check, tests and production build
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    outputs:
+      artifact-id: ${{ steps.static.outputs.artifact-id }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version-file: .nvmrc
           cache: npm
@@ -36,8 +41,70 @@ jobs:
         # vitest run fails when no test files are found, so an empty suite cannot pass
         run: npm test
 
+      - name: Deployment tooling tests
+        run: python3 -m unittest discover -s deploy -p 'test_*.py' -v
+
       - name: Production build
         run: npm run build
 
-      - name: Build output summary
-        run: du -sh dist && find dist -type f | sort
+      - name: Package this checked build (no VPS rebuild)
+        env:
+          CHECKED_SHA: ${{ github.sha }}
+        run: python3 deploy/artifact.py pack dist bundle "$CHECKED_SHA"
+
+      - name: Retain immutable checked artifact
+        id: static
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: slotrush-${{ github.sha }}
+          path: bundle/
+          if-no-files-found: error
+          retention-days: 30
+          overwrite: false
+
+  deploy:
+    name: Deploy checked static artifact
+    needs: check
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+    concurrency:
+      group: slotrush-production
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Download only the artifact from the successful prerequisite job
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          artifact-ids: ${{ needs.check.outputs.artifact-id }}
+          merge-multiple: true
+          path: bundle
+
+      - name: Configure dedicated SSH identity and verified host key
+        env:
+          DEPLOY_KEY: ${{ secrets.SLOTRUSH_SSH_KEY }}
+          KNOWN_HOSTS: ${{ secrets.SLOTRUSH_KNOWN_HOSTS }}
+        run: |
+          umask 077
+          mkdir -p "$RUNNER_TEMP/slotrush-ssh"
+          printf '%s\n' "$DEPLOY_KEY" > "$RUNNER_TEMP/slotrush-ssh/key"
+          printf '%s\n' "$KNOWN_HOSTS" > "$RUNNER_TEMP/slotrush-ssh/known_hosts"
+          ssh-keygen -y -f "$RUNNER_TEMP/slotrush-ssh/key" >/dev/null
+          ssh-keygen -F '[213.165.91.221]:4020' -f "$RUNNER_TEMP/slotrush-ssh/known_hosts" >/dev/null
+
+      - name: Atomic deploy, verify all public bytes, rollback on verification failure
+        env:
+          SLOTRUSH_KEY_FILE: ${{ runner.temp }}/slotrush-ssh/key
+          SLOTRUSH_HOSTS_FILE: ${{ runner.temp }}/slotrush-ssh/known_hosts
+        run: bash deploy/run.sh bundle
+
+      - name: Remove ephemeral SSH files
+        if: always()
+        run: rm -rf -- "$RUNNER_TEMP/slotrush-ssh"
