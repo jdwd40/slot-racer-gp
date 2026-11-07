@@ -20,7 +20,7 @@ npm run preview    # serve dist/ locally
 ```bash
 npm run typecheck  # tsc --noEmit over src/ and test/
 npm test           # vitest run: the regression suite, once, no watch mode
-npm run check:browser  # bounded real-browser checks, about 10 minutes; not part of CI
+npm run check:browser  # bounded real-browser checks, about 11 minutes; not part of CI
 ```
 
 The same checks plus `npm run build` run in GitHub Actions (`.github/workflows/ci.yml`) on pull requests and pushes to `main`. Successful pushes to `main` then deploy that exact checked build artifact to the static VPS site; PRs never deploy. See [deployment and rollback](docs/deployment.md).
