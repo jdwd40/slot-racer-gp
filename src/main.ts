@@ -11,6 +11,7 @@ import { t } from './i18n';
 import * as R from './records';
 import { GhostRecorder, GhostPlayer } from './ghost';
 import { FixedStepper, STEP, MAX_GAP, Pose, blendPose } from './timing';
+import { PRESETS, PresetId, pixelRatioFor, savedPreset, savePreset } from './graphics';
 
 const TRACK_KEY = 'srgp.track';
 function savedTrack(): string {
@@ -30,7 +31,9 @@ function createRenderer(): THREE.WebGLRenderer {
   }
 }
 const renderer = createRenderer();
-renderer.setPixelRatio(Math.min(2, window.devicePixelRatio || 1));
+let preset = savedPreset();
+let dpr = window.devicePixelRatio;
+renderer.setPixelRatio(pixelRatioFor(preset, dpr));
 renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.outputColorSpace = THREE.SRGBColorSpace;
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
@@ -185,6 +188,41 @@ function carPickerHtml(): string {
   return `<div class="cars">${R.LIVERIES.map((l) => `<button class="car ${l.id === carId ? 'sel' : ''}" data-car="${l.id}" title="${l.name}"><i style="background:#${l.color.toString(16).padStart(6, '0')}"></i>${l.name}</button>`).join('')}</div>`;
 }
 
+const ARROW_STEP: Record<string, number> = { ArrowLeft: -1, ArrowUp: -1, ArrowRight: 1, ArrowDown: 1 };
+/** Low / Balanced / High radio group for the title and pause cards; wire it up with bindGraphics. */
+function graphicsHtml(): string {
+  const opts = PRESETS.map((p) => {
+    const on = p.id === preset;
+    return `<button class="tab ${on ? 'sel' : ''}" role="radio" aria-checked="${on}" tabindex="${on ? 0 : -1}" data-preset="${p.id}">${t(p.label)}</button>`;
+  }).join('');
+  return `<div class="gfx"><div class="lbl2" id="o-gfx">${t('gfx.label')}</div><div class="tabs" role="radiogroup" aria-labelledby="o-gfx">${opts}</div></div>`;
+}
+
+function bindGraphics(): void {
+  const btns = [...overlay.querySelectorAll<HTMLButtonElement>('[data-preset]')];
+  const pick = (b: HTMLButtonElement): void => {
+    setPreset(b.dataset.preset as PresetId);
+    btns.forEach((x) => {
+      x.classList.toggle('sel', x === b);
+      x.setAttribute('aria-checked', String(x === b));
+      x.tabIndex = x === b ? 0 : -1;
+    });
+  };
+  btns.forEach((b, i) => {
+    b.addEventListener('click', () => pick(b));
+    b.addEventListener('keydown', (e) => {
+      const step = ARROW_STEP[e.code];
+      // these keys belong to the selector here, not to the game; everything else (Esc, R…) still reaches it
+      if (step || e.code === 'Space' || e.code === 'Enter') e.stopPropagation();
+      if (!step) return;
+      e.preventDefault();
+      const next = btns[(i + step + btns.length) % btns.length];
+      pick(next);
+      next.focus();
+    });
+  });
+}
+
 function showTitle(): void {
   screen = 'title';
   camMode = 'full';
@@ -207,6 +245,7 @@ function showTitle(): void {
     <div class="setup">
       <label class="ini"><span class="lbl2">${t('title.initials')}</span><input id="o-ini" maxlength="${R.MAX_INITIALS}" placeholder="${R.ANON}" value="${R.savedInitialsRaw().replace(/"/g, '')}" autocomplete="off" spellcheck="false"></label>
       <div><span class="lbl2">${t('title.car')}</span>${carPickerHtml()}</div>
+      ${graphicsHtml()}
     </div>
     <div class="lbl2">${t('title.rivals')}</div>
     ${lineupHtml()}
@@ -230,6 +269,7 @@ function showTitle(): void {
     overlay.querySelectorAll('.car').forEach((x) => x.classList.toggle('sel', x === b));
     setRace(newRace());
   }));
+  bindGraphics();
   const ini = overlay.querySelector<HTMLInputElement>('#o-ini')!;
   ini.addEventListener('input', () => R.saveInitialsRaw(ini.value));
   ini.addEventListener('keydown', (e) => { if (e.key === 'Enter') ini.blur(); e.stopPropagation(); });
@@ -249,8 +289,10 @@ function showPause(): void {
     <h2>${title}</h2>
     ${mode === 'practice' ? `<p>${t('prac.hint')}</p>` : ''}
     ${controlsHtml()}
+    ${graphicsHtml()}
     <div class="row"><button class="cta" id="o-resume">${t('pause.resume')}</button><button class="cta alt" id="o-restart">${t('pause.restart')}</button><button class="cta alt" id="o-menu">${t('pause.menu')}</button></div>
   </div>`;
+  bindGraphics();
   overlay.querySelector('#o-resume')!.addEventListener('click', resume);
   overlay.querySelector('#o-restart')!.addEventListener('click', restartSession);
   overlay.querySelector('#o-menu')!.addEventListener('click', toMenu);
@@ -502,11 +544,23 @@ function updateCamera(dt: number, p: Pose): void {
   sun.target.position.copy(camTarget);
 }
 
-window.addEventListener('resize', () => {
+/** Size everything to the window, display and preset. Only the drawing buffer varies by preset: the canvas CSS size, aspect ratio and DOM HUD do not. */
+function fitRenderer(): void {
+  dpr = window.devicePixelRatio;
   camera.aspect = window.innerWidth / window.innerHeight;
   camera.updateProjectionMatrix();
+  renderer.setPixelRatio(pixelRatioFor(preset, dpr));
   renderer.setSize(window.innerWidth, window.innerHeight);
-});
+  hud.fitMini();
+}
+window.addEventListener('resize', fitRenderer);
+
+/** Takes effect at once and touches only the renderer, so a race in progress carries on untouched. */
+function setPreset(id: PresetId): void {
+  preset = id;
+  savePreset(id);
+  fitRenderer();
+}
 
 // ------------------------------------------------------------ events
 function handle(e: RaceEvent): void {
@@ -656,6 +710,8 @@ showTitle();
 const simulating = (): boolean => screen === 'race' || screen === 'results';
 function frame(now: number): void {
   requestAnimationFrame(frame);
+  // moving to another display can change the ratio without a resize event
+  if (window.devicePixelRatio !== dpr) fitRenderer();
   // dt paces presentation only (camera, wheels, toasts) and keeps running on menus; race time comes from the stepper
   const dt = Math.min(MAX_GAP, Math.max(0, (now - last) / 1000));
   last = now; time += dt;
@@ -675,4 +731,4 @@ function frame(now: number): void {
 requestAnimationFrame(frame);
 
 // debug/test hooks
-(window as unknown as { __game: unknown }).__game = { get race() { return race; }, T, R, PEN, DEF, PERSONAS, startRace, applyTrack, startSession, showTitle, showBoards, get mode() { return mode; }, get champ() { return champ; }, get ghost() { return ghost; }, get recorder() { return recorder; }, get pbMs() { return pbMs; }, get screen() { return screen; }, stepper, advance: (sec: number) => { for (let t = 0; t < sec && simulating(); t += STEP) tick(STEP); }, setView: (m: 'follow' | 'full') => { camMode = m; }, zoom: (span: number) => { camMode = 'follow'; followSpan = span; curSpan = span; }, snapCam: () => { const p = race.player; camLead.set(0, 0); camTarget.set(p.x, 0, -p.y); }, info: () => ({ calls: renderer.info.render.calls, tris: renderer.info.render.triangles, objects: world.root.children.length, frames: renderer.info.render.frame }) };
+(window as unknown as { __game: unknown }).__game = { get race() { return race; }, T, R, PEN, DEF, PERSONAS, startRace, applyTrack, startSession, showTitle, showBoards, get mode() { return mode; }, get preset() { return preset; }, get champ() { return champ; }, get ghost() { return ghost; }, get recorder() { return recorder; }, get pbMs() { return pbMs; }, get screen() { return screen; }, stepper, advance: (sec: number) => { for (let t = 0; t < sec && simulating(); t += STEP) tick(STEP); }, setView: (m: 'follow' | 'full') => { camMode = m; }, zoom: (span: number) => { camMode = 'follow'; followSpan = span; curSpan = span; }, snapCam: () => { const p = race.player; camLead.set(0, 0); camTarget.set(p.x, 0, -p.y); }, info: () => ({ calls: renderer.info.render.calls, tris: renderer.info.render.triangles, objects: world.root.children.length, frames: renderer.info.render.frame }) };

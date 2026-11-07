@@ -60,12 +60,17 @@ export class Hud {
     this.root.querySelectorAll<HTMLElement>('[id]').forEach((e) => (this.el[e.id] = e));
     this.mini = this.el['h-mini'] as HTMLCanvasElement;
     this.mctx = this.mini.getContext('2d')!;
-    const dpr = Math.min(2, window.devicePixelRatio || 1);
-    this.mini.width = this.mW * dpr; this.mini.height = this.mH * dpr;
     this.mini.style.width = this.mW + 'px'; this.mini.style.height = this.mH + 'px';
-    this.mctx.scale(dpr, dpr);
+    this.fitMini();
     this.rebuildMini();
     this.relabel();
+  }
+
+  /** Match the minimap's backing store to the display. It follows the device, not the graphics preset, so it stays sharp on Low. */
+  fitMini(): void {
+    const dpr = Math.min(2, window.devicePixelRatio || 1);
+    this.mini.width = Math.round(this.mW * dpr); this.mini.height = Math.round(this.mH * dpr);
+    this.mctx.scale(dpr, dpr);
   }
 
   /** Recompute the minimap projection for the active track. */
