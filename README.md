@@ -38,5 +38,6 @@ The build output is plain HTML/JS/CSS; serve the `dist/` folder from any static 
 - `docs/timing.md` — simulation timing policy and its test evidence.
 - `docs/graphics.md` — graphics presets, their trade-offs and measurements.
 - `docs/touch.md` — touch controls, the shared input layer and their evidence.
+- `docs/reverse.md` — hold-Brake reverse: tuning, recovery limits, race-integrity rules and evidence.
 - `docs/validation.md` — repeatable browser checks, results and the remaining hardware validation.
 - `scripts/` — the browser check and its frame-time statistics.

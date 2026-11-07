@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Bounded browser validation of the real game. Procedure and results: docs/validation.md.
 //
-//   node scripts/browser-check.mjs [tracks race controlled routing practice championship touch responsive touchrace]   functional checks (default: all)
+//   node scripts/browser-check.mjs [tracks race controlled routing practice championship touch responsive touchrace reverse]   functional checks (default: all)
 //   node scripts/browser-check.mjs perf --label updated --machine "<name>"          frame-time capture
 //   node scripts/browser-check.mjs compare <baseline.json> <updated.json>           like-for-like comparison
 //
@@ -1507,6 +1507,87 @@ async function touchrace(run, c) {
   return s;
 }
 
+/** Hold-Brake reverse on real keys and emulated touch: penalty box and bay recovery, the HUD cue, blur/resume and pointer cancel. Scripted placement: functional coverage only. */
+async function reverse(run, c) {
+  /** a running race with the rivals half a lap away, the player stopped at `s` in the pit lane or on the outside road lane */
+  const setup = (page, x) => read(page, (o) => {
+    const g = window.__game, T = g.T;
+    if (g.screen !== 'race') g.startSession('race');
+    if (g.race.phase === 'countdown') g.advance(7);
+    const r = g.race, p = r.player;
+    r.cars.forEach((o2, i) => { if (i) { o2.u = p.u + T.L / 2 + i * 8; o2.laneSide = 1; o2.d = T.LANE_HALF; o2.mode = 'race'; o2.change = null; } });
+    r.squeezeQ.length = 0;
+    Object.assign(p, { u: o.s, v: 0, change: null, laneSide: -1, mode: o.pit ? 'pitlane' : 'race', d: o.pit ? T.pitD(o.s) : -T.LANE_HALF, throttle: 0, revMark: null, serviced: false, fuel: o.fuel ?? 1, sgOwed: o.sgOwed ?? 0, sgChances: o.sgOwed ? 2 : 0, sgServed: 0, sgServing: false });
+    if (o.sgOwed) { p.pitReq = true; p.pitPenaltyOnly = true; }
+  }, x);
+  const P = (page) => read(page, () => { const g = window.__game, r = g.race, p = r.player, T = g.T; return { s: T.wrapS(p.u), v: p.v, revOn: p.revOn, latch: p.revLatch, mode: p.mode, sgOwed: p.sgOwed, sgServing: p.sgServing, timePen: p.timePen, bay: p.bay, pitStops: p.pitStops, screen: g.screen, chips: document.getElementById('h-chips').textContent, brakeCue: document.getElementById('t-brake').dataset.cue, brakeText: document.getElementById('t-brake-cue').textContent }; });
+
+  // ---- keyboard
+  const s = await open(run);
+  const { page, keys } = s;
+  const T0 = await read(page, () => ({ PEN_S: window.__game.T.PEN_S, PEN_HALF: window.__game.T.PEN_HALF, BAY3: window.__game.T.BAYS[3], BAY_HALF: window.__game.T.BAY_HALF, PIT_IN1: window.__game.T.PIT_IN1 }));
+  await setup(page, { s: T0.PEN_S + T0.PEN_HALF + 0.5, pit: true, sgOwed: 3 });
+  // slow software frames can reach the box between two reads, so the chip is watched as it changes
+  await read(page, (label) => { const el = document.getElementById('h-chips'); window.__qa.revChip = false; new MutationObserver(() => { if (el.textContent.includes(label)) window.__qa.revChip = true; }).observe(el, { childList: true, subtree: true, characterData: true }); }, STRINGS['hud.reverse']);
+  await keys.set('ArrowDown', true);
+  await waitFor(page, () => window.__game.race.player.revOn || window.__game.race.player.sgServing, null, 10000);
+  await frames(page, 2);
+  const backing = { ...(await P(page)), chipSeen: await read(page, () => window.__qa.revChip) };
+  c.ok('Keyboard: holding Brake at a standstill engages reverse and the HUD shows it', backing.chipSeen && backing.s < T0.PEN_S + T0.PEN_HALF + 0.4, backing);
+  await page.screenshot({ path: path.join(run.out, 'reverse-hud.png') });
+  await waitFor(page, () => window.__game.race.player.sgServing, null, 15000);
+  const serving = await P(page);
+  await waitFor(page, () => window.__game.race.player.sgOwed === 0, null, 20000);
+  await sleep(1200);
+  const after = await P(page);
+  c.ok('Box: backing up with Brake held stops in the box and serves the full stop', Math.abs(serving.s - T0.PEN_S) < T0.PEN_HALF && after.sgOwed === 0 && after.timePen === 0, { serving, after });
+  c.ok('Box: Brake still held after service does not reverse', after.v === 0 && !after.revOn && Math.abs(after.s - serving.s) < 0.2 && after.latch, after);
+  await keys.set('ArrowDown', false);
+
+  await setup(page, { s: T0.BAY3 + T0.BAY_HALF + 0.5, pit: true, fuel: 0.3 });
+  await frames(page, 2);
+  await keys.set('ArrowDown', true);
+  // released on reaching the bay's far edge: a key lands a few slow software frames after the read that chose it
+  await waitFor(page, (b) => { const g = window.__game, p = g.race.player; return g.T.gapS(b, g.T.wrapS(p.u)) < 0.9; }, T0.BAY3, 15000);
+  await keys.set('ArrowDown', false);
+  await waitFor(page, () => ['bayIn', 'service'].includes(window.__game.race.player.mode), null, 10000).catch(() => null);
+  const bay = await P(page);
+  c.ok('Bay: back past an overshot bay, release, and the bay is captured for refuelling', ['bayIn', 'service'].includes(bay.mode) && bay.bay === 3 && bay.pitStops === 1, bay);
+
+  await setup(page, { s: 120 });
+  await keys.set('ArrowDown', true);
+  await waitFor(page, () => window.__game.race.player.v < -1, null, 10000);
+  await read(page, () => window.dispatchEvent(new Event('blur')));
+  await frames(page, 2);
+  const paused = await P(page);
+  await keys.tap('Escape');
+  await sleep(1200);
+  const resumed = await P(page);
+  c.ok('Blur pauses and clears reverse; resume with the key still down coasts to rest', paused.screen === 'pause' && !paused.revOn && resumed.screen === 'race' && resumed.v === 0 && !resumed.revOn, { paused, resumed });
+  await keys.set('ArrowDown', false);
+
+  // ---- emulated touch
+  const t = await open(run, { viewport: { width: 844, height: 390 }, device: PHONE });
+  await read(t.page, () => window.__game.setTouchMode('on'));
+  const f = new Fingers(t.page, await t.context.newCDPSession(t.page));
+  await setup(t.page, { s: 120 });
+  await frames(t.page, 3);
+  const id = await f.put('#t-brake');
+  await waitFor(t.page, () => window.__game.race.player.v < -1, null, 10000);
+  await frames(t.page, 2);
+  const tb = await P(t.page);
+  c.ok('Touch: holding the Brake button engages reverse, and the button shows R', tb.revOn && tb.brakeCue === 'reverse' && tb.brakeText === STRINGS['touch.brake.reverse'], tb);
+  await t.page.screenshot({ path: path.join(run.out, 'reverse-touch.png') });
+  await f.cancel();
+  await sleep(1000);
+  const tc = await P(t.page);
+  c.ok('Touch: a cancelled pointer ends reverse and the car comes to rest', tc.v === 0 && !tc.revOn && tc.brakeCue === 'idle', tc);
+  void id;
+  c.ok('Touch: no page or console errors', t.errors.length === 0, t.errors.slice(0, 5));
+  await t.context.close();
+  return s;
+}
+
 /** Real-time frame capture with the renderer on. Reports presentation and clock separately. */
 async function perf(run) {
   const s = await open(run);
@@ -1538,8 +1619,8 @@ async function perf(run) {
 }
 
 // ------------------------------------------------------------ cli
-const SCENARIOS = { tracks, race, controlled, routing, practice, championship, touch, responsive, touchrace };
-const USAGE = 'usage: browser-check.mjs [tracks|race|controlled|routing|practice|championship|touch|responsive|touchrace ...] | perf | compare <a.json> <b.json>\n'
+const SCENARIOS = { tracks, race, controlled, routing, practice, championship, touch, responsive, touchrace, reverse };
+const USAGE = 'usage: browser-check.mjs [tracks|race|controlled|routing|practice|championship|touch|responsive|touchrace|reverse ...] | perf | compare <a.json> <b.json>\n'
   + 'options: --dist <dir> --url <url> --commit <sha> --machine <name> --label <name> --viewport WxH --dpr N --preset low|balanced|high\n'
   + '         --seconds N --headed --channel <chrome|msedge> --out <dir> --max-minutes N';
 

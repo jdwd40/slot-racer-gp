@@ -25,6 +25,21 @@ export const PEN = {
   unservedDetour: 7,   // result-time penalty = this + the outstanding stop (exceeds the time a pit detour costs)
 };
 
+/**
+ * Player reverse gear, for backing into an overshot pit bay, penalty box or pit entrance (see docs/reverse.md).
+ * Brake held at a standstill engages it after `engage` seconds of simulation time; braking while still rolling never counts.
+ */
+export const REV = {
+  engage: 0.6,         // seconds of continued Brake while stationary before reverse engages
+  speed: 3,            // reverse speed cap (m/s, by magnitude)
+  acc: 5,              // reverse acceleration (m/s²)
+  still: 0.02,         // speed magnitude that counts as stationary
+};
+/** the reverse cap by magnitude, never above the pit-lane limit */
+export const REV_CAP = Math.min(REV.speed, T.PIT_SPEED);
+/** a pit-lane car backs up no further than where the pit lane has fully left the road */
+export const REV_PIT_MIN = T.PIT_IN1;
+
 /** AI defending tuning */
 export const DEF = {
   look: 12,            // a car this close behind is a threat
@@ -101,6 +116,14 @@ export interface Car {
   // render pose (x, y on the mat; z height; roll/pitch from banking and ramps)
   x: number; y: number; h: number; z: number; roll: number; pitch: number;
   bumpT: number;
+  /** reverse gear engaged (player only: AI cars never reverse) */
+  revOn: boolean;
+  /** stationary Brake hold so far towards engaging reverse (simulation seconds) */
+  revHoldT: number;
+  /** reverse refused for the rest of the current Brake press (service, countdown, a mode it cannot run in) */
+  revLatch: boolean;
+  /** furthest u reached before backing up: fixed points short of it are not decided again when driving forward over them */
+  revMark: number | null;
 }
 
 export type RaceEvent =
@@ -177,6 +200,7 @@ export class Race {
         graceT: 0, pushedT: 0, cutT: 0,
         threatIdx: -1, reactT: 0, defendOk: false, defendCooldown: 0, defendPending: false, defendSw: -1,
         x: 0, y: 0, h: 0, z: 0, roll: 0, pitch: 0, bumpT: 0,
+        revOn: false, revHoldT: 0, revLatch: false, revMark: null,
       };
       this.cars.push(c);
     }
@@ -289,6 +313,7 @@ export class Race {
     c.changeCooldown = Math.max(0, c.changeCooldown - dt);
     c.graceT = Math.max(0, c.graceT - dt); c.pushedT = Math.max(0, c.pushedT - dt); c.cutT = Math.max(0, c.cutT - dt);
     c.defendCooldown = Math.max(0, c.defendCooldown - dt);
+    if (c.isPlayer) this.reverseControl(c, dt, input);
     if (c.mode === 'off') { this.stepOff(c, dt); return; }
     if (c.mode === 'tow') { this.stepTow(c, dt); return; }
     if (c.mode === 'bayIn' || c.mode === 'service' || c.mode === 'bayOut') { this.stepBay(c, dt, input); return; }
@@ -296,7 +321,8 @@ export class Race {
     // ---- control
     let thrIn = 0, brkIn = 0;
     if (c.mode !== 'grid' || c.isPlayer) {
-      if (c.isPlayer && !c.finished) { thrIn = input.up ? 1 : 0; brkIn = input.down ? 1 : 0; }
+      // braking takes priority: with both held, Throttle does nothing
+      if (c.isPlayer && !c.finished) { brkIn = input.down ? 1 : 0; thrIn = input.up && !input.down ? 1 : 0; }
       else if (c.mode !== 'grid') { const a = this.ai(c, dt); thrIn = a.t; brkIn = a.b; }
     }
     const rise = c.isPlayer ? 4.5 : c.persona.rise, fall = 9;
@@ -307,9 +333,18 @@ export class Race {
 
     // ---- longitudinal dynamics
     const v0 = c.v;
-    const drive = thr * ACC * Math.max(0, 1 - v0 / VMAX);
-    const decel = (1 - thr) * COAST + brkIn * BRAKE + DRAG * v0 * v0;
-    c.v = Math.max(0, v0 + (drive - decel) * dt);
+    const revDrive = c.revOn && brkIn > 0;
+    if (revDrive) {
+      // reverse gear: back up gently to the cap (a car still rolling forward is braked to rest first)
+      c.v = v0 > 0 ? Math.max(0, v0 - BRAKE * dt) : Math.max(-REV_CAP, v0 - REV.acc * dt);
+    } else if (v0 < 0) {
+      // rolling backwards without reverse drive: Brake or Throttle stop it, releasing coasts it to rest; never a sign flip in one step
+      c.v = Math.min(0, v0 + (thrIn > 0 || brkIn > 0 ? BRAKE : COAST) * dt);
+    } else {
+      const drive = thr * ACC * Math.max(0, 1 - v0 / VMAX);
+      const decel = (1 - thr) * COAST + brkIn * BRAKE + DRAG * v0 * v0;
+      c.v = Math.max(0, v0 + (drive - decel) * dt);
+    }
 
     // ---- automatic caps (pit limiter, squeeze priority, pit exit yield)
     const s0 = this.s(c);
@@ -336,15 +371,19 @@ export class Race {
 
     // ---- move along slot
     const k = T.curvature(s0);
-    const ds = (c.v * dt) / Math.max(0.3, 1 - k * c.d);
+    let ds = (c.v * dt) / Math.max(0.3, 1 - k * c.d);
+    if (ds < 0) ds = this.reverseTravel(c, s0, ds);
     const prevD = c.d;
+    const u0 = c.u;
     c.u += ds;
     const s = this.s(c);
     const crossed = (x: number): boolean => { const g = T.gapS(s0, x); return ds > 0 && g >= 0 && g < ds; };
+    /** crossed on new ground: after backing up, points short of the furthest position already reached are not decided again */
+    const fresh = (x: number): boolean => crossed(x) && (c.revMark === null || u0 + T.gapS(s0, x) >= c.revMark);
 
-    // fuel
+    // fuel: burn follows distance travelled in either direction, so backing up can never refill the tank
     // cars on their cool-down lap after the flag no longer burn fuel (they would otherwise run dry and get towed)
-    if (!c.finished && !this.practice) c.fuel = Math.max(0, c.fuel - c.v * dt * fuelRate() * (0.5 + 0.7 * thr));
+    if (!c.finished && !this.practice) c.fuel = Math.max(0, c.fuel - Math.abs(c.v) * dt * fuelRate() * (0.5 + 0.7 * (revDrive ? 1 : thr)));
     if (c.isPlayer && !c.lowFuelWarned && c.fuel < LOW_FUEL && !c.finished) { c.lowFuelWarned = true; this.pmsg(c, 'msg.lowFuel', 'bad'); }
     if (c.fuel > LOW_FUEL + 0.05) c.lowFuelWarned = false;
 
@@ -353,7 +392,7 @@ export class Race {
       if (c.isPlayer && c.sgOwed > 0) this.armPenaltyRoute(c);
       // lane switches
       for (const sw of T.SWITCHES) {
-        if (!crossed(sw.s0)) continue;
+        if (!fresh(sw.s0)) continue;
         const route = this.nextRoute(c);
         if (route) { c.laneReq = !route.stay && !c.change; c.laneOverride = false; }
         if (c.laneReq && !c.change) {
@@ -392,7 +431,8 @@ export class Race {
             this.pmsg(c, 'msg.pitMissed', 'bad');
           }
         }
-        if (c.sgOwed > 0 && !c.finished) {
+        // an approach driven again after backing up is the same opportunity: it is not counted twice
+        if (c.sgOwed > 0 && !c.finished && fresh(T.PIT_IN0)) {
           if (c.sgSkipNext) c.sgSkipNext = false;
           else {
             c.sgChances--;
@@ -411,7 +451,8 @@ export class Race {
         c.mode = 'race'; c.laneSide = -1; c.d = -T.LANE_HALF; c.serviced = false; c.graceT = PEN.grace;
         if (c.sgOwed > 0 && !c.finished) { if (c.sgChances <= 0) this.convertUnserved(c, 'missed'); else this.pmsg(c, 'msg.penChances', 'bad', { n: c.sgChances }); }
       }
-      else if (c.v < 0.7 && c.isPlayer && !c.serviced && !c.sgServing) this.tryBay(c, s);
+      // a bay is only captured nearly stopped: never while reversing past it
+      else if (Math.abs(c.v) < 0.7 && !c.revOn && c.isPlayer && !c.serviced && !c.sgServing) this.tryBay(c, s);
       else if (!c.isPlayer && c.pitPlan) {
         const bs = T.BAYS[c.bay];
         if (Math.abs(T.gapS(s, bs)) < 0.45 && c.v < 1.5 && this.bayFree(c.bay, c)) this.enterBay(c, c.bay);
@@ -424,7 +465,8 @@ export class Race {
     }
 
     // render yaw from lateral motion
-    const yo = ds > 1e-5 ? Math.atan2(c.d - prevD, ds) : 0;
+    // backing up, the car still faces forward
+    const yo = ds > 1e-5 ? Math.atan2(c.d - prevD, ds) : ds < -1e-5 ? Math.atan2(prevD - c.d, -ds) : 0;
     c.yawOff += (yo - c.yawOff) * Math.min(1, dt * 20);
 
     // ---- grip / deslot (racing lanes only)
@@ -441,7 +483,7 @@ export class Race {
     } else { c.latRatio = 0; c.wobble *= 0.9; c.slip = 0; }
 
     // out of fuel
-    if (c.fuel <= 0 && c.mode === 'race' && c.v < 0.4) {
+    if (c.fuel <= 0 && c.mode === 'race' && Math.abs(c.v) < 0.4) {
       c.mode = 'tow'; c.towT = 0; c.lapValid = false; this.leaveSqueeze(c); c.laneReq = false; this.clearPitIntent(c);
       if (c.change) { c.laneSide = c.change.to; c.change = null; }
       this.emit({ type: 'tow', car: c });
@@ -449,11 +491,65 @@ export class Race {
     }
     // ordered sector checkpoints (quarter, half, three-quarter distance from the timing line)
     for (let i = 0; i < 3; i++) {
-      if (crossed(T.wrapS(T.FINISH_S + (T.L * (i + 1)) / 4))) {
+      if (fresh(T.wrapS(T.FINISH_S + (T.L * (i + 1)) / 4))) {
         if (c.sectors === (1 << i) - 1) c.sectors |= 1 << i; else c.lapValid = false;
       }
     }
     this.laps(c, dt, ds, s0);
+    if (c.revMark !== null && c.u >= c.revMark) c.revMark = null;
+  }
+
+  // ---------------------------------------------------------------- reverse (player only)
+  /** Why reverse cannot engage now, or null. Checked by speed magnitude and position, never by direction alone. */
+  reverseBlock(c: Car): 'phase' | 'mode' | 'change' | 'fuel' | 'service' | null {
+    if (this.phase !== 'racing' || c.finished) return 'phase';
+    if (c.mode !== 'race' && c.mode !== 'pitlane') return 'mode';
+    if (c.change) return 'change';
+    if (c.fuel <= 0) return 'fuel';
+    // standing (or arriving) in the penalty box with a stop owed is service: Brake must keep the car still for all of it
+    if (c.mode === 'pitlane' && c.sgOwed > 0 && Math.abs(T.gapS(this.s(c), T.PEN_S)) < T.PEN_HALF) return 'service';
+    return null;
+  }
+
+  /**
+   * Reverse engagement from the Brake hold, in simulation time. Releasing Brake ends it; Throttle cancels it and restarts the hold;
+   * any reason it cannot run latches it off until Brake is released and pressed again, so finishing a service with Brake held never backs away.
+   */
+  reverseControl(c: Car, dt: number, input: Input): void {
+    if (!input.down || c.finished) { c.revOn = false; c.revHoldT = 0; c.revLatch = false; return; }
+    const block = this.reverseBlock(c);
+    const still = Math.abs(c.v) < REV.still;
+    if (block === 'change') {
+      // a committed lane change is never reversed: an attempt is refused for this press, with a word why
+      c.revOn = false;
+      if (c.revLatch || !still) { c.revHoldT = 0; return; }
+      c.revHoldT += dt;
+      if (c.revHoldT >= REV.engage) { c.revHoldT = 0; c.revLatch = true; this.pmsg(c, 'msg.revChange', 'warn'); }
+      return;
+    }
+    if (block) { c.revOn = false; c.revHoldT = 0; c.revLatch = true; return; }
+    if (input.up || c.revLatch) { c.revOn = false; c.revHoldT = 0; return; }
+    if (c.revOn) return;
+    if (!still) { c.revHoldT = 0; return; }
+    c.revHoldT += dt;
+    if (c.revHoldT >= REV.engage) { c.revOn = true; c.revHoldT = 0; }
+  }
+
+  /** Forget the Brake hold and reverse gear, e.g. on pause: a resumed race never restores a reverse command. */
+  clearReverse(): void { for (const c of this.cars) { c.revOn = false; c.revHoldT = 0; c.revLatch = false; } }
+
+  /** One step of backward travel: a pit-lane car stops at the upstream end of the pit path. Backing up leaves the squeeze queue and voids the lap. */
+  reverseTravel(c: Car, s0: number, ds: number): number {
+    if (c.mode === 'pitlane') {
+      const room = Math.max(0, T.gapS(REV_PIT_MIN, s0));
+      if (-ds >= room) { ds = -room; c.v = 0; }
+    }
+    if (ds < 0) {
+      c.lapValid = false;
+      if (c.revMark === null) c.revMark = c.u;
+      this.leaveSqueeze(c);
+    }
+    return ds;
   }
 
   /** Lap counting. dt/ds/s0 describe the step just taken so the crossing time can be interpolated to sub-step precision. */
@@ -508,10 +604,11 @@ export class Race {
   mergeBlocked(c: Car): boolean {
     const s = this.s(c);
     for (const o of this.cars) {
-      if (o === c || o.mode !== 'race' || o.v < 1) continue;
+      // a car backing up counts however slow: it is coming towards the merge from ahead
+      if (o === c || o.mode !== 'race' || (o.v >= 0 && o.v < 1)) continue;
       if (!(o.change || o.laneSide < 0)) continue;
       const g = T.gapS(s, this.s(o));
-      if (g < 2.5 && g > -(3 + o.v * 0.75)) return true;
+      if (g < 2.5 + Math.max(0, -o.v) * 0.75 && g > -(3 + Math.max(0, o.v) * 0.75)) return true;
     }
     return false;
   }
@@ -631,7 +728,7 @@ export class Race {
     const s = this.s(c);
     const dist = T.ahead(s, T.BAYS[j]);
     c.u += dist;
-    c.bay = j; c.mode = 'service'; c.serviceT = 0; c.d = T.BAY_D; c.laneSide = -1; c.yawOff = 0;
+    c.bay = j; c.mode = 'service'; c.serviceT = 0; c.d = T.BAY_D; c.laneSide = -1; c.yawOff = 0; c.revMark = null;
     c.penalty = 8 + dist / 11; c.pitStops++;
     c.refuelTarget = Math.max(c.refuelTarget, 0.75);
     if (c.isPlayer) this.pmsg(c, 'msg.towPenalty', 'bad', { n: Math.round(c.penalty) });
@@ -768,7 +865,7 @@ export class Race {
   servePenalty(c: Car, s: number, dt: number): void {
     if (c.sgOwed <= 0) { c.sgServing = false; return; }
     const inBox = Math.abs(T.gapS(s, T.PEN_S)) < T.PEN_HALF;
-    if (inBox && c.v < 0.02) {
+    if (inBox && Math.abs(c.v) < REV.still) {
       c.sgServing = true;
       c.sgServed += dt;
       if (c.sgServed >= c.sgOwed) {
@@ -777,7 +874,7 @@ export class Race {
         this.emit({ type: 'served', car: c });
         this.pmsg(c, 'msg.penServed', 'good');
       }
-    } else if (c.sgServing && c.v > 0.3) {
+    } else if (c.sgServing && Math.abs(c.v) > 0.3) {
       c.sgServing = false; c.sgServed = 0;
       this.pmsg(c, 'msg.penReset', 'bad');
     }
@@ -849,15 +946,21 @@ export class Race {
       const gap = T.gapS(this.s(rear), this.s(front));
       const overlap = T.CAR_LEN - gap;
       if (overlap <= 0) continue;
-      rear.u -= overlap * 0.75; front.u += overlap * 0.25;
+      // a car backing into the one behind takes the whole correction, so no car is ever shoved backwards by it
+      if (front.v < 0) front.u += overlap;
+      else { rear.u -= overlap * 0.75; front.u += overlap * 0.25; }
       const rel = rear.v - front.v;
+      const backing = front.v < 0 || rear.v < 0;
       const fresh = !this.touching[key];
       this.touching[key] = true;
-      if (fresh && rel > PEN.impactRel) this.judge(rear, front, rel);
+      // contact with a reversing car is resolved but never judged as a rear-end offence
+      if (fresh && rel > PEN.impactRel && !backing) this.judge(rear, front, rel);
       if (rel > 0) {
         const vc = (rear.v + front.v) / 2, e = 0.35;
         rear.v = (vc - (e * rel) / 2) * 0.93;
         front.v = (vc + (e * rel) / 2) * 0.97;
+        // the reverser stops against the car it backed into, and neither car is sent backwards (forward contacts never go negative)
+        if (backing) { rear.v = Math.max(0, rear.v); front.v = Math.max(0, front.v); }
         front.slip += rel * 0.015; rear.slip += rel * 0.01;
         if (rel > 0.8 && rear.bumpT <= 0) {
           rear.bumpT = 0.25; front.bumpT = 0.25;

@@ -14,7 +14,7 @@ The game can be played without a keyboard. **Touch controls: Auto / On / Off** i
 | Control | Action | Place |
 | --- | --- | --- |
 | Throttle | Hold | Bottom right, the largest control |
-| Brake | Hold | Bottom left |
+| Brake | Hold. Keep holding at rest to reverse: see [reverse](reverse.md) | Bottom left |
 | Lane, Pit | Tap | Beside Brake, or above it in portrait, so the left thumb has them while the right holds Throttle |
 | View, Pause | Tap | Top right, replacing the desktop buttons so they work with a finger already down. On phones View is in the More tray |
 
@@ -28,6 +28,7 @@ Zoom, sound and ghost are enlarged to 48×48 CSS pixels and act on `touchstart`,
 | Override | `⇄ override`, dashed border |
 | Pit armed | `✓ armed`, solid border |
 | Compulsory stop-and-go | `■ must stop`, thick double border |
+| Reversing | Brake shows `R reverse`, white border |
 
 Lane and Pit states come from `Race` every frame through `laneCue` and `pitCue`. The pad keeps no request state of its own.
 
