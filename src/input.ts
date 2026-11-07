@@ -77,6 +77,9 @@ export class TouchPad {
     b.classList.toggle('down', [...this.pointers.values()].includes(b));
   }
 
+  /** Whether any finger is holding a control. */
+  get holding(): boolean { return this.pointers.size > 0; }
+
   /** Let go of every pointer. A finger still on the glass stays ignored until it presses again. */
   reset(): void {
     for (const [id, b] of this.pointers) {
@@ -98,6 +101,21 @@ export const CHROME_MAX = 140;
  */
 export function controlsMoved(a: { w: number; h: number }, b: { w: number; h: number }): boolean {
   return a.w !== b.w || Math.abs(a.h - b.h) > CHROME_MAX;
+}
+
+/**
+ * The layout the controls were in when the current use of them began. While something is in use it stays put,
+ * so a resize that arrives in many small steps is still measured in total, not frame by frame.
+ */
+export class ControlsAnchor {
+  constructor(private at: { w: number; h: number }) {}
+
+  /** True when the controls have moved from under whatever is in use; the anchor then moves to `next`. With nothing in use it just follows. */
+  update(next: { w: number; h: number }, inUse: boolean): boolean {
+    const moved = inUse && controlsMoved(this.at, next);
+    if (moved || !inUse) this.at = next;
+    return moved;
+  }
 }
 
 // ------------------------------------------------------------ what the pad shows

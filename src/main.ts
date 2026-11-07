@@ -12,7 +12,7 @@ import * as R from './records';
 import { GhostRecorder, GhostPlayer } from './ghost';
 import { FixedStepper, STEP, MAX_GAP, Pose, blendPose } from './timing';
 import { PRESETS, PresetId, pixelRatioFor, savedPreset, savePreset } from './graphics';
-import { COARSE_QUERY, DrivingInput, KEY_HOLDS, KEY_TAPS, PadButton, TOUCH_MODES, TouchMode, TouchPad, controlsMoved, savedTouchMode, saveTouchMode, touchActive } from './input';
+import { COARSE_QUERY, ControlsAnchor, DrivingInput, KEY_HOLDS, KEY_TAPS, PadButton, TOUCH_MODES, TouchMode, TouchPad, savedTouchMode, saveTouchMode, touchActive } from './input';
 
 const TRACK_KEY = 'srgp.track';
 function savedTrack(): string {
@@ -480,6 +480,7 @@ const input = new DrivingInput({
   pause: () => { if (screen === 'race') showPause(); else if (screen === 'pause') resume(); },
 });
 const pad = new TouchPad([...hud.root.querySelectorAll<HTMLButtonElement>('[data-hold], [data-tap]')] as PadButton[], input, () => sfx.init());
+const anchor = new ControlsAnchor(vp);
 function releaseDriving(): void { pad.reset(); input.clear(); }
 
 let touchMode = savedTouchMode();
@@ -641,7 +642,7 @@ function updateCamera(dt: number, p: Pose): void {
  */
 function fitRenderer(): void {
   const next = viewSize();
-  if (controlsMoved(vp, next)) { pad.reset(); hud.setMore(false); }
+  if (anchor.update(next, pad.holding || hud.moreOpen)) { pad.reset(); hud.setMore(false); }
   vp = next;
   dpr = window.devicePixelRatio;
   camera.aspect = vp.w / vp.h;

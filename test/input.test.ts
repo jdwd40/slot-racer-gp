@@ -3,7 +3,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import * as T from '../src/track';
 import { Car, Race } from '../src/race';
-import { DEFAULT_TOUCH, DrivingInput, KEY_HOLDS, KEY_TAPS, PadButton, TOUCH_KEY, TOUCH_MODES, TapAction, TouchPad, controlsMoved, laneCue, pitCue, savedTouchMode, saveTouchMode, touchActive } from '../src/input';
+import { DEFAULT_TOUCH, DrivingInput, KEY_HOLDS, KEY_TAPS, PadButton, TOUCH_KEY, TOUCH_MODES, TapAction, TouchPad, ControlsAnchor, controlsMoved, laneCue, pitCue, savedTouchMode, saveTouchMode, touchActive } from '../src/input';
 import { t } from '../src/i18n';
 import { fresh, memStorage, place, seedRandom } from './helpers';
 
@@ -207,6 +207,18 @@ describe('tap controls', () => {
 });
 
 describe('reset', () => {
+  it('reports whether a finger is holding a control', () => {
+    const { throttle, lane, pad } = rig();
+    expect(pad.holding).toBe(false);
+    throttle.fire('pointerdown', 1);
+    expect(pad.holding).toBe(true);
+    throttle.fire('pointerup', 1);
+    expect(pad.holding).toBe(false);
+    lane.fire('pointerdown', 2);
+    pad.reset();
+    expect(pad.holding).toBe(false);
+  });
+
   it('drops holds, capture and pressed state, and needs a fresh press afterwards', () => {
     const { input, throttle, brake, pad } = rig();
     throttle.fire('pointerdown', 1);
@@ -372,5 +384,24 @@ describe('viewport changes and held controls', () => {
   });
   it('counts a larger height change, such as a split screen, as moving them', () => {
     expect(controlsMoved(phone, { w: 390, h: 500 })).toBe(true);
+  });
+  it('adds up a height change that arrives in small steps while a control is held', () => {
+    const anchor = new ControlsAnchor(phone);
+    const moved = [784, 724, 664, 604].map((h) => anchor.update({ w: 390, h }, true));
+    expect(moved).toEqual([false, false, true, false]);
+    expect(anchor.update({ w: 390, h: 544 }, true)).toBe(false);
+    expect(anchor.update({ w: 390, h: 504 }, true)).toBe(true);
+  });
+  it('lets bars slide back and forth under a held control', () => {
+    const anchor = new ControlsAnchor(phone);
+    for (const h of [788, 760, 844, 720, 800, 844]) expect(anchor.update({ w: 390, h }, true)).toBe(false);
+  });
+  it('measures from the layout a hold began in, not from before it', () => {
+    const anchor = new ControlsAnchor(phone);
+    expect(anchor.update({ w: 390, h: 724 }, false)).toBe(false);
+    expect(anchor.update({ w: 390, h: 604 }, false)).toBe(false);
+    expect(anchor.update({ w: 390, h: 664 }, true)).toBe(false);
+    expect(anchor.update({ w: 390, h: 500 }, true)).toBe(false);
+    expect(anchor.update({ w: 390, h: 440 }, true)).toBe(true);
   });
 });
