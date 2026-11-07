@@ -47,16 +47,16 @@ Condition:
 
 ### 2.2 Game loop and timing
 
-`src/main.ts` `frame()` runs on `requestAnimationFrame`. It clamps the frame delta to 50 ms, calls `tick(dt)` only while the screen is `race` or `results`, then updates camera, car visuals, ghost, arrows, audio and HUD, and renders.
+`src/main.ts` `frame()` runs on `requestAnimationFrame`. A `FixedStepper` (`src/timing.ts`) turns wall time into whole 1/60 s steps and calls `tick(dt)` once per step while the screen is `race` or `results`; `frame()` then updates camera, car visuals, ghost, arrows, audio and HUD once, and renders once. The step, limits and overload policy are in [timing.md](timing.md).
 
-`tick()` builds an `Input` from the pressed-key set and calls `Race.update(dt, input)` (`src/race.ts:225`). `update()` splits the frame into `ceil(dt / (1/120))` sub-steps of equal size `h = dt / steps` and calls `step(h)` for each. Each step advances the countdown or race clock, runs `stepCar()` for every car, runs `collide()`, then `pose()`.
+`tick()` builds an `Input` from the pressed-key set and calls `Race.update(dt, input)` (`src/race.ts:225`). `update()` splits the step into `ceil(dt / (1/120))` sub-steps of equal size `h = dt / steps`, which for a 1/60 s step is always two of 1/120 s, and calls `step(h)` for each. Each step advances the countdown or race clock, runs `stepCar()` for every car, runs `collide()`, then `pose()`.
 
 Assessment:
 
 - **Simulation is independent of rendering** (Confirmed). `race.ts` and `track.ts` have no DOM or Three.js imports and run in Node unchanged.
-- **Simulation timing is decoupled from frame rate but not fixed-step** (Confirmed). The sub-step size varies with the frame delta (a 16.7 ms frame gives two 8.3 ms steps, a 20 ms frame gives three 6.7 ms steps). Results differ slightly across frame rates. Lap times are robust to this because `laps()` interpolates the exact crossing time within the step (`src/race.ts:424`).
+- **Simulation timing is fixed-step and independent of frame rate** (Confirmed by `test/timing.test.ts`). With the same random seed, a race reaches the identical state after the same number of steps at any frame rate. `laps()` still interpolates the exact crossing time within the step (`src/race.ts:424`).
 - **Not deterministic** (Confirmed). `rnd()` wraps `Math.random()` with no seed. It is used for the start delay (`goT`), AI lapse timing and intensity, defend probability and reaction time, and AI refuel targets. Given a seeded random source and the same sequence of `dt` values, the simulation would be reproducible; there is no other hidden input.
-- Backgrounding the tab fires `blur`, which clears keys and pauses (`src/main.ts:436`), so there is no catch-up problem after the rAF stall.
+- Backgrounding the tab fires `blur` and `visibilitychange`, which clear keys and pause, and the stepper rebases, so there is no catch-up after the rAF stall.
 
 ### 2.3 How things are calculated
 

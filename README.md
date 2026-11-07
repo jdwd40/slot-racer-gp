@@ -24,7 +24,7 @@ npm test           # vitest run: the regression suite, once, no watch mode
 
 The same checks plus `npm run build` run in GitHub Actions (`.github/workflows/ci.yml`) on pull requests and pushes to `main`. Successful pushes to `main` then deploy that exact checked build artifact to the static VPS site; PRs never deploy. See [deployment and rollback](docs/deployment.md).
 
-The tests cover the simulation only (`src/race.ts`, `src/track.ts`, `src/records.ts`): collision penalties, lap counting, lane changes, leaderboards and championship scoring, and a bounded all-AI race on each circuit. Rendering, audio and input are not covered.
+The tests cover the simulation only (`src/race.ts`, `src/track.ts`, `src/records.ts`, `src/timing.ts`): collision penalties, lap counting, lane changes, leaderboards and championship scoring, fixed-step timing, and a bounded all-AI race on each circuit. Rendering, audio and browser input are not covered.
 
 The build output is plain HTML/JS/CSS; serve the `dist/` folder from any static host.
 
@@ -34,3 +34,4 @@ The build output is plain HTML/JS/CSS; serve the `dist/` folder from any static 
 - `src/` — TypeScript source (`src/main.ts` is the entry; `src/race.ts` and `src/track.ts` are the simulation).
 - `assets/ui/strings.json` — all player-visible text.
 - `docs/architecture-audit.md` — architecture and deployment audit.
+- `docs/timing.md` — simulation timing policy and its test evidence.
