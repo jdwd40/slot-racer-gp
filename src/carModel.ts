@@ -1,10 +1,11 @@
 import * as THREE from 'three';
+import { mergeSimple } from './gfx';
 
 function std(color: number, rough = 0.5, metal = 0, extra: THREE.MeshStandardMaterialParameters = {}): THREE.MeshStandardMaterial {
   return new THREE.MeshStandardMaterial({ color, roughness: rough, metalness: metal, ...extra });
 }
 
-export interface CarVisual { group: THREE.Group; body: THREE.Group; ring: THREE.Mesh; wheels: THREE.Mesh[]; }
+export interface CarVisual { group: THREE.Group; body: THREE.Group; wheels: THREE.Mesh[]; }
 
 /** Slot car facing +X, ~1.4 long, 0.6 wide. */
 export function makeCar(color: number, num: number, isPlayer: boolean): CarVisual {
@@ -80,10 +81,26 @@ export function makeCar(color: number, num: number, isPlayer: boolean): CarVisua
     }
   }
 
-  // highlight ring (shown in overview mode for the player)
-  const ring = new THREE.Mesh(new THREE.RingGeometry(1.05, 1.25, 40), new THREE.MeshBasicMaterial({ color: 0xffe066, transparent: true, opacity: 0.85, depthWrite: false }));
-  ring.rotation.x = -Math.PI / 2; ring.position.y = 0.05; ring.visible = false;
-  group.add(ring);
+  return { group, body, wheels };
+}
 
-  return { group, body, ring, wheels };
+/**
+ * The one player marker: a hollow ring with a pointer on top, unit ring radius, facing +Z.
+ * The dark outline keeps the shape readable on any surface or livery, and the open centre leaves the car and its neighbours visible.
+ */
+export function makePlayerMarker(): THREE.Group {
+  const marker = new THREE.Group();
+  const layer = (color: number, inner: number, outer: number, halfBase: number, tipY: number, topY: number, order: number): void => {
+    const pointer = new THREE.Shape([new THREE.Vector2(0, tipY), new THREE.Vector2(halfBase, topY), new THREE.Vector2(-halfBase, topY)]);
+    const m = new THREE.Mesh(
+      mergeSimple([new THREE.RingGeometry(inner, outer, 40), new THREE.ShapeGeometry(pointer)]),
+      new THREE.MeshBasicMaterial({ color, transparent: true, depthTest: false, depthWrite: false, toneMapped: false }),
+    );
+    m.renderOrder = order;
+    marker.add(m);
+  };
+  layer(0x14110c, 0.7, 1.1, 0.6, 0.82, 1.85, 20);
+  layer(0xffe066, 0.8, 1, 0.4, 1, 1.72, 21);
+  marker.visible = false;
+  return marker;
 }
