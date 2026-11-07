@@ -12,7 +12,7 @@ import * as R from './records';
 import { GhostRecorder, GhostPlayer } from './ghost';
 import { FixedStepper, STEP, MAX_GAP, Pose, blendPose } from './timing';
 import { PRESETS, PresetId, pixelRatioFor, savedPreset, savePreset } from './graphics';
-import { COARSE_QUERY, DrivingInput, KEY_HOLDS, KEY_TAPS, PadButton, TOUCH_MODES, TouchMode, TouchPad, savedTouchMode, saveTouchMode, touchActive } from './input';
+import { COARSE_QUERY, ControlsAnchor, DrivingInput, KEY_HOLDS, KEY_TAPS, PadButton, TOUCH_MODES, TouchMode, TouchPad, savedTouchMode, saveTouchMode, touchActive } from './input';
 
 const TRACK_KEY = 'srgp.track';
 function savedTrack(): string {
@@ -22,6 +22,9 @@ T.setTrack(savedTrack());
 
 // ------------------------------------------------------------ renderer / scene
 const app = document.getElementById('app')!;
+/** The game's box: the canvas, HUD and menus all fill it, so they cannot drift apart. CSS sizes it to the dynamic viewport. */
+const viewSize = (): { w: number; h: number } => ({ w: app.clientWidth || window.innerWidth, h: app.clientHeight || window.innerHeight });
+let vp = viewSize();
 /** Create the renderer, or show a readable message and stop if WebGL cannot initialise. */
 function createRenderer(): THREE.WebGLRenderer {
   try {
@@ -35,7 +38,7 @@ const renderer = createRenderer();
 let preset = savedPreset();
 let dpr = window.devicePixelRatio;
 renderer.setPixelRatio(pixelRatioFor(preset, dpr));
-renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.setSize(vp.w, vp.h, false);
 renderer.outputColorSpace = THREE.SRGBColorSpace;
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
 renderer.toneMappingExposure = 1.05;
@@ -49,7 +52,7 @@ const pmrem = new THREE.PMREMGenerator(renderer);
 scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
 scene.environmentIntensity = 0.3;
 
-const camera = new THREE.PerspectiveCamera(38, window.innerWidth / window.innerHeight, 0.5, 600);
+const camera = new THREE.PerspectiveCamera(38, vp.w / vp.h, 0.5, 600);
 scene.add(new THREE.HemisphereLight(0xe8f2ff, 0x4d6b3a, 0.7));
 const sun = new THREE.DirectionalLight(0xfff1dc, 2.1);
 sun.castShadow = true;
@@ -133,6 +136,7 @@ let lbKind: R.BoardKind = 'practice';
 function enter(s: Screen): void {
   screen = s;
   releaseDriving();
+  hud.setMore(false);
   syncPad();
 }
 
@@ -263,7 +267,7 @@ function showTitle(): void {
     <div class="tag">${t('title.tag')}</div>
     <p>${t('title.goal', { n: LAPS })}</p>
     <div class="setup">
-      <label class="ini"><span class="lbl2">${t('title.initials')}</span><input id="o-ini" maxlength="${R.MAX_INITIALS}" placeholder="${R.ANON}" value="${R.savedInitialsRaw().replace(/"/g, '')}" autocomplete="off" spellcheck="false"></label>
+      <label class="ini"><span class="lbl2">${t('title.initials')}</span><input id="o-ini" maxlength="${R.MAX_INITIALS}" placeholder="${R.ANON}" value="${R.savedInitialsRaw().replace(/"/g, '')}" autocomplete="off" autocapitalize="characters" enterkeyhint="done" spellcheck="false"></label>
       <div><span class="lbl2">${t('title.car')}</span>${carPickerHtml()}</div>
       ${settingsHtml()}
     </div>
@@ -335,7 +339,7 @@ function showResults(): void {
   overlay.innerHTML = `<div class="card results">
     <h2>${pos === 1 ? '🏆 ' + t('res.win') : t('res.title')}</h2>
     <div class="place">${t('res.youPlace', { n: pos })}</div>
-    <table><thead><tr><th>#</th><th>${t('res.driver')}</th><th>${t('res.time')}</th><th>${t('res.best')}</th><th>${t('res.pits')}</th><th>${t('res.pen')}</th></tr></thead><tbody>${rows}</tbody></table>
+    <div class="tscroll"><table><thead><tr><th>#</th><th>${t('res.driver')}</th><th>${t('res.time')}</th><th>${t('res.best')}</th><th>${t('res.pits')}</th><th>${t('res.pen')}</th></tr></thead><tbody>${rows}</tbody></table></div>
     <div class="row"><button class="cta" id="o-again">${t('res.again')} <small>(R)</small></button><button class="cta alt" id="o-menu">${t('pause.menu')}</button></div>
   </div>`;
   overlay.querySelector('#o-again')!.addEventListener('click', restartSession);
@@ -376,7 +380,7 @@ function showChamp(finished: Race | null): void {
   if (finished && last) {
     const rows = last.order.map((o, i) => `<tr class="${o.idx === 0 ? 'me' : ''}"><td>${i + 1}</td><td>${colorDot(driverColor(o.idx))}${driverName(o.idx)}</td><td class="mono">${o.dnf ? t('champ.dnf') : fmt(o.time)}</td><td class="mono">${o.dnf ? 0 : R.CHAMP_POINTS[i]}</td></tr>`).join('');
     roundHtml = `<h3>${t('champ.roundResults')} · ${t(`track.${last.track}.name`)}</h3>
-      <table><thead><tr><th>#</th><th>${t('res.driver')}</th><th>${t('res.time')}</th><th>${t('champ.points')}</th></tr></thead><tbody>${rows}</tbody></table>`;
+      <div class="tscroll"><table><thead><tr><th>#</th><th>${t('res.driver')}</th><th>${t('res.time')}</th><th>${t('champ.points')}</th></tr></thead><tbody>${rows}</tbody></table></div>`;
   }
   const st = R.standings(c, 4);
   const stRows = st.map((x, i) => `<tr class="${x.idx === 0 ? 'me' : ''}"><td>${i + 1}</td><td>${colorDot(driverColor(x.idx))}${driverName(x.idx)}</td><td class="mono">${x.points}</td><td class="mono">${x.wins}</td><td class="mono">${x.seconds}</td></tr>`).join('');
@@ -389,7 +393,7 @@ function showChamp(finished: Race | null): void {
     <div class="rounds">${roundsLine}</div>
     ${roundHtml}
     <h3>${done ? t('champ.final') : t('champ.standings')}</h3>
-    <table><thead><tr><th>#</th><th>${t('res.driver')}</th><th>${t('champ.points')}</th><th>${t('champ.wins')}</th><th>${t('champ.seconds')}</th></tr></thead><tbody>${stRows}</tbody></table>
+    <div class="tscroll"><table><thead><tr><th>#</th><th>${t('res.driver')}</th><th>${t('champ.points')}</th><th>${t('champ.wins')}</th><th>${t('champ.seconds')}</th></tr></thead><tbody>${stRows}</tbody></table></div>
     <div class="row">${done ? '' : `<button class="cta" id="o-next">${t('champ.continue', { n: c.rounds.length + 1 })}</button>`}<button class="cta alt" id="o-menu">${t('champ.menu')}</button></div>
   </div>`;
   overlay.querySelector('#o-next')?.addEventListener('click', () => { sfx.init(); startChampRound(); });
@@ -410,7 +414,7 @@ function showBoards(): void {
     <p>${t('boards.hint')}</p>
     <div class="tabs">${tabs}</div>
     <div class="tabs">${kinds}</div>
-    <table><thead><tr><th>${t('boards.rank')}</th><th>${t('boards.initials')}</th><th>${t('boards.car')}</th><th>${t('boards.time')}</th><th></th></tr></thead><tbody>${body}</tbody></table>
+    <div class="tscroll"><table><thead><tr><th>${t('boards.rank')}</th><th>${t('boards.initials')}</th><th>${t('boards.car')}</th><th>${t('boards.time')}</th><th></th></tr></thead><tbody>${body}</tbody></table></div>
     <div class="row"><button class="cta alt" id="o-back">${t('boards.back')}</button></div>
   </div>`;
   overlay.querySelectorAll<HTMLElement>('.tab[data-id]').forEach((b) => b.addEventListener('click', () => { lbTrack = b.dataset.id!; showBoards(); }));
@@ -476,6 +480,7 @@ const input = new DrivingInput({
   pause: () => { if (screen === 'race') showPause(); else if (screen === 'pause') resume(); },
 });
 const pad = new TouchPad([...hud.root.querySelectorAll<HTMLButtonElement>('[data-hold], [data-tap]')] as PadButton[], input, () => sfx.init());
+const anchor = new ControlsAnchor(vp);
 function releaseDriving(): void { pad.reset(); input.clear(); }
 
 let touchMode = savedTouchMode();
@@ -487,6 +492,7 @@ function syncPad(): void {
   const show = on && screen === 'race';
   if (!show) pad.reset();
   hud.el['t-pad'].hidden = !show;
+  hud.fitMini();
 }
 coarsePointer.addEventListener('change', syncPad);
 function setTouchMode(m: TouchMode): void {
@@ -496,6 +502,21 @@ function setTouchMode(m: TouchMode): void {
 }
 // every menu button counts as the interaction that lets audio start or resume
 overlay.addEventListener('click', () => sfx.init());
+
+/**
+ * iOS Safari, and Chrome by default, lay an on-screen keyboard over the page and shrink only the visual viewport.
+ * The overlay gives that space up while a field has focus and keeps the field in view. The canvas, and any race behind the menu, keep their size.
+ */
+function fitKeyboard(): void {
+  const vv = window.visualViewport;
+  const field = document.activeElement instanceof HTMLInputElement && overlay.contains(document.activeElement) ? document.activeElement : null;
+  const covered = vv && field ? Math.max(0, Math.round(vp.h - vv.height - vv.offsetTop)) : 0;
+  overlay.style.setProperty('--kb', `${covered}px`);
+  if (covered && field) field.scrollIntoView({ block: 'center' });
+}
+window.visualViewport?.addEventListener('resize', fitKeyboard);
+overlay.addEventListener('focusin', fitKeyboard);
+overlay.addEventListener('focusout', fitKeyboard);
 
 const NON_SCROLL = ['Space', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'];
 /** This key belongs to what has focus: text fields take everything, and a focused menu button keeps Space and Enter. */
@@ -537,14 +558,33 @@ window.addEventListener('blur', suspend);
 document.addEventListener('visibilitychange', () => { if (document.hidden) suspend(); stepper.rebase(); });
 renderer.domElement.addEventListener('wheel', (e) => { e.preventDefault(); zoomBy(e.deltaY > 0 ? 1.12 : 0.89); }, { passive: false });
 
+/**
+ * A HUD button for mouse, keyboard and touch alike. A finger acts on touchstart, because a second finger gets no click while the first holds Throttle;
+ * cancelling it means no click follows, so nothing fires twice. Audio unlocks on the release, as on the pad.
+ */
+function hudButton(id: string, act: () => void): void {
+  const b = hud.el[id];
+  b.addEventListener('click', () => { sfx.init(); act(); });
+  b.addEventListener('touchstart', (e) => { e.preventDefault(); act(); }, { passive: false });
+  b.addEventListener('touchend', () => sfx.init());
+}
 hud.el['b-view'].addEventListener('click', () => { sfx.init(); input.tap('view'); });
-hud.el['b-zin'].addEventListener('click', () => zoomBy(0.8));
-hud.el['b-zout'].addEventListener('click', () => zoomBy(1.25));
-hud.el['b-snd'].addEventListener('click', () => { sfx.init(); toggleSound(); });
+hudButton('b-more', () => hud.setMore(!hud.moreOpen));
+hudButton('b-zin', () => zoomBy(0.8));
+hudButton('b-zout', () => zoomBy(1.25));
+hudButton('b-snd', toggleSound);
 hud.el['b-pause'].addEventListener('click', () => input.tap('pause'));
-function toggleSound(): void { sfx.setMuted(!sfx.muted); hud.el['b-snd'].textContent = sfx.muted ? '🔇' : '🔊'; }
-hud.el['b-ghost'].addEventListener('click', () => { sfx.init(); toggleGhost(); });
-function toggleGhost(): void { ghost.shown = !ghost.shown; hud.el['b-ghost'].classList.toggle('off', !ghost.shown); }
+function toggleSound(): void {
+  sfx.setMuted(!sfx.muted);
+  hud.el['b-snd'].textContent = sfx.muted ? '🔇' : '🔊';
+  hud.el['b-snd'].setAttribute('aria-pressed', String(!sfx.muted));
+}
+hudButton('b-ghost', toggleGhost);
+function toggleGhost(): void {
+  ghost.shown = !ghost.shown;
+  hud.el['b-ghost'].classList.toggle('off', !ghost.shown);
+  hud.el['b-ghost'].setAttribute('aria-pressed', String(ghost.shown));
+}
 
 // ------------------------------------------------------------ camera
 let camMode: 'follow' | 'full' = 'full';
@@ -554,9 +594,10 @@ const camLead = new THREE.Vector2();
 let curSpan = 20;
 const TILT = THREE.MathUtils.degToRad(13);
 function fullSpan(): number {
-  const aspect = window.innerWidth / window.innerHeight;
-  return Math.max(T.BOUNDS.h + 11, (T.BOUNDS.w + 13) / aspect);
+  return Math.max(T.BOUNDS.h + 11, (T.BOUNDS.w + 13) / (vp.w / vp.h));
 }
+/** Spans are view heights, so a portrait screen widens the view until a follow span covers the same width as it does on a square one. */
+const portraitFit = (): number => Math.min(1, vp.w / vp.h);
 function toggleView(): void { camMode = camMode === 'follow' ? 'full' : 'follow'; }
 function zoomBy(f: number): void {
   if (camMode === 'full') { camMode = 'follow'; }
@@ -572,7 +613,7 @@ function updateCamera(dt: number, p: Pose): void {
     const kl = 1 - Math.exp(-2.2 * dt);
     camLead.x += (lx - camLead.x) * kl; camLead.y += (ly - camLead.y) * kl;
     desired.set(p.x + camLead.x, 0, -(p.y + camLead.y));
-    span = followSpan;
+    span = followSpan / portraitFit();
   } else {
     desired.set(T.BOUNDS.cx, 0, -T.BOUNDS.cy - 2);
     span = fullSpan();
@@ -584,8 +625,7 @@ function updateCamera(dt: number, p: Pose): void {
   camera.position.set(camTarget.x, Math.cos(TILT) * dist, camTarget.z + Math.sin(TILT) * dist);
   camera.lookAt(camTarget);
   // shadows follow the view
-  const aspect = window.innerWidth / window.innerHeight;
-  const sh = curSpan * Math.max(1, aspect) * 0.62 + 4;
+  const sh = curSpan * Math.max(1, vp.w / vp.h) * 0.62 + 4;
   if (Math.abs(sh - shadowSpan) > shadowSpan * 0.08) {
     shadowSpan = sh;
     const c = sun.shadow.camera;
@@ -596,16 +636,19 @@ function updateCamera(dt: number, p: Pose): void {
   sun.target.position.copy(camTarget);
 }
 
-/** Size everything to the window, display and preset. Only the drawing buffer varies by preset: the canvas CSS size, aspect ratio and DOM HUD do not. */
+/**
+ * Size everything to the game's box, display and preset. Only the drawing buffer varies by preset: the canvas CSS size, aspect ratio and DOM HUD do not.
+ * The race carries on.
+ */
 function fitRenderer(): void {
+  vp = viewSize();
   dpr = window.devicePixelRatio;
-  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.aspect = vp.w / vp.h;
   camera.updateProjectionMatrix();
   renderer.setPixelRatio(pixelRatioFor(preset, dpr));
-  renderer.setSize(window.innerWidth, window.innerHeight);
+  renderer.setSize(vp.w, vp.h, false);
   hud.fitMini();
 }
-window.addEventListener('resize', fitRenderer);
 
 /** Takes effect at once and touches only the renderer, so a race in progress carries on untouched. */
 function setPreset(id: PresetId): void {
@@ -680,14 +723,14 @@ function syncCars(dt: number, time: number, poses: Pose[]): void {
   for (const m of world.bridgeMats) m.opacity = bridgeFade;
   const p = race.player;
   const inSession = screen === 'race' || screen === 'pause' || screen === 'results';
-  const wanted = inSession && (camMode === 'full' || curSpan > 34 || (under && p.mode !== 'off'));
+  const wanted = inSession && (camMode === 'full' || curSpan * portraitFit() > 34 || (under && p.mode !== 'off'));
   markerFade += ((wanted ? 1 : 0) - markerFade) * Math.min(1, dt * 8);
   playerMarker.visible = markerFade > 0.02;
   if (playerMarker.visible) {
     playerMarker.position.set(poses[0].x, poses[0].z + Y0 + 0.05, -poses[0].y);
     playerMarker.quaternion.copy(camera.quaternion);
     // curSpan is the world height of the view, so this holds a constant on-screen size
-    playerMarker.scale.setScalar(Math.max(MARKER_MIN, (MARKER_PX * curSpan) / window.innerHeight) * (1 + Math.sin(time * 3) * 0.04));
+    playerMarker.scale.setScalar(Math.max(MARKER_MIN, (MARKER_PX * curSpan) / vp.h) * (1 + Math.sin(time * 3) * 0.04));
     for (const m of playerMarker.children) ((m as THREE.Mesh).material as THREE.MeshBasicMaterial).opacity = markerFade;
   }
 }
@@ -773,8 +816,12 @@ showTitle();
 const simulating = (): boolean => screen === 'race' || screen === 'results';
 function frame(now: number): void {
   requestAnimationFrame(frame);
-  // moving to another display can change the ratio without a resize event
-  if (window.devicePixelRatio !== dpr) fitRenderer();
+  // checked here, not on resize: browser bars and moving to another display do not always send that event, and the canvas is redrawn in this same frame
+  const size = viewSize();
+  // Every frame, so the anchor follows the viewport while nothing is in use and each hold is measured from where it began.
+  // Fingers are let go if the controls moved from under them, and keep needing a fresh press; held keys are not affected.
+  if (anchor.update(size, pad.holding || hud.moreOpen)) { pad.reset(); hud.setMore(false); }
+  if (window.devicePixelRatio !== dpr || size.w !== vp.w || size.h !== vp.h) fitRenderer();
   // dt paces presentation only (camera, wheels, toasts) and keeps running on menus; race time comes from the stepper
   const dt = Math.min(MAX_GAP, Math.max(0, (now - last) / 1000));
   last = now; time += dt;
@@ -794,4 +841,4 @@ function frame(now: number): void {
 requestAnimationFrame(frame);
 
 // debug/test hooks
-(window as unknown as { __game: unknown }).__game = { get race() { return race; }, T, R, PEN, DEF, PERSONAS, startRace, applyTrack, startSession, showTitle, showBoards, get mode() { return mode; }, get preset() { return preset; }, get touchMode() { return touchMode; }, setTouchMode, input, get audio() { return sfx.ctx?.state ?? null; }, get muted() { return sfx.muted; }, suspendAudio: () => sfx.ctx?.suspend(), get champ() { return champ; }, get ghost() { return ghost; }, get recorder() { return recorder; }, get pbMs() { return pbMs; }, get screen() { return screen; }, get view() { return camMode; }, stepper, advance: (sec: number) => { for (let t = 0; t < sec && simulating(); t += STEP) tick(STEP); }, setView: (m: 'follow' | 'full') => { camMode = m; }, zoom: (span: number) => { camMode = 'follow'; followSpan = span; curSpan = span; }, snapCam: () => { const p = race.player; camLead.set(0, 0); camTarget.set(p.x, 0, -p.y); }, get marker() { return playerMarker; }, arrows: { lane: laneArrow, pit: pitArrow }, info: () => ({ calls: renderer.info.render.calls, tris: renderer.info.render.triangles, objects: world.root.children.length, frames: renderer.info.render.frame, geometries: renderer.info.memory.geometries, textures: renderer.info.memory.textures }) };
+(window as unknown as { __game: unknown }).__game = { get race() { return race; }, T, R, PEN, DEF, PERSONAS, startRace, applyTrack, startSession, showTitle, showBoards, get mode() { return mode; }, get preset() { return preset; }, get touchMode() { return touchMode; }, setTouchMode, input, get audio() { return sfx.ctx?.state ?? null; }, get muted() { return sfx.muted; }, suspendAudio: () => sfx.ctx?.suspend(), get champ() { return champ; }, get ghost() { return ghost; }, get recorder() { return recorder; }, get pbMs() { return pbMs; }, get screen() { return screen; }, get view() { return camMode; }, get aspect() { return camera.aspect; }, get mini() { return { w: hud.mW, h: hud.mH }; }, stepper, advance: (sec: number) => { for (let t = 0; t < sec && simulating(); t += STEP) tick(STEP); }, setView: (m: 'follow' | 'full') => { camMode = m; }, zoom: (span: number) => { camMode = 'follow'; followSpan = span; curSpan = span; }, snapCam: () => { const p = race.player; camLead.set(0, 0); camTarget.set(p.x, 0, -p.y); }, get marker() { return playerMarker; }, arrows: { lane: laneArrow, pit: pitArrow }, info: () => ({ calls: renderer.info.render.calls, tris: renderer.info.render.triangles, objects: world.root.children.length, frames: renderer.info.render.frame, geometries: renderer.info.memory.geometries, textures: renderer.info.memory.textures }) };

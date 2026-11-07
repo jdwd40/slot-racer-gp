@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Bounded browser validation of the real game. Procedure and results: docs/validation.md.
 //
-//   node scripts/browser-check.mjs [tracks race controlled routing practice championship touch]   functional checks (default: all)
+//   node scripts/browser-check.mjs [tracks race controlled routing practice championship touch responsive touchrace]   functional checks (default: all)
 //   node scripts/browser-check.mjs perf --label updated --machine "<name>"          frame-time capture
 //   node scripts/browser-check.mjs compare <baseline.json> <updated.json>           like-for-like comparison
 //
@@ -252,6 +252,14 @@ async function environment(run, page, extra = {}) {
   return { machine: run.machine, commit: run.commit, revision: run.revision, url: run.url, browser: `${run.browser.browserType().name()} ${run.browser.version()}`, headed: !!run.headed, os: `${os.type()} ${os.release()} ${os.arch()}`, ...e, acceleration: accelerationOf(e.renderer), ...extra };
 }
 
+/** Click a HUD button that compact layouts keep in the More tray. */
+async function utility(page, selector) {
+  const tray = await page.locator('#b-more').isVisible();
+  if (tray) await page.click('#b-more');
+  await page.click(selector);
+  if (tray) await page.click('#b-more');
+}
+
 async function pickRaceSetup(page) {
   await page.click(`.track[data-id="${TRACK}"]`);
   await page.click(`.car[data-car="${CAR}"]`);
@@ -305,7 +313,7 @@ async function race(run, c) {
   const views = [
     { label: 'C to full', act: () => keys.tap('KeyC'), want: 'full' },
     { label: 'wheel zoom back to follow', act: () => page.mouse.wheel(0, 120), want: 'follow' },
-    { label: 'view button to full', act: () => page.click('#b-view'), want: 'full' },
+    { label: 'view button to full', act: () => utility(page, '#b-view'), want: 'full' },
     { label: 'C to follow', act: () => keys.tap('KeyC'), want: 'follow' },
   ];
   let view = null, viewAt = 0, paused = false;
@@ -1055,6 +1063,7 @@ async function touch(run, c) {
 
   // audio: back from a suspended context on the next touch, with mute kept
   await read(page, () => window.__game.suspendAudio());
+  await f.tap('#b-more');
   await page.locator('#b-snd').tap();
   const muted = await read(page, () => window.__game.muted);
   await read(page, () => window.__game.suspendAudio());
@@ -1095,7 +1104,7 @@ async function touch(run, c) {
     await page.setViewportSize({ width, height });
     await frames(page, 2);
     const m = await read(page, () => {
-      const ids = ['t-throttle', 't-brake', 't-lane', 't-pit', 't-pause', 't-view'];
+      const ids = ['t-throttle', 't-brake', 't-lane', 't-pit', 't-pause', 't-view', 'b-more'].filter((id) => document.getElementById(id).getClientRects().length);
       const rects = ids.map((id) => { const e = document.getElementById(id), r = e.getBoundingClientRect(); return { id, x: r.x, y: r.y, r: r.right, b: r.bottom, w: r.width, h: r.height, top: document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2)?.closest('button')?.id ?? null }; });
       let gap = 1e9;
       for (const a of rects) for (const b of rects) {
@@ -1115,6 +1124,386 @@ async function touch(run, c) {
     c.evidence.layouts.push({ name, width, height, gap: m.gap, rects: m.rects });
     await page.screenshot({ path: path.join(run.out, `touch-${width}x${height}.png`) });
   }
+  return s;
+}
+
+// ------------------------------------------------------------ responsive layouts
+const LAYOUTS = [['phone portrait, small', 360, 640], ['phone portrait', 390, 844], ['phone landscape, small', 640, 360], ['phone landscape', 844, 390], ['tablet portrait', 768, 1024]];
+const CONTROLS = ['t-throttle', 't-brake', 't-lane', 't-pit', 't-pause'];
+const held2 = (page) => read(page, () => { const i = window.__game.input; return { throttle: i.held('throttle'), brake: i.held('brake') }; });
+
+/** Worst case for the HUD: a stop-and-go owed on the pit route, low fuel, a time penalty and a long message at once. Layout only: the race is not played on from here. */
+const crowdHud = (page) => read(page, () => { const g = window.__game, p = g.race.player; p.fuel = 0.05; p.sgOwed = 5; p.sgChances = 2; p.timePen = 10; p.pitReq = true; p.pitPenaltyOnly = true; p.laneOverride = true; p.finished = false; document.getElementById('h-toast').textContent = 'Second contact with Green Viper. One more and you serve a stop-and-go penalty'; document.getElementById('h-toast').className = 'toast show warn'; });
+
+/** Geometry of the racing HUD: what is on screen, what touches what, and how much of the track is left. */
+function measureHud(ids) {
+  const rectOf = (e) => { const r = e.getBoundingClientRect(); return { x: r.x, y: r.y, r: r.right, b: r.bottom, w: r.width, h: r.height }; };
+  const hit = (a, b) => a.x < b.r - 0.5 && b.x < a.r - 0.5 && a.y < b.b - 0.5 && b.y < a.b - 0.5;
+  const shown = (e) => e && e.getClientRects().length > 0 && getComputedStyle(e).visibility !== 'hidden';
+  const named = { pos: '#h-pos', lap: '#h-lap', time: '#h-time', fuel: '.bl .meter:nth-child(2)', chips: '#h-chips', mini: '#h-mini', status: '#h-status', toast: '#h-toast', top: '.tl', timer: '.tc' };
+  const parts = Object.fromEntries(Object.entries(named).map(([k, q]) => { const e = document.querySelector(q); return [k, shown(e) ? rectOf(e) : null]; }));
+  const controls = ids.map((id) => { const e = document.getElementById(id), r = rectOf(e); return { id, ...r, top: document.elementFromPoint(r.x + r.w / 2, r.y + r.h / 2)?.closest('button')?.id ?? null }; });
+  const box = document.getElementById('app').getBoundingClientRect();
+  const pairs = [];
+  const solid = ['top', 'timer', 'fuel', 'chips', 'mini', 'status', 'toast'];
+  for (const a of solid) for (const c of controls) if (parts[a] && hit(parts[a], c)) pairs.push(`${a}/${c.id}`);
+  for (const [a, b] of [['top', 'timer'], ['top', 'mini'], ['timer', 'mini'], ['status', 'fuel'], ['status', 'chips'], ['toast', 'top'], ['toast', 'timer'], ['toast', 'status']]) if (parts[a] && parts[b] && hit(parts[a], parts[b])) pairs.push(`${a}/${b}`);
+  let gap = 1e9;
+  for (const a of controls) for (const b of controls) if (a.id < b.id) gap = Math.min(gap, Math.max(Math.max(a.x, b.x) - Math.min(a.r, b.r), Math.max(a.y, b.y) - Math.min(a.b, b.b)));
+  // the share of a coarse grid of screen points that lands on the track view rather than on a panel or control
+  let free = 0, n = 0;
+  const panels = [...document.querySelectorAll('.tl, .tc, .bl, #h-mini, #h-status, .tbtn, .tr .btn')].filter((e) => shown(e)).map(rectOf);
+  for (let x = 4; x < box.width; x += 8) for (let y = 4; y < box.height; y += 8) { n++; if (!panels.some((r) => x >= r.x && x <= r.r && y >= r.y && y <= r.b)) free++; }
+  const mid = { x: box.width / 2, y: box.height / 2, r: box.width / 2 + 1, b: box.height / 2 + 1 };
+  const mini = document.getElementById('h-mini');
+  const canvas = document.querySelector('#app > canvas');
+  return { parts, controls, pairs, gap: Math.round(gap), free: +(free / n).toFixed(2), carClear: !panels.some((r) => hit(r, mid)), mini: { cssW: mini.clientWidth, cssH: mini.clientHeight, w: mini.width, h: mini.height, projW: window.__game.mini.w, projH: window.__game.mini.h }, canvas: { w: canvas.clientWidth, h: canvas.clientHeight, bw: canvas.width, bh: canvas.height }, box: { w: box.width, h: box.height }, aspect: window.__game.aspect, pageX: document.documentElement.scrollWidth - document.documentElement.clientWidth };
+}
+
+/** Whether a menu fits: no sideways page, nothing clipped, and every control reachable by scrolling the card alone, then actually on top where a finger lands. */
+function measureMenu() {
+  const card = document.querySelector('.overlay.show .card'), r = card.getBoundingClientRect();
+  const box = document.getElementById('app').getBoundingClientRect();
+  const out = { pageX: document.documentElement.scrollWidth - document.documentElement.clientWidth, cardX: card.scrollWidth - card.clientWidth, inside: r.x >= 0 && r.y >= 0 && r.right <= box.width + 0.5 && r.bottom <= box.height + 0.5, blocked: [], small: [], tableScroll: [...card.querySelectorAll('.tscroll')].map((t) => t.scrollWidth - t.clientWidth) };
+  card.scrollTop = 0;
+  const row = card.querySelector(':scope > .row');
+  out.actionsPinned = !!row && row.getBoundingClientRect().bottom <= r.bottom + 1;
+  for (const e of card.querySelectorAll('button, input')) {
+    e.scrollIntoView({ block: 'center', inline: 'center' });
+    const b = e.getBoundingClientRect();
+    const top = document.elementFromPoint(b.x + b.width / 2, b.y + b.height / 2);
+    if (top !== e && !e.contains(top)) out.blocked.push(e.id || e.dataset.id || e.dataset.car || e.textContent.trim().slice(0, 16));
+    if (b.height < 44 || b.width < 44) out.small.push(`${e.id || e.textContent.trim().slice(0, 12)} ${Math.round(b.width)}x${Math.round(b.height)}`);
+  }
+  card.scrollTop = 0;
+  return out;
+}
+
+const menuOk = (m) => m.pageX <= 0 && m.cardX <= 0 && m.inside && m.blocked.length === 0 && m.small.length === 0;
+
+/** The supported layouts, by touch alone on Chromium's emulation, and the desktop layout by mouse and keys. See docs/responsive.md. */
+async function responsive(run, c) {
+  const shot = (page, name) => page.screenshot({ path: path.join(run.out, `${name}.png`) });
+  const size = (page, w, h) => page.setViewportSize({ width: w, height: h });
+  const champ = JSON.stringify({ v: 1, car: CAR, initials: 'QA', rounds: [{ track: 'circuit-1', order: [0, 1, 2, 3].map((idx, i) => ({ idx, dnf: false, time: 300 + i })) }], startedAt: 1 });
+  const board = JSON.stringify([{ id: 'a', initials: 'QA', car: 'frost', ms: 61234, at: 1 }, { id: 'b', initials: 'ZED', car: CAR, ms: 62345, at: 2 }]);
+
+  // ---- desktop first: the regression baseline. Geometry measured on the previous commit at 1440x900
+  const d = await open(run, { viewport: { width: 1440, height: 900 } });
+  {
+    const { page, keys } = d;
+    await page.click('#o-start');
+    await frames(page, 2);
+    const g = await read(page, () => { const q = (s) => { const r = document.querySelector(s).getBoundingClientRect(); return [r.x, r.y, r.width].map(Math.round); }, m = document.getElementById('h-mini'); return { tl: q('.tl').slice(0, 2), tc: q('.tc')[1], tr: [document.querySelector('.tr').getBoundingClientRect().right, q('.tr')[1]], bl: q('.bl'), mini: [m.clientWidth, m.clientHeight, m.width, m.height], br: [m.getBoundingClientRect().right, m.getBoundingClientRect().bottom], more: document.getElementById('b-more').getClientRects().length, touch: document.body.classList.contains('touch'), btn: document.getElementById('b-zin').getBoundingClientRect().height }; });
+    c.ok('Desktop 1440x900: HUD positions, 230x200 minimap and 36 px buttons are unchanged, with no More tray', g.tl.join() === '12,12' && g.tc === 12 && g.tr.join() === '1428,12' && g.bl[0] === 12 && g.bl[2] === 280 && g.mini.join() === '230,200,230,200' && g.br.join() === '1428,888' && g.more === 0 && !g.touch && g.btn === 36, g);
+    await shot(page, 'desktop-1440x900');
+    await keys.set('KeyW', true);
+    await frames(page, 2);
+    await size(page, 1300, 800);
+    await frames(page, 3);
+    const w = await held2(page);
+    await keys.set('KeyW', false);
+    c.ok('Desktop: resizing keeps a held key', w.throttle, w);
+    await size(page, 1440, 900);
+    await keys.tap('KeyC');
+    await frames(page, 1);
+    const v1 = await read(page, () => window.__game.view);
+    await page.click('#b-view');
+    await frames(page, 1);
+    const v2 = await read(page, () => window.__game.view);
+    await page.click('#b-snd');
+    await page.click('#b-snd');
+    await keys.tap('Escape');
+    await waitFor(page, () => window.__game.screen === 'pause');
+    const card = await read(page, () => { const r = document.querySelector('.card').getBoundingClientRect(); return { sticky: getComputedStyle(document.querySelector('.card > .row')).position, legend: document.querySelector('.controls').getClientRects().length > 0, w: r.width }; });
+    c.ok('Desktop: C and the View button work by key and mouse, and the pause card keeps its legend', v1 === 'full' && v2 === 'follow' && card.legend && card.sticky === 'static', { v1, v2, card });
+    await d.context.close();
+  }
+  c.ok('Desktop part: no page or console errors', d.errors.length === 0, d.errors.slice(0, 5));
+
+  // ---- emulated touch device
+  const s = await open(run, { viewport: { width: 360, height: 640 }, dpr: 2, device: PHONE, fixtures: { 'srgp.champ': champ, 'srgp.lb.practice.circuit-1': board, 'srgp.track': TRACK } });
+  const { page } = s;
+  const cdp = await s.context.newCDPSession(page);
+  const f = new Fingers(page, cdp);
+  c.evidence.touch = await read(page, () => ({ coarse: matchMedia('(any-pointer: coarse)').matches, maxTouchPoints: navigator.maxTouchPoints, dpr: devicePixelRatio }));
+
+  // menus, each at every size
+  const menus = async (name) => {
+    for (const [label, w, h] of LAYOUTS) {
+      await size(page, w, h);
+      await frames(page, 2);
+      const m = await read(page, measureMenu);
+      c.ok(`Menu ${name} at ${w}x${h}: no sideways overflow, every control reachable and 44 px or more`, menuOk(m), { ...m, label });
+      if (name === 'title' || name === 'results') await shot(page, `${name}-${w}x${h}`);
+    }
+  };
+  await menus('title');
+  await size(page, 360, 640);
+  await page.locator('#o-boards').tap();
+  await waitFor(page, () => window.__game.screen === 'boards');
+  await menus('leaderboards');
+  await size(page, 360, 640);
+  await page.locator('#o-back').tap();
+  await waitFor(page, () => window.__game.screen === 'title');
+
+  // the racing HUD at every size, with everything shown at once
+  await page.locator('#o-start').tap();
+  await waitFor(page, () => window.__game.screen === 'race');
+  c.evidence.hud = [];
+  for (const [label, w, h] of LAYOUTS) {
+    await size(page, w, h);
+    await frames(page, 3);
+    const clean = await read(page, measureHud, CONTROLS);
+    await crowdHud(page);
+    await frames(page, 3);
+    const m = await read(page, measureHud, CONTROLS);
+    await shot(page, `race-${w}x${h}`);
+    const seen = ['pos', 'lap', 'time', 'fuel', 'chips', 'mini', 'status', 'toast'].filter((k) => { const p = m.parts[k]; return !p || p.x < 0 || p.y < 0 || p.r > w + 0.5 || p.b > h + 0.5; });
+    const sized = m.controls.every((r) => r.x >= 0 && r.y >= 0 && r.r <= w && r.b <= h && r.w >= 48 && r.h >= 48 && r.top === r.id);
+    c.ok(`Race HUD at ${w}x${h} (${label}): status, fuel, messages and controls all on screen, nothing overlapping`, seen.length === 0 && sized && m.pairs.length === 0 && m.gap >= 8 && m.pageX <= 0, { missing: seen, overlaps: m.pairs, gap: m.gap });
+    c.ok(`Race HUD at ${w}x${h}: track view keeps the middle of the screen and over half the area`, clean.carClear && clean.free >= 0.5, { freeClean: clean.free, freeCrowded: m.free, middleClearWhenCrowded: m.carClear });
+    c.ok(`Minimap at ${w}x${h}: backing store, CSS size and projection agree`, Math.abs(m.mini.w - m.mini.projW * 2) <= 1 && Math.abs(m.mini.h - m.mini.projH * 2) <= 1 && Math.abs(m.mini.cssW - m.mini.projW) <= 1 && m.mini.cssW >= 96, m.mini);
+    c.ok(`Canvas at ${w}x${h}: fills the box, aspect follows`, m.canvas.w === w && m.canvas.h === h && Math.abs(m.aspect - w / h) < 0.001 && Math.abs(m.canvas.bw / m.canvas.bh - w / h) < 0.02, m.canvas);
+
+    if (await page.locator('#b-more').isVisible()) {
+      await f.tap('#b-more');
+      await frames(page, 1);
+      const tray = await read(page, () => { const more = document.getElementById('b-more'); const b = ['t-view', 'b-zout', 'b-zin', 'b-snd'].map((id) => { const r = document.getElementById(id).getBoundingClientRect(); return { id, x: r.x, y: r.y, r: r.right, b: r.bottom, w: r.width, h: r.height, top: document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2)?.closest('button')?.id ?? null }; }); const pad = [...document.querySelectorAll('.tbtn')].map((e) => e.getBoundingClientRect()); return { b, expanded: more.getAttribute('aria-expanded'), label: more.getAttribute('aria-label'), clash: b.filter((x) => pad.some((p) => x.x < p.right && p.left < x.r && x.y < p.bottom && p.top < x.b)).map((x) => x.id) }; });
+      c.ok(`More tray at ${w}x${h}: labelled, opens by touch, View, zoom and sound on screen, clear of the pad`, tray.expanded === 'true' && !!tray.label && tray.clash.length === 0 && tray.b.every((x) => x.x >= 0 && x.r <= w && x.b <= h && x.w >= 48 && x.h >= 48 && x.top === x.id), tray);
+      if (w === 360) await shot(page, 'race-tray-360x640');
+      await f.tap('#b-more');
+    }
+    await read(page, () => { const p = window.__game.race.player; p.fuel = 1; p.sgOwed = 0; p.timePen = 0; p.pitReq = false; p.pitPenaltyOnly = false; p.laneOverride = false; document.getElementById('h-toast').className = 'toast'; });
+  }
+
+  // tray actions with a finger already down
+  await size(page, 640, 360);
+  await frames(page, 2);
+  const thr = await f.put('#t-throttle');
+  await f.tap('#b-more');
+  await frames(page, 1);
+  const mutedBefore = await read(page, () => window.__game.muted);
+  await f.tap('#b-snd');
+  const mutedAfter = await read(page, () => window.__game.muted);
+  await f.tap('#b-snd');
+  const stillHeld = await held2(page);
+  await f.tap('#b-more');
+  await f.lift(thr);
+  c.ok('Second finger: More and Sound work while Throttle stays held, one action per tap', mutedBefore !== mutedAfter && stillHeld.throttle, { mutedBefore, mutedAfter, stillHeld });
+
+  // viewport lifecycle
+  const mid = async (w, h) => { await size(page, w, h); await frames(page, 3); return game(page); };
+  await read(page, () => { window.__game.startSession('race'); window.__game.advance(9); });
+  await frames(page, 2);
+  const r0 = await game(page);
+  const hold = await f.put('#t-throttle');
+  await waitFor(page, () => window.__game.input.held('throttle'));
+  await size(page, 640, 304);   // 56 px of browser bar appears
+  await frames(page, 3);
+  const bar = await held2(page);
+  await size(page, 640, 360);
+  await frames(page, 3);
+  const bar2 = await held2(page);
+  c.ok('Browser bar sliding: throttle stays held', bar.throttle && bar2.throttle, { bar, bar2 });
+  const r1 = await mid(360, 640);
+  const rot = await held2(page);
+  const m1 = await read(page, measureHud, CONTROLS);
+  c.ok('Rotation mid-hold: the hold is released and the race carries on from where it was', !rot.throttle && !rot.brake && r1.screen === 'race' && r1.raceTime >= r0.raceTime && r1.lap === r0.lap && r1.u >= r0.u && r1.phase === 'racing', { before: { t: r0.raceTime, u: r0.u }, after: { t: r1.raceTime, u: r1.u }, rot });
+  c.ok('Rotation: canvas, camera and controls follow', m1.canvas.w === 360 && m1.canvas.h === 640 && Math.abs(m1.aspect - 0.5625) < 0.001 && m1.controls.every((x) => x.r <= 360 && x.b <= 640 && x.top === x.id), m1.canvas);
+  await f.slide(hold, 300, 500);
+  await frames(page, 3);
+  const revived = await held2(page);
+  await f.lift(hold);
+  const fresh = await f.put('#t-throttle');
+  const pressed = await held2(page);
+  await f.lift(fresh);
+  c.ok('The old finger cannot revive the hold, a fresh press works', !revived.throttle && pressed.throttle && !(await held2(page)).throttle, { revived, pressed });
+  await f.tap('#t-pause');
+  await waitFor(page, () => window.__game.screen === 'pause');
+  await shot(page, 'pause-360x640');
+  const p0 = await game(page);
+  await size(page, 640, 360);
+  await frames(page, 3);
+  await size(page, 360, 640);
+  await frames(page, 3);
+  const p1 = await game(page);
+  c.ok('Rotation while paused: still paused, clock unchanged, nothing held', p1.screen === 'pause' && p1.raceTime === p0.raceTime && p1.t === p0.t && !(await held2(page)).throttle, { p0: p0.raceTime, p1: p1.raceTime });
+
+  // overlays take the input
+  const pad = await read(page, () => { const b = document.querySelector('.overlay.show'); return { top: document.elementFromPoint(300, 590)?.closest('.overlay') === b, hidden: document.getElementById('t-pad').hidden }; });
+  const before = await game(page);
+  await f.tap({ x: 300, y: 590 });
+  await f.tap({ x: 60, y: 590 });
+  await frames(page, 2);
+  const after = await game(page);
+  c.ok('Pause menu: taps where the pad was land on the overlay and drive nothing', pad.top && pad.hidden && after.screen === 'pause' && !(await held2(page)).throttle && after.t === before.t, pad);
+  await menus('pause');
+  await size(page, 360, 640);
+  await page.locator('#o-resume').tap();
+  await waitFor(page, () => window.__game.screen === 'race');
+  await frames(page, 2);
+  c.ok('Resume tap does not leak into a driving action', !(await held2(page)).throttle && !(await held2(page)).brake && await read(page, () => !window.__game.race.player.pitReq && !window.__game.race.player.laneReq));
+
+  // results and championship
+  await read(page, () => { window.__game.race.phase = 'done'; });
+  await waitFor(page, () => window.__game.screen === 'results');
+  await menus('results');
+  await size(page, 360, 640);
+  await page.locator('#o-menu').tap();
+  await waitFor(page, () => window.__game.screen === 'title');
+  await page.locator('#o-champ-cont').tap();
+  await waitFor(page, () => window.__game.screen === 'race' && window.__game.mode === 'champ');
+  await read(page, () => { const g = window.__game; g.race.phase = 'done'; });
+  await waitFor(page, () => window.__game.screen === 'champ');
+  await menus('championship');
+  await size(page, 360, 640);
+  const rounds = await read(page, () => window.__game.champ.rounds.length);
+  await page.locator('#o-next').tap();
+  await waitFor(page, () => window.__game.screen === 'race' && window.__game.mode === 'champ');
+  await f.tap('#t-pause');
+  await waitFor(page, () => window.__game.screen === 'pause');
+  await page.locator('#o-menu').tap();
+  await waitFor(page, () => window.__game.screen === 'title');
+  await page.reload();
+  await page.waitForFunction(() => window.__game?.screen === 'title');
+  c.ok('Championship by touch: round stored, continue, leave, and the save survives a reload', rounds === 2 && await read(page, () => window.__game.champ.rounds.length === 2 && !!document.getElementById('o-champ-cont')), rounds);
+
+  // practice
+  await page.locator('#o-practice').tap();
+  await waitFor(page, () => window.__game.screen === 'race' && window.__game.mode === 'practice');
+  await f.tap('#b-more');
+  await frames(page, 2);
+  const ghostOn = await read(page, () => window.__game.ghost.shown);
+  await page.locator('#b-ghost').tap();
+  const ghostOff = await read(page, () => ({ shown: window.__game.ghost.shown, pressed: document.getElementById('b-ghost').getAttribute('aria-pressed') }));
+  await page.locator('#b-ghost').tap();
+  await f.tap('#t-pause');
+  await waitFor(page, () => window.__game.screen === 'pause');
+  const trayShut = await read(page, () => document.getElementById('b-more').getAttribute('aria-expanded'));
+  await page.locator('#o-restart').tap();
+  await waitFor(page, () => window.__game.screen === 'race');
+  c.ok('Practice by touch: ghost toggles from the tray, pause closes the tray, Restart works', ghostOn && !ghostOff.shown && ghostOff.pressed === 'false' && trayShut === 'false' && await read(page, () => window.__game.race.phase === 'countdown'), ghostOff);
+  await f.tap('#t-pause');
+  await waitFor(page, () => window.__game.screen === 'pause');
+  await page.locator('#o-menu').tap();
+  await waitFor(page, () => window.__game.screen === 'title');
+
+  // settings persist, and rotating does not touch an explicit choice
+  await page.locator('[data-preset="balanced"]').tap();
+  await page.locator('[data-touch="on"]').tap();
+  await size(page, 640, 360);
+  await frames(page, 2);
+  await page.reload();
+  await page.waitForFunction(() => window.__game?.screen === 'title');
+  const kept = await read(page, () => ({ preset: window.__game.preset, touch: window.__game.touchMode, saved: localStorage.getItem('srgp.graphics') ?? null }));
+  c.ok('Graphics and touch choices made by touch survive rotation and a reload', kept.preset === 'balanced' && kept.touch === 'on', kept);
+  await page.locator('[data-preset="low"]').tap();
+  await page.locator('[data-touch="auto"]').tap();
+
+  // initials with an on-screen keyboard. The keyboard itself is simulated: only the visual viewport shrinks, as on iOS Safari
+  await size(page, 390, 844);
+  await frames(page, 2);
+  const canvas0 = await read(page, () => document.querySelector('#app > canvas').clientHeight);
+  await page.locator('#o-ini').tap();
+  await page.keyboard.type('abc');
+  await read(page, () => { Object.defineProperty(window.visualViewport, 'height', { get: () => 508, configurable: true }); window.visualViewport.dispatchEvent(new Event('resize')); });
+  await frames(page, 2);
+  const kb = await read(page, () => { const i = document.getElementById('o-ini').getBoundingClientRect(), g = document.querySelector('.card').getBoundingClientRect(), s2 = document.getElementById('o-start').getBoundingClientRect(); return { kb: document.querySelector('.overlay').style.getPropertyValue('--kb'), input: [i.top, i.bottom], card: g.bottom, start: s2.bottom, canvas: document.querySelector('#app > canvas').clientHeight, screen: window.__game.screen }; });
+  await shot(page, 'keyboard-390x844');
+  c.ok('Keyboard (simulated): the card clears it, the field stays in view, the canvas keeps its size', kb.kb === '336px' && kb.input[0] >= 0 && kb.input[1] <= 508 && kb.card <= 508 && kb.start <= 508 && kb.canvas === canvas0 && kb.screen === 'title', kb);
+  await page.keyboard.press('Enter');
+  await read(page, () => { delete window.visualViewport.height; window.visualViewport.dispatchEvent(new Event('resize')); });
+  const typed = await read(page, () => ({ kb: document.querySelector('.overlay').style.getPropertyValue('--kb'), value: document.getElementById('o-ini').value, stored: window.__game.R.savedInitialsRaw(), focused: document.activeElement?.id ?? '' }));
+  c.ok('Enter closes the field, the space comes back and the initials are kept', typed.kb === '0px' && typed.focused !== 'o-ini' && typed.stored.toUpperCase() === 'ABC', typed);
+
+  // safe areas, through the browser's own override where this Chromium has it
+  try {
+    await cdp.send('Emulation.setSafeAreaInsetsOverride', { insets: { top: 0, left: 47, right: 47, bottom: 21 } });
+    await size(page, 844, 390);
+    await frames(page, 2);
+    await page.locator('#o-start').tap();
+    await waitFor(page, () => window.__game.screen === 'race');
+    await frames(page, 3);
+    const m = await read(page, measureHud, CONTROLS);
+    await shot(page, 'race-safe-area-844x390');
+    const by = Object.fromEntries(m.controls.map((x) => [x.id, x]));
+    c.ok('Safe areas 47/47/21 at 844x390: controls and status clear the notch and home indicator', by['t-brake'].x >= 47 && by['t-brake'].b <= 369 && by['t-throttle'].r <= 797 && by['t-throttle'].b <= 369 && by['t-pause'].r <= 797 && m.parts.top.x >= 47 && m.pairs.length === 0, { brake: by['t-brake'].x, throttleRight: by['t-throttle'].r, top: m.parts.top.x });
+    await f.tap('#t-pause');
+    await waitFor(page, () => window.__game.screen === 'pause');
+    const g = await read(page, () => { const r = document.querySelector('.card').getBoundingClientRect(); return { x: r.x, r: r.right, b: r.bottom }; });
+    c.ok('Safe areas: the pause card stays inside them', g.x >= 47 && g.r <= 797 && g.b <= 369, g);
+    await cdp.send('Emulation.setSafeAreaInsetsOverride', { insets: {} });
+  } catch (e) { c.unavailable('Safe-area override', String(e.message ?? e).split('\n')[0]); }
+
+  // frame time and control response on this renderer, by preset. Diagnostic only
+  await page.locator('#o-menu').tap().catch(() => {});
+  await waitFor(page, () => window.__game.screen === 'title');
+  c.evidence.response = [];
+  for (const preset of ['low', 'balanced']) {
+    await size(page, 844, 390);
+    await page.locator(`[data-preset="${preset}"]`).tap();
+    await page.locator('#o-start').tap();
+    await waitFor(page, () => window.__game.screen === 'race');
+    await read(page, () => { window.__game.advance(8); });
+    await read(page, () => { const q = (window.__qa.resp = { frames: [], press: [], last: performance.now(), t0: 0 }); const loop = () => { const t = performance.now(); q.frames.push(t - q.last); q.last = t; if (q.t0) { q.press.push(t - q.t0); q.t0 = 0; } q.raf = requestAnimationFrame(loop); }; requestAnimationFrame(loop); document.getElementById('t-brake').addEventListener('pointerdown', () => { q.t0 = performance.now(); }); });
+    for (let i = 0; i < 12; i++) { await f.tap('#t-brake'); await sleep(250); }
+    const r = await read(page, () => { const q = window.__qa.resp; cancelAnimationFrame(q.raf); return { frames: q.frames.slice(2), press: q.press }; });
+    const q = (a, p) => [...a].sort((x, y) => x - y)[Math.min(a.length - 1, Math.floor(a.length * p))];
+    const row = { preset, viewport: '844x390', dpr: 2, buffer: await read(page, () => { const e = document.querySelector('#app > canvas'); return `${e.width}x${e.height}`; }), frames: r.frames.length, medianMs: +q(r.frames, 0.5).toFixed(1), p95Ms: +q(r.frames, 0.95).toFixed(1), pressToFrameMedianMs: +q(r.press, 0.5).toFixed(1), pressToFrameMaxMs: +Math.max(...r.press).toFixed(1), samples: r.press.length };
+    c.evidence.response.push(row);
+    console.log(`    info  ${JSON.stringify(row)}`);
+    c.ok(`${preset}: emulated presses all reached a frame (SwiftShader, diagnostic)`, r.press.length >= 10, row);
+    await f.tap('#t-pause');
+    await waitFor(page, () => window.__game.screen === 'pause');
+    await page.locator('#o-menu').tap();
+    await waitFor(page, () => window.__game.screen === 'title');
+  }
+  return s;
+}
+
+/** A whole Clubman Park race on the pad alone, at a phone landscape size: fuel stop, finish, results and restart by touch. */
+async function touchrace(run, c) {
+  const viewport = { width: 844, height: 390 };
+  const s = await open(run, { viewport, device: PHONE, fixtures: { 'srgp.track': TRACK } });
+  const { page } = s;
+  const cdp = await s.context.newCDPSession(page);
+  const f = new Fingers(page, cdp);
+  s.keys = new PadKeys(f);
+  await page.locator(`.car[data-car="${CAR}"]`).tap();
+  await page.locator('#o-start').tap();
+  await waitFor(page, () => window.__game.screen === 'race');
+  c.evidence.environment = await environment(run, page, { workload: `${LAPS}-lap race, emulated touch` });
+  await driveUntil(s, (st) => st.phase === 'racing', { budgetMs: 20000 });
+  const seen = { pitlane: false, service: false, status: '' };
+  const onTick = async (st) => {
+    if (st.mode === 'pitlane' && !seen.pitlane) { seen.pitlane = true; }
+    if (st.mode === 'service' && !seen.service) {
+      seen.service = true;
+      seen.status = await page.locator('#h-status').textContent();
+      seen.overlaps = (await read(page, measureHud, CONTROLS)).pairs;
+      await page.screenshot({ path: path.join(run.out, 'touchrace-service.png') });
+    }
+  };
+  const end = await driveUntil(s, (st) => st.finished, { budgetMs: run.raceBudgetMs, opts: {}, onTick });
+  await s.keys.release();
+  c.ok('Touch race: the player reached the flag on the pad alone', end.lap === LAPS, end);
+  c.ok('Touch race: no unplanned pause', !s.unexpectedPauses, s.unexpectedPauses ?? 0);
+  await waitFor(page, () => window.__game.screen === 'results');
+  await frames(page, 2);
+  const m = await read(page, measureMenu);
+  await page.screenshot({ path: path.join(run.out, 'touchrace-results.png') });
+  const res = await read(page, () => { const r = window.__game.race, p = r.player; return { stops: p.pitStops, lap: p.lapsDone, rows: document.querySelectorAll('.card.results tbody tr').length, place: document.querySelector('.place').textContent, time: p.finishTime }; });
+  const { log } = await capture(page);
+  const modes = log.filter((e) => e.key === 'mode').map((e) => e.value);
+  c.ok('Touch race: fuel stop entered, served and left, in order', ['pitlane', 'bayIn', 'service', 'bayOut', 'pitlane', 'race'].every((x, i, a) => modes.join().includes(a.slice(0, i + 1).join())) && res.stops >= 1, { stops: res.stops, modes: modes.slice(0, 10) });
+  c.ok('Touch race: refuelling instructions shown and clear of the controls', seen.status.includes(text('hud.refuel')) && (seen.overlaps ?? []).length === 0, seen);
+  c.ok('Touch race: results fit and work', res.rows === 4 && menuOk(m), { ...res, m });
+  c.evidence.results = res;
+  await page.locator('#o-again').tap();
+  await waitFor(page, () => window.__game.screen === 'race');
+  const again = await game(page);
+  c.ok('Touch race: Race Again gives a fresh countdown, zero clock and a full tank', again.phase === 'countdown' && again.raceTime === 0 && again.lap === 0 && again.fuel === 1, again);
   return s;
 }
 
@@ -1149,8 +1538,8 @@ async function perf(run) {
 }
 
 // ------------------------------------------------------------ cli
-const SCENARIOS = { tracks, race, controlled, routing, practice, championship, touch };
-const USAGE = 'usage: browser-check.mjs [tracks|race|controlled|routing|practice|championship|touch ...] | perf | compare <a.json> <b.json>\n'
+const SCENARIOS = { tracks, race, controlled, routing, practice, championship, touch, responsive, touchrace };
+const USAGE = 'usage: browser-check.mjs [tracks|race|controlled|routing|practice|championship|touch|responsive|touchrace ...] | perf | compare <a.json> <b.json>\n'
   + 'options: --dist <dir> --url <url> --commit <sha> --machine <name> --label <name> --viewport WxH --dpr N --preset low|balanced|high\n'
   + '         --seconds N --headed --channel <chrome|msedge> --out <dir> --max-minutes N';
 

@@ -77,6 +77,9 @@ export class TouchPad {
     b.classList.toggle('down', [...this.pointers.values()].includes(b));
   }
 
+  /** Whether any finger is holding a control. */
+  get holding(): boolean { return this.pointers.size > 0; }
+
   /** Let go of every pointer. A finger still on the glass stays ignored until it presses again. */
   reset(): void {
     for (const [id, b] of this.pointers) {
@@ -85,6 +88,33 @@ export class TouchPad {
     }
     this.pointers.clear();
     for (const b of this.buttons) b.classList.toggle('down', false);
+  }
+}
+
+// ------------------------------------------------------------ viewport
+/** The most a browser's address and tool bars change the viewport height, with margin. */
+export const CHROME_MAX = 140;
+
+/**
+ * Whether a viewport change moved the controls out from under the fingers. Rotation and real resizes do, so holds end there.
+ * Browser bars sliding only change the height a little, and must not cut the throttle.
+ */
+export function controlsMoved(a: { w: number; h: number }, b: { w: number; h: number }): boolean {
+  return a.w !== b.w || Math.abs(a.h - b.h) > CHROME_MAX;
+}
+
+/**
+ * The layout the controls were in when the current use of them began. While something is in use it stays put,
+ * so a resize that arrives in many small steps is still measured in total, not frame by frame.
+ */
+export class ControlsAnchor {
+  constructor(private at: { w: number; h: number }) {}
+
+  /** True when the controls have moved from under whatever is in use; the anchor then moves to `next`. With nothing in use it just follows. */
+  update(next: { w: number; h: number }, inUse: boolean): boolean {
+    const moved = inUse && controlsMoved(this.at, next);
+    if (moved || !inUse) this.at = next;
+    return moved;
   }
 }
 
