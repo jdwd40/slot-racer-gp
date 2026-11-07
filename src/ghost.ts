@@ -53,7 +53,6 @@ export class GhostPlayer {
       for (const mat of mats) { mat.transparent = true; mat.opacity = 0.42; mat.depthWrite = false; }
       m.renderOrder = 6;
     });
-    this.visual.ring.visible = false;
     this.visual.group.visible = false;
     scene.add(this.visual.group);
   }

@@ -20,7 +20,7 @@ Renderer pixel ratio = `min(preset cap, actual devicePixelRatio)`. A missing or 
 
 ## Trade-offs
 
-- Low looks visibly soft: fine track rails and crowds blur in the close view. In the full-circuit view the rails shimmer and the lane arrow gets thin. The player ring, HUD chips and minimap stay clear.
+- Low looks visibly soft: fine track rails and crowds blur in the close view. In the full-circuit view the rails shimmer and the lane arrow gets thin. The player marker, HUD chips and minimap stay clear.
 - Balanced is the default, so anyone on a DPR 2 display now gets a softer picture than before until they choose High. That is a quarter of the pixels they drew before.
 - At DPR 1, Balanced and High are the same, because the device ratio is the limit. At a DPR of 0.5 or below (browser zoomed far out), all three are the same.
 - Frame time does not fall in line with pixel count, in this software renderer at least: a quarter of the pixels took about 40% of the time. Shadows and about 440 draw calls are not reduced by any preset.

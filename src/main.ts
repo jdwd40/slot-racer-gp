@@ -4,7 +4,7 @@ import * as T from './track';
 import { Race, Car, LAPS, RaceEvent, DRIVERS, PERSONAS, PEN, DEF } from './race';
 import { buildWorld, disposeWorld, arrowGeometry, World } from './world';
 import { Y0 } from './gfx';
-import { makeCar, CarVisual } from './carModel';
+import { makeCar, makePlayerMarker, CarVisual } from './carModel';
 import { Hud, fmt, carLabel, flags } from './hud';
 import { Sfx } from './audio';
 import { t } from './i18n';
@@ -103,9 +103,13 @@ const pitArrowGeo = (): THREE.BufferGeometry => arrowGeometry(T.PIT_IN0 - 3.5, T
 const pitArrow = new THREE.Mesh(pitArrowGeo(), pitArrowMat);
 pitArrow.visible = false; pitArrow.renderOrder = 5; scene.add(pitArrow);
 
-// x-ray marker: a ring drawn through the deck while the player is beneath a bridge
-const underRing = new THREE.Mesh(new THREE.RingGeometry(0.9, 1.1, 36), new THREE.MeshBasicMaterial({ color: 0xffe066, transparent: true, opacity: 0.8, depthTest: false, depthWrite: false }));
-underRing.rotation.x = -Math.PI / 2; underRing.renderOrder = 20; underRing.visible = false; scene.add(underRing);
+// the player marker: shown in overview views and, through the deck, beneath a bridge.
+// It sits outside the car's group so the tow and recovery blinks leave it steady, and it draws over everything so decks can't hide it.
+const playerMarker = makePlayerMarker();
+scene.add(playerMarker);
+const MARKER_PX = 20;      // ring radius in CSS pixels once zoomed out, whatever the viewport or preset
+const MARKER_MIN = 1.25;   // world units: never tighter than the car in close views
+let markerFade = 0;
 let bridgeFade = 1;
 /** true while the player's car is on the lower level of a crossing */
 function playerUnderBridge(): boolean {
@@ -620,8 +624,6 @@ function syncCars(dt: number, time: number, poses: Pose[]): void {
     for (const w of v.wheels) w.rotation.z -= (c.v * dt) / 0.12;
     const blink = c.mode === 'tow' ? Math.floor(time * 8) % 2 === 0 && c.towT < 0.9 : c.recoverT > 0 ? Math.floor(time * 12) % 2 === 0 : true;
     v.group.visible = blink;
-    v.ring.visible = c.isPlayer && (camMode === 'full' || curSpan > 34);
-    if (v.ring.visible) { const sc = 1 + Math.sin(time * 5) * 0.12; v.ring.scale.setScalar(sc * Math.max(1, curSpan / 40)); }
   });
   // bridge decks turn translucent while the player drives beneath them
   const under = playerUnderBridge();
@@ -629,10 +631,16 @@ function syncCars(dt: number, time: number, poses: Pose[]): void {
   bridgeFade += (target - bridgeFade) * Math.min(1, dt * 8);
   for (const m of world.bridgeMats) m.opacity = bridgeFade;
   const p = race.player;
-  underRing.visible = bridgeFade < 0.97 && p.mode !== 'off';
-  if (underRing.visible) {
-    underRing.position.set(poses[0].x, poses[0].z + Y0 + 0.05, -poses[0].y);
-    (underRing.material as THREE.MeshBasicMaterial).opacity = (1 - bridgeFade) * (0.6 + Math.sin(time * 6) * 0.25);
+  const inSession = screen === 'race' || screen === 'pause' || screen === 'results';
+  const wanted = inSession && (camMode === 'full' || curSpan > 34 || (under && p.mode !== 'off'));
+  markerFade += ((wanted ? 1 : 0) - markerFade) * Math.min(1, dt * 8);
+  playerMarker.visible = markerFade > 0.02;
+  if (playerMarker.visible) {
+    playerMarker.position.set(poses[0].x, poses[0].z + Y0 + 0.05, -poses[0].y);
+    playerMarker.quaternion.copy(camera.quaternion);
+    // curSpan is the world height of the view, so this holds a constant on-screen size
+    playerMarker.scale.setScalar(Math.max(MARKER_MIN, (MARKER_PX * curSpan) / window.innerHeight) * (1 + Math.sin(time * 3) * 0.04));
+    for (const m of playerMarker.children) ((m as THREE.Mesh).material as THREE.MeshBasicMaterial).opacity = markerFade;
   }
 }
 
@@ -731,4 +739,4 @@ function frame(now: number): void {
 requestAnimationFrame(frame);
 
 // debug/test hooks
-(window as unknown as { __game: unknown }).__game = { get race() { return race; }, T, R, PEN, DEF, PERSONAS, startRace, applyTrack, startSession, showTitle, showBoards, get mode() { return mode; }, get preset() { return preset; }, get champ() { return champ; }, get ghost() { return ghost; }, get recorder() { return recorder; }, get pbMs() { return pbMs; }, get screen() { return screen; }, stepper, advance: (sec: number) => { for (let t = 0; t < sec && simulating(); t += STEP) tick(STEP); }, setView: (m: 'follow' | 'full') => { camMode = m; }, zoom: (span: number) => { camMode = 'follow'; followSpan = span; curSpan = span; }, snapCam: () => { const p = race.player; camLead.set(0, 0); camTarget.set(p.x, 0, -p.y); }, info: () => ({ calls: renderer.info.render.calls, tris: renderer.info.render.triangles, objects: world.root.children.length, frames: renderer.info.render.frame }) };
+(window as unknown as { __game: unknown }).__game = { get race() { return race; }, T, R, PEN, DEF, PERSONAS, startRace, applyTrack, startSession, showTitle, showBoards, get mode() { return mode; }, get preset() { return preset; }, get champ() { return champ; }, get ghost() { return ghost; }, get recorder() { return recorder; }, get pbMs() { return pbMs; }, get screen() { return screen; }, stepper, advance: (sec: number) => { for (let t = 0; t < sec && simulating(); t += STEP) tick(STEP); }, setView: (m: 'follow' | 'full') => { camMode = m; }, zoom: (span: number) => { camMode = 'follow'; followSpan = span; curSpan = span; }, snapCam: () => { const p = race.player; camLead.set(0, 0); camTarget.set(p.x, 0, -p.y); }, get marker() { return playerMarker; }, info: () => ({ calls: renderer.info.render.calls, tris: renderer.info.render.triangles, objects: world.root.children.length, frames: renderer.info.render.frame, geometries: renderer.info.memory.geometries, textures: renderer.info.memory.textures }) };
