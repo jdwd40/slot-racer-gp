@@ -11,7 +11,7 @@ While a pit request or stop-and-go is active, the player's car takes the outside
 | Inside | One-switch override | Stay inside |
 | Outside | One-switch override | Change to inside |
 
-- `Race.requestLane()` (Space) toggles the override while routing is active, and is the normal lane request otherwise. `Race.requestPit()` (P) arms or cancels. Touch controls should call these same two actions.
+- `Race.requestLane()` (Space) toggles the override while routing is active, and is the normal lane request otherwise. `Race.requestPit()` (P) arms or cancels. Touch controls call these same two actions: see [touch controls](touch.md).
 - `Race.nextRoute()` is the single decision. The switch logic, HUD chip and arrows all read it.
 - The override is used up at the next switch, even if the move is blocked or a committed change is still running.
 - A blocked automatic move retries at the next switch. Committed changes are never reversed.

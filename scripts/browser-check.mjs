@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Bounded browser validation of the real game. Procedure and results: docs/validation.md.
 //
-//   node scripts/browser-check.mjs [tracks race controlled routing practice championship]   functional checks (default: all)
+//   node scripts/browser-check.mjs [tracks race controlled routing practice championship touch]   functional checks (default: all)
 //   node scripts/browser-check.mjs perf --label updated --machine "<name>"          frame-time capture
 //   node scripts/browser-check.mjs compare <baseline.json> <updated.json>           like-for-like comparison
 //
@@ -40,7 +40,9 @@ function instrument({ seed }) {
       return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
     };
   }
-  const qa = (window.__qa = { rows: [], log: [], pixels: null, wantPixels: false });
+  const qa = (window.__qa = { rows: [], log: [], pixels: null, wantPixels: false, pointerIds: new Set(), padClicks: 0 });
+  window.addEventListener('pointerdown', (e) => qa.pointerIds.add(e.pointerId), true);
+  window.addEventListener('click', (e) => { if (e.target.closest?.('.tbtn')) qa.padClicks++; }, true);
   const seen = {};
   const note = (ts, raceTime, key, value) => {
     if (seen[key] === value) return;
@@ -168,9 +170,9 @@ class Checks {
   }
 }
 
-async function open(run, { seed = SEED, fixtures = null, viewport = run.viewport, dpr = run.dpr, preset = run.preset } = {}) {
+async function open(run, { seed = SEED, fixtures = null, viewport = run.viewport, dpr = run.dpr, preset = run.preset, device = {} } = {}) {
   // newContext is an empty, throwaway profile; nothing here touches a real browser profile
-  const context = await run.browser.newContext({ viewport, deviceScaleFactor: dpr });
+  const context = await run.browser.newContext({ viewport, deviceScaleFactor: dpr, ...device });
   const page = await context.newPage();
   page.setDefaultTimeout(30000);
   const errors = [];
@@ -206,7 +208,7 @@ async function driveUntil(s, until, { budgetMs, opts = {}, onTick }) {
     const { st, cmd } = await read(page, (x) => window.__qa.drive(x), o);
     if (until(st)) return st;
     if (Date.now() > deadline) throw new Error(`driving timed out after ${budgetMs / 1000} s at ${JSON.stringify(st)}`);
-    if (st.screen === 'pause') { s.unexpectedPauses = (s.unexpectedPauses ?? 0) + 1; await keys.tap('Escape'); continue; }
+    if (st.screen === 'pause') { s.unexpectedPauses = (s.unexpectedPauses ?? 0) + 1; await keys.release(); await keys.tap('Escape'); continue; }
     await keys.set('KeyW', cmd.up);
     await keys.set('KeyS', cmd.down);
     if (cmd.lane) await keys.tap('Space');
@@ -315,6 +317,7 @@ async function race(run, c) {
     }
     if (st.lap >= 2 && !paused) {
       paused = true;
+      await keys.release();   // a pause ends every hold, so the driver presses again after it
       await keys.tap('Escape');
       await waitFor(page, () => window.__game.screen === 'pause');
       const a = await game(page);
@@ -723,6 +726,398 @@ async function championship(run, c) {
   return s;
 }
 
+/**
+ * Touch through the browser's own input pipeline: real pointer, touch and capture events, with several fingers at once.
+ * This is Chromium's touch emulation. No physical touchscreen is involved. Fingers are placed on a control's centre or a point.
+ */
+class Fingers {
+  points = new Map();
+  next = 1;
+  constructor(page, cdp) { this.page = page; this.cdp = cdp; }
+  /** a touch the page never acknowledges must fail this check, not stall the run */
+  async dispatch(type, touchPoints) { await Promise.race([this.cdp.send('Input.dispatchTouchEvent', { type, touchPoints }), sleep(5000).then(() => { throw new Error(`${type} was not acknowledged`); })]); }
+  send(type) { return this.dispatch(type, [...this.points].map(([id, p]) => ({ id, ...p }))); }
+  async at(selector) {
+    if (typeof selector !== 'string') return selector;
+    const b = await this.page.locator(selector).boundingBox();
+    if (!b) throw new Error(`${selector} is not visible`);
+    return { x: b.x + b.width / 2, y: b.y + b.height / 2 };
+  }
+  /** a new finger on a control or a point; returns its id */
+  async put(selector) { const id = this.next++; this.points.set(id, await this.at(selector)); await this.send('touchStart'); return id; }
+  async slide(id, x, y) { this.points.set(id, { x, y }); await this.send('touchMove'); }
+  /** touchEnd naming one point lifts that finger alone; the others stay down */
+  async lift(id) { const p = this.points.get(id); this.points.delete(id); await this.dispatch('touchEnd', [{ id, ...p }]); }
+  async tap(selector) { await this.lift(await this.put(selector)); }
+  /** the browser takes every finger away, as it does for a system gesture */
+  async cancel() { this.points.clear(); await this.send('touchCancel'); }
+}
+
+/** The Keys interface played on the touch pad, so the shared driver can drive by touch alone. */
+class PadKeys {
+  held = new Map();
+  constructor(fingers) { this.fingers = fingers; }
+  async set(code, on) {
+    if (on === this.held.has(code)) return;
+    if (on) this.held.set(code, await this.fingers.put(code === 'KeyW' ? '#t-throttle' : '#t-brake'));
+    else { await this.fingers.lift(this.held.get(code)); this.held.delete(code); }
+  }
+  async tap(code) { await this.fingers.tap({ Space: '#t-lane', KeyP: '#t-pit', Escape: '#t-pause' }[code]); }
+  async release() { for (const k of [...this.held.keys()]) await this.set(k, false); }
+}
+
+const PHONE = { hasTouch: true, isMobile: true };
+
+/** Touch mode end to end, on Chromium's touch emulation and on a mouse. No physical device: see docs/touch.md. */
+async function touch(run, c) {
+  const held = (page) => read(page, () => { const i = window.__game.input, on = (x) => document.getElementById(x).classList.contains('down'); return { throttle: i.held('throttle'), brake: i.held('brake'), throttleDown: on('t-throttle'), brakeDown: on('t-brake') }; });
+  const clear = (h) => !h.throttle && !h.brake && !h.throttleDown && !h.brakeDown;
+  const padShown = (page) => read(page, () => ({ body: document.body.classList.contains('touch'), pad: !document.getElementById('t-pad').hidden }));
+  const radio = (page) => read(page, () => document.querySelector('[data-touch][aria-checked="true"]').dataset.touch);
+  /** count every call the race receives, so a double dispatch cannot hide behind a toggle */
+  const countActions = (page) => read(page, () => { const r = window.__game.race, n = (window.__qa.actions = { lane: 0, pit: 0, armed: [] }); for (const [m, k] of [['requestLane', 'lane'], ['requestPit', 'pit']]) { const f = r[m].bind(r); r[m] = () => { n[k]++; f(); if (k === 'lane') n.armed.push(r.player.laneReq); }; } });
+  const actions = (page) => read(page, () => window.__qa.actions);
+  const state = (page) => read(page, () => { const r = window.__game.race, p = r.player, cue = (x) => document.getElementById(x); return { laneReq: p.laneReq, pitReq: p.pitReq, only: p.pitPenaltyOnly, override: p.laneOverride, route: r.nextRoute(p), laneCue: cue('t-lane').dataset.cue, pitCue: cue('t-pit').dataset.cue, laneText: cue('t-lane-cue').textContent, pitText: cue('t-pit-cue').textContent, chips: cue('h-chips').textContent }; });
+
+  // ---- desktop: no touch hardware, mouse and keyboard
+  const d = await open(run);
+  {
+    const { page, keys } = d;
+    c.ok('Desktop: Auto is selected by default and leaves touch off', await radio(page) === 'auto' && !(await padShown(page)).body, await padShown(page));
+    await page.click('#o-ini');
+    await page.keyboard.type('w p');
+    const typed = await read(page, () => ({ value: document.getElementById('o-ini').value, screen: window.__game.screen }));
+    c.ok('Typing W, Space and P in the initials box stays in the box', typed.screen === 'title' && typed.value === 'w p', typed);
+    await page.focus('[data-touch="auto"]');
+    for (const k of ['Space', 'Enter']) await keys.tap(k);
+    c.ok('Space and Enter on the touch selector do not start a race', await read(page, () => window.__game.screen === 'title'));
+    await page.focus('.car');
+    await keys.tap('Space');
+    c.ok('Space on a car button picks the car and does not start a race', await read(page, () => window.__game.screen === 'title'));
+    await page.click('[data-touch="off"]');
+    await page.reload();
+    await page.waitForFunction(() => window.__game?.screen === 'title');
+    c.ok('Off persists across a reload', await radio(page) === 'off' && await read(page, () => localStorage.getItem('srgp.touch')) === 'off');
+
+    await page.click('#o-start');
+    await keys.set('KeyW', true);
+    await frames(page, 2);
+    c.ok('Touch Off: the pad is hidden and W holds throttle', (await held(page)).throttle && !(await padShown(page)).pad);
+    await keys.tap('Space');
+    await keys.tap('KeyP');
+    const kb = await read(page, () => { const p = window.__game.race.player; return { pitReq: p.pitReq, laneReq: p.laneReq }; });
+    await keys.set('KeyW', false);
+    c.ok('Touch Off: Space and P still reach the race and W releases', kb.pitReq && !(await held(page)).throttle, kb);
+
+    // pause, switch mode, carry on: the race must not notice
+    await keys.tap('Escape');
+    const before = await game(page);
+    await page.click('[data-touch="on"]');
+    const after = await game(page);
+    c.ok('Changing the setting while paused leaves the race as it was', after.screen === 'pause' && after.raceTime === before.raceTime && after.t === before.t && after.u === before.u, { before: before.t, after: after.t });
+    await page.click('#o-resume');
+    const on = await padShown(page);
+    c.ok('Touch On: the pad appears on a desktop after resume', on.body && on.pad, on);
+
+    // mouse on the pad: the same pointer code as a finger
+    const pos = await page.locator('#t-throttle').boundingBox();
+    await page.mouse.move(pos.x + 20, pos.y + 20);
+    await page.mouse.down();
+    const m1 = await held(page);
+    await page.mouse.move(run.viewport.width / 2, 10);
+    const m2 = await held(page);
+    await page.mouse.up();
+    const m3 = await held(page);
+    c.ok('Mouse: hold survives sliding off the control and releases outside it', m1.throttle && m1.throttleDown && m2.throttle && clear(m3), { m1, m2, m3 });
+
+    await keys.set('KeyW', true);
+    await page.mouse.move(pos.x + 20, pos.y + 20);
+    await page.mouse.down();
+    await page.mouse.up();
+    const mixed = await held(page);
+    c.ok('Mixed: a pointer lifting does not release a held key', mixed.throttle && !mixed.throttleDown, mixed);
+    await page.mouse.down();
+    await keys.set('KeyW', false);
+    const mixed2 = await held(page);
+    await page.mouse.up();
+    c.ok('Mixed: a key lifting does not release a held pointer', mixed2.throttle && mixed2.throttleDown && clear(await held(page)), mixed2);
+
+    await keys.set('KeyW', true);
+    await keys.tap('Escape');
+    const paused = await held(page);
+    await keys.tap('Escape');
+    await page.keyboard.down('KeyW');   // the key is already down, so this arrives as auto-repeat
+    await frames(page, 2);
+    const repeat = await held(page);
+    await page.keyboard.up('KeyW');
+    keys.held.clear();
+    await page.keyboard.down('KeyW');
+    const fresh = await held(page);
+    await page.keyboard.up('KeyW');
+    c.ok('Keyboard: pause drops a held key, auto-repeat does not bring it back, a fresh press does', clear(paused) && clear(repeat) && fresh.throttle, { paused, repeat, fresh });
+    await d.context.close();
+  }
+  c.ok('Desktop part: no page or console errors', d.errors.length === 0, d.errors.slice(0, 5));
+
+  // ---- storage that does not work
+  for (const [name, fixture] of [['invalid', { 'srgp.touch': 'sideways' }], ['blocked', null]]) {
+    const b = await open(run, { fixtures: fixture });
+    if (!fixture) {
+      await b.page.addInitScript(() => { const get = Storage.prototype.getItem, set = Storage.prototype.setItem; Storage.prototype.getItem = function g(k) { if (k === 'srgp.touch') throw new Error('blocked'); return get.call(this, k); }; Storage.prototype.setItem = function s(k, v) { if (k === 'srgp.touch') throw new Error('blocked'); set.call(this, k, v); }; });
+      await b.load();
+      await b.page.click('[data-touch="on"]');
+      c.ok('Blocked storage: the title loads and a choice lasts the session', await radio(b.page) === 'on' && (await padShown(b.page)).body && b.errors.length === 0, b.errors.slice(0, 3));
+    } else c.ok('Invalid stored value falls back to Auto', await radio(b.page) === 'auto' && b.errors.length === 0);
+    await b.context.close();
+  }
+
+  // ---- emulated phone: everything below is touch alone
+  const viewport = { width: 667, height: 375 };
+  const s = await open(run, { viewport, device: PHONE });
+  const { page } = s;
+  const cdp = await s.context.newCDPSession(page);
+  const f = new Fingers(page, cdp);
+  c.evidence.touch = await read(page, () => ({ coarse: matchMedia('(any-pointer: coarse)').matches, maxTouchPoints: navigator.maxTouchPoints }));
+  c.ok('Emulated phone: Auto turns touch on from capability', (await padShown(page)).body && await radio(page) === 'auto', c.evidence.touch);
+  const styles = await read(page, () => { const ta = (q) => getComputedStyle(document.querySelector(q)).touchAction; return { card: ta('.card'), canvas: ta('#app > canvas'), pad: ta('.tbtn'), view: getComputedStyle(document.querySelector('meta[name=viewport]') ? document.body : document.body).touchAction, meta: document.querySelector('meta[name=viewport]').content }; });
+  c.ok('Gestures are suppressed on the pad only, and page zoom is not disabled', styles.pad === 'none' && styles.card === 'auto' && styles.canvas === 'auto' && !/user-scalable|maximum-scale/.test(styles.meta), styles);
+
+  // the title card scrolls by finger
+  const card = page.locator('.card.title');
+  const box = await card.boundingBox();
+  const swipe = await f.put({ x: box.x + box.width / 2, y: 300 });
+  for (let i = 1; i <= 8; i++) { await f.slide(swipe, box.x + box.width / 2, 300 - i * 30); await sleep(16); }
+  await f.lift(swipe);
+  await sleep(300);
+  const scrolled = await read(page, () => document.querySelector('.card.title').scrollTop);
+  c.ok('Menus keep touch scrolling', scrolled > 0, { scrollTop: scrolled });
+
+  await page.locator(`.track[data-id="${TRACK}"]`).tap();
+  await page.locator(`.car[data-car="${CAR}"]`).tap();
+  c.ok('Touch: car and track picked by tapping', await read(page, (x) => document.querySelector('.track.sel').dataset.id === x.t && document.querySelector('.car.sel').dataset.car === x.c, { t: TRACK, c: CAR }));
+  await page.screenshot({ path: path.join(run.out, 'touch-title-phone.png') });
+  await page.locator('#o-start').tap();
+  await waitFor(page, () => window.__game.screen === 'race');
+  c.ok('Touch: Start begins a race and the pad shows', (await padShown(page)).pad);
+  const audio = await read(page, () => window.__game.audio);
+  c.ok('Touch: audio initialised by the tap on Start', audio !== null, audio);
+
+  const thr = await f.put('#t-throttle');
+  await waitFor(page, () => window.__game.race.player.throttle > 0.5);
+  const h1 = await held(page);
+  c.ok('Throttle: holds, shows pressed, and has pointer capture', h1.throttle && h1.throttleDown && await read(page, () => { const e = document.getElementById('t-throttle'); return [...window.__qa.pointerIds].some((i) => e.hasPointerCapture(i)); }), h1);
+  await page.screenshot({ path: path.join(run.out, 'touch-pressed-phone.png') });
+  await waitFor(page, () => window.__game.race.phase === 'racing' && window.__game.race.player.v > 3);
+  await countActions(page);
+  await f.tap('#t-lane');
+  await frames(page, 2);
+  const a1 = await actions(page);
+  c.ok('Second finger: one Lane tap is one action, throttle stays held', a1.lane === 1 && a1.armed[0] === true && (await held(page)).throttle, a1);
+  await f.tap('#t-lane');
+  await f.tap('#t-pit');
+  await frames(page, 2);
+  const a2 = await actions(page), st2 = await state(page);
+  c.ok('One Pit tap is one action and shows armed from the race', a2.lane === 2 && a2.pit === 1 && st2.pitReq && st2.pitCue === 'armed' && (await held(page)).throttle, { a2, cue: st2.pitText });
+  await f.tap('#t-pit');
+  const brk = await f.put('#t-brake');
+  await frames(page, 2);
+  const h2 = await held(page);
+  await f.lift(brk);
+  const h3 = await held(page);
+  await f.lift(thr);
+  const h4 = await held(page);
+  c.ok('Throttle and Brake together, each finger with its own lifetime', h2.throttle && h2.brake && h3.throttle && !h3.brake && clear(h4), { h2, h3, h4 });
+  const clicks = await read(page, () => window.__qa.padClicks);
+  c.ok('No click event follows a touch on the pad', clicks === 0, clicks);
+
+  // release paths
+  const out1 = await f.put('#t-throttle');
+  await f.slide(out1, viewport.width / 2, 40);
+  const stillHeld = await held(page);
+  await f.lift(out1);
+  c.ok('Released outside the control, after sliding off it', stillHeld.throttle && clear(await held(page)), stillHeld);
+  await f.put('#t-throttle');
+  await f.put('#t-brake');
+  await f.cancel();
+  c.ok('touchcancel (pointercancel) releases every finger', clear(await held(page)));
+  const lost = await f.put('#t-throttle');
+  await f.slide(lost, viewport.width - 50, viewport.height - 50);   // capture is only established, and so only losable, at the pointer's next event
+  await frames(page, 3);
+  await read(page, () => { const e = document.getElementById('t-throttle'); for (const i of window.__qa.pointerIds) if (e.hasPointerCapture(i)) e.releasePointerCapture(i); });
+  await f.slide(lost, viewport.width - 40, viewport.height - 40);   // the browser reports the loss with the pointer's next event
+  await frames(page, 3);
+  const h5 = await held(page);
+  await f.lift(lost);
+  c.ok('lostpointercapture releases, and the later touchend is harmless', clear(h5) && clear(await held(page)), h5);
+
+  // lifecycle: a finger is left on the glass throughout
+  const pause1 = await f.put('#t-throttle');
+  await f.tap('#t-pause');
+  await waitFor(page, () => window.__game.screen === 'pause');
+  const h6 = await held(page);
+  await page.screenshot({ path: path.join(run.out, 'touch-paused-phone.png') });
+  c.ok('Pause tapped with throttle held: pauses, clears input and pad', clear(h6) && !(await padShown(page)).pad, h6);
+  await page.keyboard.press('Escape');
+  await waitFor(page, () => window.__game.screen === 'race');
+  const now = await game(page);
+  await waitFor(page, (until) => { const r = window.__game.race; return r.player.throttle < 0.05 || r.raceTime >= until; }, now.raceTime + 0.5);
+  const after = await game(page);
+  await f.lift(pause1);
+  c.ok('Resume with the old finger still down gives no throttle', after.throttle < 0.05 && clear(await held(page)), { throttle: after.throttle });
+  const again = await f.put('#t-throttle');
+  const h7 = await held(page);
+  await f.lift(again);
+  c.ok('A fresh press works after resume', h7.throttle && clear(await held(page)), h7);
+
+  const blur1 = await f.put('#t-throttle');
+  await read(page, () => window.dispatchEvent(new Event('blur')));
+  const h8 = await held(page);
+  await f.lift(blur1);
+  await page.locator('#o-resume').tap();
+  c.ok('Blur (synthetic) with a finger down pauses and clears', clear(h8) && await read(page, () => window.__game.screen === 'race'), h8);
+  const hid1 = await f.put('#t-brake');
+  await read(page, () => { Object.defineProperty(document, 'hidden', { get: () => true, configurable: true }); document.dispatchEvent(new Event('visibilitychange')); });
+  const h9 = await held(page);
+  await read(page, () => { Object.defineProperty(document, 'hidden', { get: () => false, configurable: true }); document.dispatchEvent(new Event('visibilitychange')); });
+  await f.lift(hid1);
+  c.ok('Hidden tab (synthetic) with a finger down pauses and clears', clear(h9) && await read(page, () => window.__game.screen === 'pause'), h9);
+
+  await page.locator('#o-restart').tap();
+  await waitFor(page, () => window.__game.screen === 'race');
+  const r0 = await game(page);
+  c.ok('Touch: Restart from pause gives a fresh countdown', r0.phase === 'countdown' && r0.raceTime === 0 && r0.lap === 0, r0);
+  const rs1 = await f.put('#t-throttle');
+  await page.keyboard.press('KeyR');
+  const h10 = await held(page);
+  await f.lift(rs1);
+  c.ok('Restart while holding drops the hold', clear(h10) && (await padShown(page)).pad, h10);
+
+  const off1 = await f.put('#t-throttle');
+  const raceBefore = await game(page);
+  await read(page, () => window.__game.setTouchMode('off'));
+  const h11 = await held(page), shownOff = await padShown(page), raceAfter = await game(page);
+  await f.lift(off1);
+  await read(page, () => window.__game.setTouchMode('auto'));
+  c.ok('Disabling touch mid-hold removes the pad, clears input, keeps the race', clear(h11) && !shownOff.pad && !shownOff.body && raceAfter.phase === raceBefore.phase && raceAfter.u === raceBefore.u, shownOff);
+
+  // lane and pit against the race: same sequence by touch and by key from the same state
+  const placed = () => read(page, () => {
+    const g = window.__game, T = g.T;
+    g.startSession('race');
+    g.advance(7);
+    const r = g.race, p = r.player;
+    const sw = [...T.SWITCHES].sort((a, b) => T.ahead(a.s1, T.PIT_IN0) - T.ahead(b.s1, T.PIT_IN0))[0];
+    const put = (car, u, side, v) => { car.u = u; car.laneSide = side; car.d = side * T.LANE_HALF; car.v = v; car.change = null; car.mode = 'race'; car.throttle = 0; car.graceT = 0; car.recoverT = 0; car.cutT = 0; car.pushedT = 0; };
+    const u = p.crossed * T.L + T.wrapS(sw.s0 - 20);
+    r.cars.forEach((o, i) => { if (i) put(o, u + T.L / 2 + i * 8, 1, 0); });
+    put(p, u, 1, 10);
+    r.squeezeQ.length = 0;
+    p.fuel = 0.2;
+  });
+  await placed();
+  await f.tap('#t-lane');
+  await frames(page, 2);
+  const armed = await state(page);
+  await f.tap('#t-lane');
+  await frames(page, 2);
+  const disarmed = await state(page);
+  c.ok('Lane shows ready from the race, and a second tap cancels it', armed.laneReq && armed.laneCue === 'armed' && !disarmed.laneReq && disarmed.laneCue === 'idle', { armed: armed.laneText, disarmed: disarmed.laneText });
+  await page.screenshot({ path: path.join(run.out, 'touch-ready-phone.png') });
+  const seq = ['#t-pit', '#t-lane', '#t-lane', '#t-pit'];
+  const KEY = { '#t-pit': 'KeyP', '#t-lane': 'Space' };
+  const replay = async (act) => { await placed(); const out = []; for (const b of seq) { await act(b); await frames(page, 1); const x = await state(page); out.push({ pit: x.pitReq, over: x.override, route: x.route, lane: x.laneCue, pitCue: x.pitCue }); } return out; };
+  const byTouch = await replay((b) => f.tap(b));
+  const byKey = await replay((b) => page.keyboard.press(KEY[b]));
+  c.ok('Pit, override, restore, cancel: touch and keyboard give the same states', JSON.stringify(byTouch) === JSON.stringify(byKey) && byTouch[1].lane === 'override', byTouch.map((x) => `${x.pitCue}/${x.lane}`));
+
+  await placed();
+  await read(page, () => { const r = window.__game.race, p = r.player; p.fuel = 1; p.offences = 2; r.offence(p, r.cars[2], 'rear'); p.sgSkipNext = false; });
+  await frames(page, 2);
+  const sg1 = await state(page);
+  await f.tap('#t-pit');
+  await f.tap('#t-lane');
+  await frames(page, 2);
+  const sg2 = await state(page);
+  await page.screenshot({ path: path.join(run.out, 'touch-override-phone.png') });
+  await f.tap('#t-lane');
+  await f.tap('#t-pit');
+  await frames(page, 2);
+  const sg3 = await state(page);
+  c.ok('Stop-and-go by touch: shown as compulsory, Pit cannot cancel it, Lane overrides', sg1.pitCue === 'compulsory' && sg1.laneCue === 'routed' && sg2.pitReq && !sg2.only && sg2.override && sg2.laneCue === 'override' && sg3.pitCue === 'compulsory' && sg3.laneCue === 'routed', { sg1: sg1.pitText, sg2: sg2.laneText, sg3: sg3.pitText });
+
+  // drive into the pits on the pad alone, from the inside lane
+  await placed();
+  s.keys = new PadKeys(f);
+  await s.keys.tap('KeyP');
+  const entry = await driveUntil(s, (st) => st.mode === 'pitlane', { budgetMs: 60000, opts: { laps: 3 } });
+  await s.keys.release();
+  c.ok('Driven on the pad alone: Pit routes outside and enters the pit lane', entry.mode === 'pitlane', { mode: entry.mode, side: entry.side });
+
+  // audio: back from a suspended context on the next touch, with mute kept
+  await read(page, () => window.__game.suspendAudio());
+  await page.locator('#b-snd').tap();
+  const muted = await read(page, () => window.__game.muted);
+  await read(page, () => window.__game.suspendAudio());
+  await f.tap('#t-brake');
+  await waitFor(page, () => window.__game.audio === 'running', undefined, 3000).catch(() => {});
+  const audioBack = await read(page, () => ({ state: window.__game.audio, muted: window.__game.muted }));
+  c.ok('Audio resumes from a pad touch and stays muted', muted && audioBack.state === 'running' && audioBack.muted, audioBack);
+  await page.locator('#b-snd').tap();
+
+  // out through the menus
+  await f.tap('#t-view');
+  await frames(page, 2);
+  c.ok('Touch: View toggles the camera', await read(page, () => window.__game.view === 'full'));
+  await f.tap('#t-pause');
+  await waitFor(page, () => window.__game.screen === 'pause');
+  await page.locator('#o-resume').tap();
+  await waitFor(page, () => window.__game.screen === 'race');
+  c.ok('Touch: Pause and Resume', true);
+  await f.tap('#t-pause');
+  await waitFor(page, () => window.__game.screen === 'pause');
+  await page.locator('#o-menu').tap();
+  await waitFor(page, () => window.__game.screen === 'title');
+  c.ok('Touch: back to the menu, pad gone, nothing held', !(await padShown(page)).pad && clear(await held(page)));
+  await page.locator('#o-practice').tap();
+  await waitFor(page, () => window.__game.screen === 'race' && window.__game.mode === 'practice');
+  const prac = await f.put('#t-throttle');
+  await read(page, () => { window.__game.race.phase = 'done'; });
+  await waitFor(page, () => window.__game.screen === 'results');
+  const h12 = await held(page);
+  await f.lift(prac);
+  await page.locator('#o-again').tap();
+  await waitFor(page, () => window.__game.screen === 'race');
+  c.ok('Race end with a finger down clears it, and Again restarts by touch', clear(h12) && (await padShown(page)).pad, h12);
+
+  // layouts: every primary control on screen, big enough, apart, and actually the thing under the thumb
+  c.evidence.layouts = [];
+  for (const [name, width, height] of [['phone landscape, small', 667, 375], ['phone landscape', 844, 390], ['tablet landscape', 1024, 768], ['tablet portrait', 768, 1024], ['phone portrait', 390, 844]]) {
+    await page.setViewportSize({ width, height });
+    await frames(page, 2);
+    const m = await read(page, () => {
+      const ids = ['t-throttle', 't-brake', 't-lane', 't-pit', 't-pause', 't-view'];
+      const rects = ids.map((id) => { const e = document.getElementById(id), r = e.getBoundingClientRect(); return { id, x: r.x, y: r.y, r: r.right, b: r.bottom, w: r.width, h: r.height, top: document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2)?.closest('button')?.id ?? null }; });
+      let gap = 1e9;
+      for (const a of rects) for (const b of rects) {
+        if (a.id >= b.id) continue;
+        gap = Math.min(gap, Math.max(Math.max(a.x, b.x) - Math.min(a.r, b.r), Math.max(a.y, b.y) - Math.min(a.b, b.b)));
+      }
+      const hud = ['.tl', '.tc', '.bl'].map((q) => document.querySelector(q).getBoundingClientRect());
+      const covered = rects.filter((a) => hud.some((h) => h.width && a.x < h.right && h.left < a.r && a.y < h.bottom && h.top < a.b)).map((a) => a.id);
+      return { rects, gap: Math.round(gap), covered };
+    });
+    const by = Object.fromEntries(m.rects.map((r) => [r.id, r]));
+    const onScreen = m.rects.every((r) => r.x >= 0 && r.y >= 0 && r.r <= width && r.b <= height);
+    const sized = m.rects.every((r) => r.w >= 48 && r.h >= 48);
+    const holds = ['t-throttle', 't-brake'].every((id) => by[id].w >= 96 && by[id].h >= 96 && by[id].w > by['t-lane'].w && by[id].h > by['t-lane'].h);
+    const reachable = m.rects.every((r) => r.top === r.id);
+    c.ok(`Layout ${width}x${height} (${name}): on screen, 48 px or more, holds larger, apart, not covered`, onScreen && sized && holds && reachable && m.gap >= 8 && m.covered.length === 0, { gap: m.gap, covered: m.covered, tap: `${by['t-lane'].w}x${by['t-lane'].h}`, throttle: `${by['t-throttle'].w}x${by['t-throttle'].h}`, brake: `${by['t-brake'].w}x${by['t-brake'].h}` });
+    c.evidence.layouts.push({ name, width, height, gap: m.gap, rects: m.rects });
+    await page.screenshot({ path: path.join(run.out, `touch-${width}x${height}.png`) });
+  }
+  return s;
+}
+
 /** Real-time frame capture with the renderer on. Reports presentation and clock separately. */
 async function perf(run) {
   const s = await open(run);
@@ -754,8 +1149,8 @@ async function perf(run) {
 }
 
 // ------------------------------------------------------------ cli
-const SCENARIOS = { tracks, race, controlled, routing, practice, championship };
-const USAGE = 'usage: browser-check.mjs [tracks|race|controlled|routing|practice|championship ...] | perf | compare <a.json> <b.json>\n'
+const SCENARIOS = { tracks, race, controlled, routing, practice, championship, touch };
+const USAGE = 'usage: browser-check.mjs [tracks|race|controlled|routing|practice|championship|touch ...] | perf | compare <a.json> <b.json>\n'
   + 'options: --dist <dir> --url <url> --commit <sha> --machine <name> --label <name> --viewport WxH --dpr N --preset low|balanced|high\n'
   + '         --seconds N --headed --channel <chrome|msedge> --out <dir> --max-minutes N';
 

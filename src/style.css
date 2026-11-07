@@ -51,7 +51,7 @@ html, body { margin: 0; height: 100%; overflow: hidden; background: #1b1714; fon
 @keyframes go { 0% { opacity: 0; transform: translate(-50%, -50%) scale(0.6); } 15% { opacity: 1; transform: translate(-50%, -50%) scale(1.1); } 70% { opacity: 1; } 100% { opacity: 0; transform: translate(-50%, -50%) scale(1.3); } }
 .overlay { position: fixed; inset: 0; display: none; align-items: center; justify-content: center; background: radial-gradient(ellipse at center, rgba(0,0,0,0.35), rgba(0,0,0,0.7)); z-index: 10; }
 .overlay.show { display: flex; }
-.card { background: rgba(14,18,26,0.94); border: 1px solid rgba(255,255,255,0.12); border-radius: 18px; padding: 26px 32px; min-width: 380px; max-width: 96vw; text-align: center; box-shadow: 0 20px 60px rgba(0,0,0,0.5); }
+.card { background: rgba(14,18,26,0.94); border: 1px solid rgba(255,255,255,0.12); border-radius: 18px; padding: 26px 32px; min-width: min(380px, 96vw); max-width: 96vw; text-align: center; box-shadow: 0 20px 60px rgba(0,0,0,0.5); }
 .card h2 { margin: 0 0 12px; font-size: 30px; }
 .logo { font-size: 52px; font-weight: 900; font-style: italic; letter-spacing: 1px; background: linear-gradient(90deg, #ffd23f, #ff6b35, #e8322a); -webkit-background-clip: text; background-clip: text; color: transparent; }
 .tag { color: #9ca3af; letter-spacing: 3px; text-transform: uppercase; font-size: 12px; margin-bottom: 10px; }
@@ -86,7 +86,7 @@ small { color: #9ca3af; font-weight: 500; }
 .setup .lbl2 { display: block; }
 .ini input { width: 92px; font: inherit; font-weight: 800; font-size: 18px; letter-spacing: 3px; text-align: center; text-transform: uppercase; padding: 6px 8px; border-radius: 10px; border: 2px solid rgba(255,255,255,0.18); background: rgba(255,255,255,0.06); color: #ffe066; outline: none; }
 .ini input:focus { border-color: #ffd23f; }
-.cars { display: flex; gap: 8px; }
+.cars { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; }
 .car { display: flex; align-items: center; gap: 6px; padding: 6px 10px; border-radius: 10px; border: 2px solid rgba(255,255,255,0.12); background: rgba(255,255,255,0.04); color: #f4f4f5; font: inherit; font-size: 12px; font-weight: 700; cursor: pointer; }
 .car i { width: 14px; height: 14px; border-radius: 4px; }
 .car.sel { border-color: #ffd23f; background: rgba(255,210,63,0.12); }
@@ -128,3 +128,65 @@ small { color: #9ca3af; font-weight: 500; }
 .fatal { position: fixed; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 24px; text-align: center; background: #2b2420; color: #f3f0ea; font-family: system-ui, sans-serif; }
 .fatal h1 { margin: 0 0 12px; font-size: 28px; }
 .fatal p { max-width: 36em; margin: 6px 0; font-size: 17px; line-height: 1.4; }
+
+/* touch mode: body.touch. Gesture suppression stays on .tbtn and the touch-only buttons; menus and the track view keep scrolling and zoom */
+.touch-only, .touch-hint { display: none; }
+.touch { --edge: 12px; --gap: 14px; --hold: clamp(112px, 17vw, 168px); --thr: clamp(128px, 20vw, 190px); --tap-w: 84px; --tap-h: 56px; }
+.touch #b-view, .touch #b-pause, .touch .controls { display: none; }
+.touch .btn.touch-only { display: inline-flex; align-items: center; justify-content: center; gap: 6px; }
+.touch .touch-hint { display: block; }
+.touch .btn { height: 48px; min-width: 48px; }
+.touch .btn.sq { width: 48px; }
+.touch .tab, .touch .car, .touch .cta, .touch .ini input { min-height: 48px; min-width: 48px; }
+.touch .tr { top: 8px; right: var(--edge); }
+.touch .tl { top: 8px; left: var(--edge); min-width: 0; padding: 4px 10px; }
+.touch .tl .big { font-size: 18px; }
+.touch .tc { top: 8px; left: 50%; font-size: 14px; }
+.touch .bl { left: calc(var(--edge) + var(--hold) + var(--tap-w) + var(--gap) * 2); right: calc(var(--edge) + var(--thr) + var(--gap)); bottom: var(--edge); width: auto; max-width: 300px; margin: 0 auto; padding: 4px 8px; }
+.touch .br { top: 64px; right: var(--edge); bottom: auto; }
+.touch #h-mini { width: 138px !important; height: 120px !important; }
+.touch .status { top: 112px; bottom: auto; font-size: 13px; width: max-content; max-width: 56vw; white-space: normal; text-align: center; }
+.touch .toast { font-size: 13px; max-width: 60vw; white-space: normal; }
+.touch .touch-only, .tbtn { touch-action: none; -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; -webkit-tap-highlight-color: transparent; }
+.pad { position: absolute; inset: 0; pointer-events: none; }
+.pad[hidden] { display: none; }
+.tbtn { position: absolute; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px; padding: 0; font: inherit; color: #f4f4f5; pointer-events: auto; cursor: pointer; background: rgba(10,14,20,0.6); border: 2px solid rgba(255,255,255,0.6); border-radius: 18px; }
+.tbtn b { font-size: 15px; font-weight: 800; letter-spacing: 0.5px; }
+.tbtn small { color: #e5e7eb; font-size: 11px; font-weight: 700; }
+.tbtn.hold b { font-size: 18px; }
+#t-brake { left: var(--edge); bottom: var(--edge); width: var(--hold); height: var(--hold); }
+#t-throttle { right: var(--edge); bottom: var(--edge); width: var(--thr); height: var(--thr); }
+#t-lane, #t-pit { left: calc(var(--edge) + var(--hold) + var(--gap)); width: var(--tap-w); height: var(--tap-h); }
+#t-lane { bottom: var(--edge); }
+#t-pit { bottom: calc(var(--edge) + var(--tap-h) + var(--gap)); }
+/* pressed: shrinks and gains a heavy outline. Armed, routed, override and compulsory: each has its own border shape as well as its word */
+.tbtn.down, .touch .btn.touch-only.down { transform: scale(0.92); outline: 4px solid #fff; outline-offset: 1px; background: rgba(255,255,255,0.28); }
+.tbtn[data-cue='armed'] { border: 4px solid #ffd23f; }
+.tbtn[data-cue='routed'] { border: 4px double #22d3ee; }
+.tbtn[data-cue='override'] { border: 4px dashed #ffd23f; }
+.tbtn[data-cue='compulsory'] { border: 6px double #f87171; }
+/* phone landscape: the race standings and split times give way to the track */
+@media (max-height: 500px) {
+  .touch .stand { display: none; }
+  .touch .card { padding: 14px 18px; }
+  .touch .logo { font-size: 34px; }
+  .touch .tc { left: 118px; transform: none; }
+  .touch .tc > div:not(:first-child) { display: none; }
+  .touch .lights { top: 66px; }
+}
+@media (max-height: 340px) { .touch .br { display: none; } }
+/* the view and zoom row is wide in touch mode, so the times sit beside the standings instead of centred */
+@media (max-width: 1100px) and (min-height: 501px) { .touch .tc { left: 190px; transform: none; } }
+@media (max-width: 900px) { .touch .tc > div:not(:first-child) { display: none; } }
+/* portrait: Lane and Pit stack above Brake, and the meters sit above Throttle */
+@media (orientation: portrait) {
+  .touch #t-lane, .touch #t-pit { left: var(--edge); }
+  .touch #t-lane { bottom: calc(var(--edge) + var(--hold) + var(--gap)); }
+  .touch #t-pit { bottom: calc(var(--edge) + var(--hold) + var(--tap-h) + var(--gap) * 2); }
+  .touch .bl { left: calc(var(--edge) + var(--tap-w) + var(--gap)); right: var(--edge); bottom: calc(var(--edge) + var(--thr) + var(--gap)); }
+}
+@media (orientation: portrait) and (max-width: 600px) {
+  .touch .tl { top: 64px; }
+  .touch .tc { top: 64px; }
+  .touch .br { top: 110px; }
+}
