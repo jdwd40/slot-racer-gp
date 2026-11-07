@@ -186,6 +186,11 @@
     { "id": "touch.pit", "text": "Pit" },
     { "id": "touch.pit.idle", "text": "tap" },
     { "id": "touch.pit.armed", "text": "✓ armed" },
-    { "id": "touch.pit.compulsory", "text": "■ must stop" }
+    { "id": "touch.pit.compulsory", "text": "■ must stop" },
+    { "id": "ctl.more", "text": "More controls" },
+    { "id": "ctl.zoomIn", "text": "Zoom in" },
+    { "id": "ctl.zoomOut", "text": "Zoom out" },
+    { "id": "ctl.sound", "text": "Sound" },
+    { "id": "ctl.ghostShort", "text": "Ghost" }
   ]
 }

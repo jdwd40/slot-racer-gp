@@ -1,6 +1,6 @@
 # Touch controls
 
-The game can be played without a keyboard. **Touch controls: Auto / On / Off** is on the title and pause screens. This is mobile browser support with a basic layout: full responsive layouts are a separate follow-up.
+The game can be played without a keyboard. **Touch controls: Auto / On / Off** is on the title and pause screens. Phone and tablet layouts, the More tray and viewport changes are described in [responsive layouts](responsive.md).
 
 ## Setting
 
@@ -16,9 +16,9 @@ The game can be played without a keyboard. **Touch controls: Auto / On / Off** i
 | Throttle | Hold | Bottom right, the largest control |
 | Brake | Hold | Bottom left |
 | Lane, Pit | Tap | Beside Brake, or above it in portrait, so the left thumb has them while the right holds Throttle |
-| View, Pause | Tap | Top right, replacing the desktop buttons so they work with a finger already down |
+| View, Pause | Tap | Top right, replacing the desktop buttons so they work with a finger already down. On phones View is in the More tray |
 
-Zoom, sound and ghost stay as ordinary buttons, enlarged to 48×48 CSS pixels. Menu buttons also grow to at least 48 pixels in touch mode. The keyboard legend gives way to a one-line hint.
+Zoom, sound and ghost are enlarged to 48×48 CSS pixels and act on `touchstart`, so they also work with a finger already down. Menu buttons also grow to at least 48 pixels in touch mode. The keyboard legend gives way to a one-line hint.
 
 | State | Shown as |
 | --- | --- |

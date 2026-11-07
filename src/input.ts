@@ -88,6 +88,18 @@ export class TouchPad {
   }
 }
 
+// ------------------------------------------------------------ viewport
+/** The most a browser's address and tool bars change the viewport height, with margin. */
+export const CHROME_MAX = 140;
+
+/**
+ * Whether a viewport change moved the controls out from under the fingers. Rotation and real resizes do, so holds end there.
+ * Browser bars sliding only change the height a little, and must not cut the throttle.
+ */
+export function controlsMoved(a: { w: number; h: number }, b: { w: number; h: number }): boolean {
+  return a.w !== b.w || Math.abs(a.h - b.h) > CHROME_MAX;
+}
+
 // ------------------------------------------------------------ what the pad shows
 export type LaneCue = 'idle' | 'armed' | 'routed' | 'override';
 export type PitCue = 'idle' | 'armed' | 'compulsory';

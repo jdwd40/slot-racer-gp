@@ -31,6 +31,8 @@ Functional runs default to 480×270 at Low so SwiftShader can run them. Perf cap
 | `championship` | Fixture saves, race skipped by script | Continue, round stored once, reload, damaged saves |
 | `tracks` | Real frames | Every configured circuit loads and draws in both camera views |
 | `touch` | Chromium touch emulation and real mouse and keys, some scripted placement | Touch setting, multi-touch, release paths, lifecycle, Lane and Pit parity with the keyboard, touch-only flow, layouts. See [touch controls](touch.md) |
+| `responsive` | Chromium mobile emulation at DPR 2, 1440×900 desktop, some scripted state | HUD and menus at 360×640, 390×844, 640×360, 844×390 and 768×1024, desktop geometry, rotation and browser bars with input held, overlays, keyboard, safe areas, Practice and Championship by touch, frame and press timing. See [responsive layouts](responsive.md) |
+| `touchrace` | Real frames, emulated touch only, 844×390 | Clubman Park, 13 laps on the pad: fuel stop, finish, results, Race Again |
 
 `__game.advance` and scripted state are functional coverage only and are never used for timing or smoothness.
 

@@ -3,7 +3,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import * as T from '../src/track';
 import { Car, Race } from '../src/race';
-import { DEFAULT_TOUCH, DrivingInput, KEY_HOLDS, KEY_TAPS, PadButton, TOUCH_KEY, TOUCH_MODES, TapAction, TouchPad, laneCue, pitCue, savedTouchMode, saveTouchMode, touchActive } from '../src/input';
+import { DEFAULT_TOUCH, DrivingInput, KEY_HOLDS, KEY_TAPS, PadButton, TOUCH_KEY, TOUCH_MODES, TapAction, TouchPad, controlsMoved, laneCue, pitCue, savedTouchMode, saveTouchMode, touchActive } from '../src/input';
 import { t } from '../src/i18n';
 import { fresh, memStorage, place, seedRandom } from './helpers';
 
@@ -356,5 +356,21 @@ describe('touch preference', () => {
     expect(touchActive('auto', { coarse: true, maxTouchPoints: 0 })).toBe(true);
     expect(touchActive('on', desktop)).toBe(true);
     expect(touchActive('off', phone)).toBe(false);
+  });
+});
+
+describe('viewport changes and held controls', () => {
+  const phone = { w: 390, h: 844 };
+  it('counts rotation and width changes as moving the controls', () => {
+    expect(controlsMoved(phone, { w: 844, h: 390 })).toBe(true);
+    expect(controlsMoved(phone, { w: 391, h: 844 })).toBe(true);
+  });
+  it('leaves holds alone when only browser bars slide', () => {
+    expect(controlsMoved(phone, phone)).toBe(false);
+    expect(controlsMoved(phone, { w: 390, h: 788 })).toBe(false);
+    expect(controlsMoved({ w: 390, h: 664 }, { w: 390, h: 781 })).toBe(false);
+  });
+  it('counts a larger height change, such as a split screen, as moving them', () => {
+    expect(controlsMoved(phone, { w: 390, h: 500 })).toBe(true);
   });
 });

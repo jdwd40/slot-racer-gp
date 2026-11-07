@@ -33,35 +33,42 @@ export class Hud {
     this.root = document.createElement('div');
     this.root.id = 'hud';
     this.root.innerHTML = `
-      <div class="panel tl">
-        <div class="big"><span class="lbl" data-t="hud.pos"></span><span id="h-pos">1/4</span></div>
-        <div class="big"><span class="lbl" data-t="hud.lap"></span><span id="h-lap">1/${LAPS}</span></div>
-        <div id="h-round" class="round"></div>
-        <div id="h-stand" class="stand"></div>
+      <div class="topbar">
+        <div class="panel tl">
+          <div class="big"><span class="lbl" data-t="hud.pos"></span><span id="h-pos">1/4</span></div>
+          <div class="big"><span class="lbl" data-t="hud.lap"></span><span id="h-lap">1/${LAPS}</span></div>
+          <div id="h-round" class="round"></div>
+          <div id="h-stand" class="stand"></div>
+        </div>
+        <div class="panel tc">
+          <div><span class="lbl" data-t="hud.time"></span><span id="h-time" class="mono"></span></div>
+          <div><span class="lbl" data-t="hud.last"></span><span id="h-last" class="mono"></span></div>
+          <div><span class="lbl" id="h-bestlbl" data-t="hud.best"></span><span id="h-best" class="mono best"></span></div>
+        </div>
       </div>
-      <div class="panel tc">
-        <div><span class="lbl" data-t="hud.time"></span><span id="h-time" class="mono"></span></div>
-        <div><span class="lbl" data-t="hud.last"></span><span id="h-last" class="mono"></span></div>
-        <div><span class="lbl" id="h-bestlbl" data-t="hud.best"></span><span id="h-best" class="mono best"></span></div>
-      </div>
-      <div class="tr">
-        <button id="b-view" class="btn" title="C">${VIEW_ICON} <span data-t="hud.view"></span></button>
-        <button id="t-view" class="btn touch-only" tabindex="-1" data-tap="view">${VIEW_ICON} <span data-t="hud.view"></span></button>
-        <button id="b-zout" class="btn sq" title="-">−</button>
-        <button id="b-zin" class="btn sq" title="+">+</button>
-        <button id="b-ghost" class="btn sq" title="G">👻</button>
-        <button id="b-snd" class="btn sq" title="M">🔊</button>
-        <button id="b-pause" class="btn sq" title="Esc">${PAUSE_ICON}</button>
+      <div id="h-tools" class="tr">
+        <button id="b-more" class="btn sq more" aria-label="${t('ctl.more')}" aria-expanded="false" aria-controls="h-util">⋯</button>
+        <div id="h-util" class="util">
+          <button id="b-view" class="btn" title="C">${VIEW_ICON} <span data-t="hud.view"></span></button>
+          <button id="t-view" class="btn touch-only" tabindex="-1" data-tap="view">${VIEW_ICON} <span data-t="hud.view"></span></button>
+          <button id="b-zout" class="btn sq" title="-" aria-label="${t('ctl.zoomOut')}">−</button>
+          <button id="b-zin" class="btn sq" title="+" aria-label="${t('ctl.zoomIn')}">+</button>
+          <button id="b-ghost" class="btn sq" title="G" aria-label="${t('ctl.ghostShort')}" aria-pressed="true">👻</button>
+          <button id="b-snd" class="btn sq" title="M" aria-label="${t('ctl.sound')}" aria-pressed="true">🔊</button>
+        </div>
+        <button id="b-pause" class="btn sq" title="Esc" aria-label="${t('ctl.pause')}">${PAUSE_ICON}</button>
         <button id="t-pause" class="btn sq touch-only" tabindex="-1" data-tap="pause" aria-label="${t('ctl.pause')}">${PAUSE_ICON}</button>
       </div>
-      <div class="panel bl">
-        <div class="meter"><span class="lbl" data-t="hud.throttle"></span><div class="bar"><div id="h-thr" class="fill thr"></div></div></div>
-        <div class="meter"><span class="lbl" data-t="hud.fuel"></span><div class="bar"><div id="h-fuel" class="fill fuel"></div><div id="h-fuelpct" class="pct"></div></div></div>
-        <div id="h-chips" class="chips"></div>
+      <div class="dock">
+        <div id="h-status" class="status"></div>
+        <div class="panel bl">
+          <div class="meter"><span class="lbl" data-t="hud.throttle"></span><div class="bar"><div id="h-thr" class="fill thr"></div></div></div>
+          <div class="meter"><span class="lbl" data-t="hud.fuel"></span><div class="bar"><div id="h-fuel" class="fill fuel"></div><div id="h-fuelpct" class="pct"></div></div></div>
+          <div id="h-chips" class="chips"></div>
+        </div>
       </div>
       <div class="br"><canvas id="h-mini"></canvas></div>
       <div id="h-toast" class="toast"></div>
-      <div id="h-status" class="status"></div>
       <div id="h-lights" class="lights">${'<i></i>'.repeat(5)}</div>
       <div id="h-go" class="go"></div>
       <div id="t-pad" class="pad" hidden>
@@ -75,18 +82,32 @@ export class Hud {
     this.root.querySelectorAll<HTMLElement>('[id]').forEach((e) => (this.el[e.id] = e));
     this.mini = this.el['h-mini'] as HTMLCanvasElement;
     this.mctx = this.mini.getContext('2d')!;
-    this.mini.style.width = this.mW + 'px'; this.mini.style.height = this.mH + 'px';
     this.fitMini();
-    this.rebuildMini();
     this.relabel();
   }
 
-  /** Match the minimap's backing store to the display. It follows the device, not the graphics preset, so it stays sharp on Low. */
+  /**
+   * Match the minimap's projection and backing store to its CSS size, which the stylesheet sets per layout.
+   * Computed style still answers while the HUD is hidden on the menus. The backing store follows the device, not the graphics preset, so it stays sharp on Low.
+   */
   fitMini(): void {
+    const css = getComputedStyle(this.mini);
+    const w = parseFloat(css.width) || this.mW, h = parseFloat(css.height) || this.mH;
     const dpr = Math.min(2, window.devicePixelRatio || 1);
-    this.mini.width = Math.round(this.mW * dpr); this.mini.height = Math.round(this.mH * dpr);
-    this.mctx.scale(dpr, dpr);
+    const bw = Math.round(w * dpr), bh = Math.round(h * dpr);
+    if (bw === this.mini.width && bh === this.mini.height && w === this.mW && h === this.mH) return;
+    this.mW = w; this.mH = h;
+    this.mini.width = bw; this.mini.height = bh;
+    this.mctx.setTransform(bw / w, 0, 0, bh / h, 0, 0);
+    this.rebuildMini();
   }
+
+  /** Open or close the compact layouts' tray of secondary controls. */
+  setMore(open: boolean): void {
+    this.el['h-tools'].classList.toggle('open', open);
+    this.el['b-more'].setAttribute('aria-expanded', String(open));
+  }
+  get moreOpen(): boolean { return this.el['h-tools'].classList.contains('open'); }
 
   /** Recompute the minimap projection for the active track. */
   rebuildMini(): void {
