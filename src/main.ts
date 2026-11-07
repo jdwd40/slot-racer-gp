@@ -481,7 +481,8 @@ const input = new DrivingInput({
 });
 const pad = new TouchPad([...hud.root.querySelectorAll<HTMLButtonElement>('[data-hold], [data-tap]')] as PadButton[], input, () => sfx.init());
 const anchor = new ControlsAnchor(vp);
-function releaseDriving(): void { pad.reset(); input.clear(); }
+/** Let go of every hold, and of the reverse gear and Brake hold they built up: resuming never restores a reverse command. */
+function releaseDriving(): void { pad.reset(); input.clear(); race.clearReverse(); }
 
 let touchMode = savedTouchMode();
 const coarsePointer = window.matchMedia(COARSE_QUERY);
@@ -789,7 +790,8 @@ function syncAudio(): void {
   race.cars.forEach((c, i) => {
     let vol = c.isPlayer ? 1 : Math.max(0, 1 - Math.sqrt(dist2(c)) / 28) * 0.55;
     if (!playing || c.mode === 'off' || c.mode === 'tow') vol = 0;
-    sfx.motor(i, c.v, c.throttle, vol);
+    // backing up runs the motor too: pitch follows speed by magnitude
+    sfx.motor(i, Math.abs(c.v), c.v < 0 ? Math.max(c.throttle, 0.3) : c.throttle, vol);
   });
   const p = race.player;
   let sq = playing && p.mode === 'race' ? Math.max(0, (p.latRatio - 0.75) / 0.25) : 0;

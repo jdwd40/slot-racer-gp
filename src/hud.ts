@@ -72,7 +72,7 @@ export class Hud {
       <div id="h-lights" class="lights">${'<i></i>'.repeat(5)}</div>
       <div id="h-go" class="go"></div>
       <div id="t-pad" class="pad" hidden>
-        <button id="t-brake" class="tbtn hold" tabindex="-1" data-hold="brake"><b data-t="touch.brake"></b><small data-t="touch.hold"></small></button>
+        <button id="t-brake" class="tbtn hold" tabindex="-1" data-hold="brake"><b data-t="touch.brake"></b><small id="t-brake-cue"></small></button>
         <button id="t-lane" class="tbtn" tabindex="-1" data-tap="lane"><b data-t="touch.lane"></b><small id="t-lane-cue"></small></button>
         <button id="t-pit" class="tbtn" tabindex="-1" data-tap="pit"><b data-t="touch.pit"></b><small id="t-pit-cue"></small></button>
         <button id="t-throttle" class="tbtn hold" tabindex="-1" data-hold="throttle"><b data-t="touch.throttle"></b><small data-t="touch.hold"></small></button>
@@ -133,7 +133,7 @@ export class Hud {
   }
 
   /** Show a tap control's state as a shape and a word, so it never rests on colour alone. */
-  cue(name: 'lane' | 'pit', state: string): void {
+  cue(name: 'lane' | 'pit' | 'brake', state: string): void {
     const b = this.el[`t-${name}`];
     if (b.dataset.cue === state) return;
     b.dataset.cue = state;
@@ -197,9 +197,12 @@ export class Hud {
     if (route && p.sgOwed > 0 && !p.pitPenaltyOnly) chips.push(`<span class="chip cyan">${t('hud.pitFuelToo')}</span>`);
     if (p.squeezeHold) chips.push(`<span class="chip org">▼ ${t('hud.yield')}</span>`);
     if (p.yielding) chips.push(`<span class="chip org">▼ ${t('hud.pitYield')}</span>`);
+    const rev = reversing(p);
+    if (rev) chips.push(`<span class="chip rev">R ${t('hud.reverse')}</span>`);
     this.set('h-chips', chips.join(''), true);
     this.cue('lane', laneCue(p, route));
     this.cue('pit', pitCue(p));
+    this.cue('brake', rev ? 'reverse' : 'idle');
 
     // status line
     let st = '';
@@ -291,6 +294,9 @@ export class Hud {
     }
   }
 }
+
+/** The player is in reverse gear, or still rolling backwards after leaving it. */
+export function reversing(c: { revOn: boolean; v: number }): boolean { return c.revOn || c.v < -0.05; }
 
 export function carLabel(c: Car): string { return c.isPlayer ? t('hud.you') : c.name; }
 
