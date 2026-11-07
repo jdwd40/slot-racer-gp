@@ -638,12 +638,10 @@ function updateCamera(dt: number, p: Pose): void {
 
 /**
  * Size everything to the game's box, display and preset. Only the drawing buffer varies by preset: the canvas CSS size, aspect ratio and DOM HUD do not.
- * The race carries on. Fingers are let go if the controls moved from under them, and keep needing a fresh press; held keys are not affected.
+ * The race carries on.
  */
 function fitRenderer(): void {
-  const next = viewSize();
-  if (anchor.update(next, pad.holding || hud.moreOpen)) { pad.reset(); hud.setMore(false); }
-  vp = next;
+  vp = viewSize();
   dpr = window.devicePixelRatio;
   camera.aspect = vp.w / vp.h;
   camera.updateProjectionMatrix();
@@ -820,6 +818,9 @@ function frame(now: number): void {
   requestAnimationFrame(frame);
   // checked here, not on resize: browser bars and moving to another display do not always send that event, and the canvas is redrawn in this same frame
   const size = viewSize();
+  // Every frame, so the anchor follows the viewport while nothing is in use and each hold is measured from where it began.
+  // Fingers are let go if the controls moved from under them, and keep needing a fresh press; held keys are not affected.
+  if (anchor.update(size, pad.holding || hud.moreOpen)) { pad.reset(); hud.setMore(false); }
   if (window.devicePixelRatio !== dpr || size.w !== vp.w || size.h !== vp.h) fitRenderer();
   // dt paces presentation only (camera, wheels, toasts) and keeps running on menus; race time comes from the stepper
   const dt = Math.min(MAX_GAP, Math.max(0, (now - last) / 1000));

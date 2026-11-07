@@ -404,4 +404,12 @@ describe('viewport changes and held controls', () => {
     expect(anchor.update({ w: 390, h: 500 }, true)).toBe(false);
     expect(anchor.update({ w: 390, h: 440 }, true)).toBe(true);
   });
+  it('starts a new hold from the layout it began in when nothing resized in between', () => {
+    const anchor = new ControlsAnchor(phone);
+    expect(anchor.update({ w: 390, h: 744 }, true)).toBe(false);
+    // released, then pressed again with no resize: the frame loop keeps checking the same size
+    expect(anchor.update({ w: 390, h: 744 }, false)).toBe(false);
+    expect(anchor.update({ w: 390, h: 744 }, true)).toBe(false);
+    expect(anchor.update({ w: 390, h: 694 }, true)).toBe(false);
+  });
 });
