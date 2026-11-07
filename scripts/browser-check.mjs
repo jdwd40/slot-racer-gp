@@ -475,7 +475,8 @@ async function controlled(run, c) {
   await read(page, () => window.dispatchEvent(new Event('blur')));
   const blurred = await game(page);
   await page.click('#o-resume');
-  await frames(page, 6);
+  // settling takes about 0.12 s of race time however many frames that is. Bounded in race time, so a throttle that never falls reaches the check below instead of a timeout
+  await waitFor(page, (until) => { const g = window.__game, r = g.race; return g.screen !== 'race' || r.player.throttle < 0.05 || r.raceTime >= until; }, blurred.raceTime + 0.5);
   const afterBlur = await game(page);
   await keys.release();
   c.ok('Blur (synthetic) pauses and clears held keys', blurred.screen === 'pause' && afterBlur.screen === 'race' && afterBlur.throttle < 0.05, { blurred: blurred.screen, throttleAfterResume: afterBlur.throttle });
