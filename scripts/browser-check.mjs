@@ -391,7 +391,8 @@ async function race(run, c) {
 
 /** Pit and stop-and-go routing with real keys and frames: a fuel stop on every circuit, then a stop-and-go. Cars are placed by script: functional coverage only. */
 async function routing(run, c) {
-  const s = await open(run, { viewport: { width: Math.max(run.viewport.width, 960), height: Math.max(run.viewport.height, 540) } });
+  // the default small window matters here: the penalty box is 2.2 m long, so a software renderer's slower frames at a larger size step right over it
+  const s = await open(run);
   const { page, keys } = s;
   const CYAN = 0x22d3ee, YELLOW = 0xffd23f;
   const chips = () => page.locator('#h-chips').textContent();
@@ -465,6 +466,7 @@ async function routing(run, c) {
   await keys.release();
   await frames(page, 3);
   const end = await read(page, () => { const p = window.__game.race.player; return { timePen: p.timePen, sgOwed: p.sgOwed, pitReq: p.pitReq, penaltyOnly: p.pitPenaltyOnly }; });
+  c.evidence.stopAndGo = await read(page, () => window.__qa.log.filter((e) => ['pitReq', 'lane', 'mode', 'toast'].includes(e.key)).slice(-16).map((e) => `${e.raceTime.toFixed(1)} ${e.key}=${e.value}`));
   c.ok('Stop-and-go: routed in, served in the box, no time penalty, no stale request', served.mode === 'pitlane' && left.mode === 'race' && end.timePen === 0 && !end.pitReq && !end.penaltyOnly, end);
   return s;
 }

@@ -1,0 +1,54 @@
+# Pit and stop-and-go lane routing
+
+While a pit request or stop-and-go is active, the player's car takes the outside lane at every switch. This is lane routing only: the player still controls throttle and braking and must stop correctly.
+
+## Behaviour
+
+| State at the next switch | Choice | Outcome, subject to clearance |
+| --- | --- | --- |
+| Inside | Automatic | Change to outside |
+| Outside | Automatic | Stay outside |
+| Inside | One-switch override | Stay inside |
+| Outside | One-switch override | Change to inside |
+
+- `Race.requestLane()` (Space) toggles the override while routing is active, and is the normal lane request otherwise. `Race.requestPit()` (P) arms or cancels. Touch controls should call these same two actions.
+- `Race.nextRoute()` is the single decision. The switch logic, HUD chip and arrows all read it.
+- The override is used up at the next switch, even if the move is blocked or a committed change is still running.
+- A blocked automatic move retries at the next switch. Committed changes are never reversed.
+
+## Why a request is active
+
+`pitReq` means a request exists, and `pitPenaltyOnly` records that it exists only because of a stop-and-go.
+
+| Event | Effect |
+| --- | --- |
+| Stop-and-go awarded, nothing armed | Penalty-only request |
+| Stop-and-go awarded, fuel stop armed | Fuel stop stays independent |
+| P while a stop is owed | Adds or drops the fuel stop. The penalty route cannot be cancelled |
+| Missed or blocked entry | Request stays armed. Opportunity counts are unchanged |
+| Successful entry | Request and override clear. One visit can settle both reasons |
+| Pit exit or tow with the stop still owed | Routing resumes as penalty-only |
+| Served or converted | Penalty-only request ends. A fuel stop carries on |
+| De-slot | Override clears, request stays |
+| Tow, finish, restart | Request and override clear |
+
+`sgChances`, `sgSkipNext`, the box timer and `convertUnserved` amounts are unchanged. AI cars are never assisted.
+
+## Evidence
+
+Browser runs used SwiftShader on a host with no GPU. **They are diagnostics only and say nothing about real-GPU behaviour or smoothness.**
+
+| Check | Result |
+| --- | --- |
+| `npm run typecheck`, `npm test`, `npm run build` | Pass, 192 tests. `test/pitRouting.test.ts` covers the routing table, override, clearance, wraparound, lifecycle, penalties and overlap |
+| Mutation spot-check of `src/race.ts` | 14 deliberate faults, all caught. Two survived at first and gained tests |
+| AI regression | 10 seeded all-AI races (5 circuits, 2 seeds), identical state hashes before and after |
+| `routing` scenario | 16 of 16 checks, 3 runs out of 3, at 480×270 Low |
+| `tracks`, `race`, `controlled`, `practice`, `championship` | All passed on commit `1ba506a`: 65 checks passed, 1 unavailable (see below) |
+
+The `routing` scenario covers a fuel stop with service, a stop-and-go served in the box, and routed pit entry from the inside lane on all five circuits. Cars are placed by script, so this is functional coverage.
+
+### Known limits
+
+- `routing` failed in the full run on `1ba506a` because it ran at 960×540. At about 300 ms per frame the scripted driver moved 2.4 m per frame and overran the 2.2 m box, so the penalty converted. Routing and accounting were correct in that run. The scenario now uses the default window. Only `routing` was re-run after that change.
+- Scripted placement must clear `squeezeQ`: a car moved past the squeeze never leaves the queue and holds the cars behind it. Normal driving cannot do this.

@@ -205,6 +205,15 @@ describe('clearance, committed changes and geometry', () => {
     stepEvents(r, 3, UP);
     expect(P.change).toMatchObject({ s0: sw.s0 - 3, to: INSIDE }); expect(P.laneOverride).toBe(false);
   });
+  it('leaves no stale lane request when automatic routing meets a switch mid-change', () => {
+    const { r, P } = solo();
+    const sw = T.SWITCHES[0];
+    r.requestPit();
+    place(P, sw.s0 - 0.2, INSIDE, 10);
+    P.change = { from: OUTSIDE, to: INSIDE, s0: sw.s0 - 3, s1: sw.s0 - 3 + T.SWITCH_LEN };
+    stepEvents(r, 3, UP);
+    expect(P.change).toMatchObject({ s0: sw.s0 - 3, to: INSIDE }); expect(P.laneReq).toBe(false);
+  });
   it('finds the next switch across the timing line', () => {
     const { r, P } = solo();
     const sorted = [...T.SWITCHES].sort((a, b) => a.s0 - b.s0);
@@ -421,6 +430,17 @@ describe('stop-and-go routing', () => {
     expect(P.change).toBeNull();
     enterPit(r);
     expect(P.mode).toBe('race');
+  });
+  it('an offence on the cool-down lap arms nothing', () => {
+    const { r, P, rival } = solo();
+    P.crossed = 13; P.lapsDone = 12; P.sectors = 7;
+    place(P, T.FINISH_S + 13 * T.L - 0.2, OUTSIDE, 10);
+    stepEvents(r, 3, UP);
+    expect(P.finished).toBe(true);
+    award(r, P, rival);
+    expect(P.sgOwed).toBe(PEN.stopSeconds); expect(P.pitReq).toBe(false);
+    const ev = cross(r, T.PIT_IN0, OUTSIDE);
+    expect(P.pitReq).toBe(false); expect(P.mode).toBe('race'); expect(msgs(ev)).not.toContain('msg.pitMissed');
   });
   it('a stale request cannot survive a finish that converts the stop', () => {
     const { r, P, rival } = solo();
