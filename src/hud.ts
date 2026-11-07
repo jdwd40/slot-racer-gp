@@ -10,6 +10,10 @@ export function fmt(sec: number): string {
   const m = Math.floor(sec / 60), s = sec - m * 60;
   return `${m}:${s < 10 ? '0' : ''}${s.toFixed(1)}`;
 }
+/** chip text for the next switch's pit route, including when the choice means staying in the current lane */
+export function routeChipId(r: { stay: boolean; override: boolean }): string {
+  return `hud.route${r.override ? 'Inside' : 'Outside'}${r.stay ? 'Stay' : 'Move'}`;
+}
 const hex = (c: number): string => '#' + c.toString(16).padStart(6, '0');
 
 export class Hud {
@@ -148,7 +152,9 @@ export class Hud {
     if (p.sgOwed > 0) chips.push(`<span class="chip red blink">■ ${t('hud.sgChip')}</span>`);
     if (p.timePen > 0) chips.push(`<span class="chip red">⏱ ${t('hud.timePen', { n: p.timePen })}</span>`);
     if (p.laneReq) chips.push(`<span class="chip yel">⇄ ${t('hud.laneArmed')}</span>`);
-    if (p.pitReq) chips.push(`<span class="chip cyan">P ${t('hud.pitArmed')}</span>`);
+    const route = race.nextRoute(p);
+    if (route) chips.push(`<span class="chip ${route.override ? 'yel' : 'cyan'}">${route.override ? '⇄' : 'P'} ${t(routeChipId(route))}</span>`);
+    if (route && p.sgOwed > 0 && !p.pitPenaltyOnly) chips.push(`<span class="chip cyan">${t('hud.pitFuelToo')}</span>`);
     if (p.squeezeHold) chips.push(`<span class="chip org">▼ ${t('hud.yield')}</span>`);
     if (p.yielding) chips.push(`<span class="chip org">▼ ${t('hud.pitYield')}</span>`);
     this.set('h-chips', chips.join(''), true);

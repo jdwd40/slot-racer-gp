@@ -70,6 +70,10 @@ export interface Car {
   u: number; v: number; laneSide: number;
   change: { from: number; to: number; s0: number; s1: number } | null;
   laneReq: boolean; pitReq: boolean;
+  /** pitReq exists only because of a stop-and-go: serving or converting it ends the request (false keeps a chosen fuel stop) */
+  pitPenaltyOnly: boolean;
+  /** one-switch manual choice of the inside lane while pit routing is active */
+  laneOverride: boolean;
   mode: Mode; d: number; yawOff: number;
   throttle: number; brake: number;
   fuel: number; slip: number; latRatio: number; wobble: number;
@@ -160,7 +164,7 @@ export class Race {
       const P = PERSONAS[D.persona];
       const c: Car = {
         idx: g.di, name: D.name, color: g.di === 0 && opts.playerColor !== undefined ? opts.playerColor : D.color, isPlayer: g.di === 0,
-        u: T.FINISH_S + g.prog, v: 0, laneSide: g.side, change: null, laneReq: false, pitReq: false,
+        u: T.FINISH_S + g.prog, v: 0, laneSide: g.side, change: null, laneReq: false, pitReq: false, pitPenaltyOnly: false, laneOverride: false,
         mode: 'grid', d: g.side * T.LANE_HALF, yawOff: 0, throttle: 0, brake: 0,
         fuel: 1, slip: 0, latRatio: 0, wobble: 0, off: null, recoverT: 0, towT: 0,
         bay: g.di, bayT: 0, serviceT: 0, penalty: 0, fuelAtBay: 0,
@@ -192,6 +196,11 @@ export class Race {
   requestLane(): void {
     const c = this.player;
     if (c.finished || (c.mode !== 'race' && c.mode !== 'grid')) return;
+    if (this.pitAssist(c)) {
+      c.laneOverride = !c.laneOverride;
+      this.pmsg(c, c.laneOverride ? 'msg.routeInside' : 'msg.routeOutside', 'info');
+      return;
+    }
     if (c.change) return;
     c.laneReq = !c.laneReq;
     this.pmsg(c, c.laneReq ? 'msg.laneReady' : 'msg.laneCancelled', c.laneReq ? 'info' : 'warn');
@@ -199,11 +208,37 @@ export class Race {
   requestPit(): void {
     const c = this.player;
     if (c.finished || (c.mode !== 'race' && c.mode !== 'grid')) return;
-    if (c.pitReq && c.sgOwed > 0) { this.pmsg(c, 'msg.pitRequired', 'warn'); return; }
-    c.pitReq = !c.pitReq;
-    if (!c.pitReq) { this.pmsg(c, 'msg.pitCancelled', 'warn'); return; }
+    if (c.sgOwed > 0) {
+      // the stop-and-go cannot be cancelled: P only adds or drops a fuel stop that outlives it
+      this.armPenaltyRoute(c);
+      c.pitPenaltyOnly = !c.pitPenaltyOnly;
+      this.pmsg(c, 'msg.pitRequired', 'warn');
+      if (!c.pitPenaltyOnly) this.pmsg(c, 'msg.pitFuelToo', 'info');
+      return;
+    }
+    if (c.pitReq) { this.clearPitIntent(c); this.pmsg(c, 'msg.pitCancelled', 'warn'); return; }
+    c.pitReq = true; c.laneReq = false;
     const outside = c.change ? c.change.to < 0 : c.laneSide < 0;
     this.pmsg(c, outside ? 'msg.pitRequested' : 'msg.pitNeedLane', outside ? 'info' : 'warn');
+  }
+
+  /** Pit routing applies: only the player is assisted, the AI makes its own lane decisions. */
+  pitAssist(c: Car): boolean { return c.isPlayer && c.pitReq && !c.finished; }
+
+  /** A stop-and-go routes like a pit request; a fuel stop already armed keeps its own reason. */
+  armPenaltyRoute(c: Car): void {
+    if (c.pitReq || c.finished) return;
+    c.pitReq = true; c.pitPenaltyOnly = true; c.laneReq = false;
+  }
+
+  clearPitIntent(c: Car): void { c.pitReq = false; c.pitPenaltyOnly = false; c.laneOverride = false; }
+
+  /** What pit routing will do at the next switch; null when no routing applies on the road. Drives the switch logic, HUD and arrows. */
+  nextRoute(c: Car): { to: number; stay: boolean; override: boolean } | null {
+    if ((c.mode !== 'race' && c.mode !== 'grid') || !this.pitAssist(c)) return null;
+    const to = c.laneOverride ? 1 : -1;
+    const side = (c.change ? c.change.to : c.laneSide) < 0 ? -1 : 1;
+    return { to, stay: to === side, override: c.laneOverride };
   }
 
   order(): Car[] {
@@ -314,9 +349,14 @@ export class Race {
     if (c.fuel > LOW_FUEL + 0.05) c.lowFuelWarned = false;
 
     if (c.mode === 'race') {
+      // an owed stop-and-go keeps routing on, including after a pit exit or tow that did not serve it
+      if (c.isPlayer && c.sgOwed > 0) this.armPenaltyRoute(c);
       // lane switches
       for (const sw of T.SWITCHES) {
-        if (crossed(sw.s0) && c.laneReq && !c.change) {
+        if (!crossed(sw.s0)) continue;
+        const route = this.nextRoute(c);
+        if (route) { c.laneReq = !route.stay && !c.change; c.laneOverride = false; }
+        if (c.laneReq && !c.change) {
           c.laneReq = false;
           const to = c.laneSide > 0 ? -1 : 1;
           const defensive = c.defendPending; c.defendPending = false;
@@ -329,7 +369,7 @@ export class Race {
             this.emit({ type: 'switch', car: c });
             this.pmsg(c, 'msg.laneGo', 'good');
           } else {
-            this.pmsg(c, 'msg.laneBlocked', 'bad');
+            this.pmsg(c, route && !route.override ? 'msg.routeBlocked' : 'msg.laneBlocked', 'bad');
           }
         }
       }
@@ -343,11 +383,14 @@ export class Race {
       if (crossed(T.PIT_IN0)) {
         let entered = false;
         if (c.pitReq) {
-          c.pitReq = false;
           if (c.laneSide < 0 && !c.change && !c.finished) {
             c.mode = 'pitlane'; c.lapValid = false; entered = true;
+            this.clearPitIntent(c);
             this.pmsg(c, c.sgOwed > 0 ? 'msg.pitInPen' : 'msg.pitIn', 'info');
-          } else this.pmsg(c, 'msg.pitMissed', 'bad');
+          } else {
+            if (!c.isPlayer) c.pitReq = false; // the AI decides again every step; a player's request waits for the next lap
+            this.pmsg(c, 'msg.pitMissed', 'bad');
+          }
         }
         if (c.sgOwed > 0 && !c.finished) {
           if (c.sgSkipNext) c.sgSkipNext = false;
@@ -399,7 +442,7 @@ export class Race {
 
     // out of fuel
     if (c.fuel <= 0 && c.mode === 'race' && c.v < 0.4) {
-      c.mode = 'tow'; c.towT = 0; c.lapValid = false; this.leaveSqueeze(c); c.laneReq = false; c.pitReq = false;
+      c.mode = 'tow'; c.towT = 0; c.lapValid = false; this.leaveSqueeze(c); c.laneReq = false; this.clearPitIntent(c);
       if (c.change) { c.laneSide = c.change.to; c.change = null; }
       this.emit({ type: 'tow', car: c });
       this.pmsg(c, 'msg.outOfFuel', 'bad');
@@ -432,7 +475,7 @@ export class Race {
         if (best) c.bestLap = lt;
         this.emit({ type: 'lap', car: c, time: lt, best, valid, lapsDone: c.lapsDone });
         if (c.lapsDone >= LAPS && !this.practice) {
-          c.finished = true; c.finishTime = tCross; c.laneReq = false; c.pitReq = false; c.pitPlan = false;
+          c.finished = true; c.finishTime = tCross; c.laneReq = false; this.clearPitIntent(c); c.pitPlan = false;
           if (c.sgOwed > 0) this.convertUnserved(c, 'unserved');
           const pos = this.cars.filter((o) => o.finished && o.finishTime + o.timePen <= c.finishTime + c.timePen).length;
           this.emit({ type: 'finish', car: c, pos });
@@ -549,7 +592,7 @@ export class Race {
       yaw: hd, spin: -(Math.sign(k) || 1) * (5 + c.v * 0.35), t: 0,
       u0: c.u, lane: c.change ? c.change.to : Math.sign(c.laneSide) || 1,
     };
-    c.mode = 'off'; c.slip = 0; c.laneReq = false; c.change = null; c.throttle = 0; c.lapValid = false;
+    c.mode = 'off'; c.slip = 0; c.laneReq = false; c.laneOverride = false; c.change = null; c.throttle = 0; c.lapValid = false;
     this.leaveSqueeze(c);
     this.emit({ type: 'deslot', car: c });
     this.pmsg(c, 'msg.deslot', 'bad');
@@ -730,6 +773,7 @@ export class Race {
       c.sgServed += dt;
       if (c.sgServed >= c.sgOwed) {
         c.sgOwed = 0; c.sgServed = 0; c.sgServing = false; c.sgChances = 0;
+        this.endPenaltyRoute(c);
         this.emit({ type: 'served', car: c });
         this.pmsg(c, 'msg.penServed', 'good');
       }
@@ -738,6 +782,9 @@ export class Race {
       this.pmsg(c, 'msg.penReset', 'bad');
     }
   }
+
+  /** The stop-and-go is settled: a request that existed only for it ends, a chosen fuel stop carries on. */
+  endPenaltyRoute(c: Car): void { if (c.pitPenaltyOnly) this.clearPitIntent(c); }
 
   /** can this car still make the upcoming pit entrance (outside lane, or a switch to it, with room to spare)? */
   reachablePitEntry(c: Car): boolean {
@@ -752,6 +799,7 @@ export class Race {
     const secs = PEN.unservedDetour + c.sgOwed;
     c.timePen += secs;
     c.sgOwed = 0; c.sgServed = 0; c.sgServing = false; c.sgChances = 0; c.sgSkipNext = false;
+    this.endPenaltyRoute(c);
     this.emit({ type: 'timePen', car: c, secs, reason });
     this.pmsg(c, reason === 'missed' ? 'msg.penMissed' : 'msg.penUnserved', 'bad', { n: secs });
   }
@@ -761,7 +809,7 @@ export class Race {
     c.offences++;
     const stop = c.offences >= 3;
     if (stop) {
-      if (c.sgOwed <= 0) { c.sgChances = PEN.opportunities; c.sgSkipNext = !this.reachablePitEntry(c); if (c.isPlayer) c.pitReq = true; }
+      if (c.sgOwed <= 0) { c.sgChances = PEN.opportunities; c.sgSkipNext = !this.reachablePitEntry(c); if (c.isPlayer) this.armPenaltyRoute(c); }
       c.sgOwed += PEN.stopSeconds;
     }
     this.emit({ type: 'offence', car: c, other, n: c.offences, cause, stop });

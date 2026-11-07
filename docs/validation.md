@@ -26,6 +26,7 @@ Functional runs default to 480×270 at Low so SwiftShader can run them. Perf cap
 | --- | --- | --- |
 | `race` | Real frames and real keys, no scripted state | Clubman Park, Sunburst, 13 laps: countdown, throttle, brake, lane request, camera, pause and resume, pit request, entry, service and exit, finish, results, restart, clock policy |
 | `controlled` | Scripted set-up with `__game.advance`, then real frames and keys | De-slot and recovery, warning, stop-and-go served and unserved, blur, hidden tab, 1.5 s stall, resize, restart |
+| `routing` | Scripted placement, then real frames and keys | Pit and stop-and-go outside routing: Space override, HUD chips and arrows, fuel stop, serve, and pit entry from the inside lane on every circuit |
 | `practice` | Real keys, fixture saves | Valid lap, PB, ghost save and replay, invalid lap, reload |
 | `championship` | Fixture saves, race skipped by script | Continue, round stored once, reload, damaged saves |
 | `tracks` | Real frames | Every configured circuit loads and draws in both camera views |
