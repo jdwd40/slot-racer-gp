@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 import * as T from './track';
-import { Race, LAPS, RaceEvent, DRIVERS, PERSONAS, PEN, DEF } from './race';
+import { Race, Car, LAPS, RaceEvent, DRIVERS, PERSONAS, PEN, DEF } from './race';
 import { buildWorld, disposeWorld, arrowGeometry, World } from './world';
 import { Y0 } from './gfx';
 import { makeCar, CarVisual } from './carModel';
@@ -10,6 +10,7 @@ import { Sfx } from './audio';
 import { t } from './i18n';
 import * as R from './records';
 import { GhostRecorder, GhostPlayer } from './ghost';
+import { FixedStepper, STEP, MAX_GAP, Pose, blendPose } from './timing';
 
 const TRACK_KEY = 'srgp.track';
 function savedTrack(): string {
@@ -62,6 +63,10 @@ let mode: Mode = 'race';
 let carId = R.savedCar();
 function newRace(): Race { return new Race({ practice: mode === 'practice', playerColor: R.livery(carId).color }); }
 let race = newRace();
+const stepper = new FixedStepper();
+const poseOf = ({ x, y, z, h, roll, pitch }: Car): Pose => ({ x, y, z, h, roll, pitch });
+/** each car's placement before the latest simulation step; drawing blends from here to the live state */
+let prevPoses = race.cars.map(poseOf);
 let visuals: CarVisual[] = [];
 function disposeVisual(v: CarVisual): void {
   v.group.traverse((o) => { const m = o as THREE.Mesh; if (m.isMesh) { m.geometry.dispose(); (Array.isArray(m.material) ? m.material : [m.material]).forEach((x) => x.dispose()); } });
@@ -73,7 +78,7 @@ function rebuildVisuals(): void {
   visuals = race.cars.map((c) => { const v = makeCar(c.color, [7, 11, 3, 24][c.idx], c.isPlayer); scene.add(v.group); return v; });
 }
 rebuildVisuals();
-function setRace(r: Race): void { race = r; laneArrowKey = ''; lastCrossed = 0; rebuildVisuals(); }
+function setRace(r: Race): void { race = r; laneArrowKey = ''; lastCrossed = 0; prevPoses = race.cars.map(poseOf); stepper.rebase(); rebuildVisuals(); }
 
 // practice ghost + records
 const recorder = new GhostRecorder();
@@ -251,7 +256,7 @@ function showPause(): void {
   overlay.querySelector('#o-menu')!.addEventListener('click', toMenu);
 }
 
-function resume(): void { screen = 'race'; overlay.className = 'overlay'; overlay.innerHTML = ''; }
+function resume(): void { screen = 'race'; overlay.className = 'overlay'; overlay.innerHTML = ''; stepper.rebase(); }
 
 function colorDot(c: number): string { return `<i style="background:#${c.toString(16).padStart(6, '0')}"></i>`; }
 
@@ -431,7 +436,11 @@ window.addEventListener('keydown', (e) => {
   if (k === 'KeyP') race.requestPit();
 });
 window.addEventListener('keyup', (e) => keys.delete(e.code));
-window.addEventListener('blur', () => { keys.clear(); if (screen === 'race') showPause(); });
+/** The player has left: a key released while away never reports its keyup, and a race does not run unattended. */
+function suspend(): void { keys.clear(); if (screen === 'race') showPause(); }
+window.addEventListener('blur', suspend);
+// the results screen keeps simulating when unfocused, so the rebase matters there too: time spent hidden is never replayed
+document.addEventListener('visibilitychange', () => { if (document.hidden) suspend(); stepper.rebase(); });
 renderer.domElement.addEventListener('wheel', (e) => { e.preventDefault(); zoomBy(e.deltaY > 0 ? 1.12 : 0.89); }, { passive: false });
 
 hud.el['b-view'].addEventListener('click', () => { sfx.init(); toggleView(); });
@@ -460,12 +469,11 @@ function zoomBy(f: number): void {
   followSpan = THREE.MathUtils.clamp(followSpan * f, 10, 70);
 }
 let shadowSpan = 0;
-function updateCamera(dt: number): void {
-  const p = race.player;
+function updateCamera(dt: number, p: Pose): void {
   const desired = new THREE.Vector3();
   let span: number;
   if (camMode === 'follow') {
-    const lead = Math.min(followSpan * 0.28, p.v * 0.3);
+    const lead = Math.min(followSpan * 0.28, race.player.v * 0.3);
     const lx = Math.cos(p.h) * lead, ly = Math.sin(p.h) * lead;
     const kl = 1 - Math.exp(-2.2 * dt);
     camLead.x += (lx - camLead.x) * kl; camLead.y += (ly - camLead.y) * kl;
@@ -541,11 +549,12 @@ function handle(e: RaceEvent): void {
 function dist2(c: { x: number; y: number }): number { const dx = c.x - camTarget.x, dy = -c.y - camTarget.z; return dx * dx + dy * dy; }
 
 // ------------------------------------------------------------ visuals sync
-function syncCars(dt: number, time: number): void {
+function syncCars(dt: number, time: number, poses: Pose[]): void {
   race.cars.forEach((c, i) => {
     const v = visuals[i];
-    v.group.position.set(c.x, c.z, -c.y);
-    v.group.rotation.set(c.roll, c.h, c.pitch, 'YXZ');
+    const pose = poses[i];
+    v.group.position.set(pose.x, pose.z, -pose.y);
+    v.group.rotation.set(pose.roll, pose.h, pose.pitch, 'YXZ');
     // body roll from wobble / crash tumble
     if (c.mode === 'off' && c.off) {
       v.body.rotation.x = Math.sin(c.off.t * 9) * 0.25 * Math.max(0, 1 - c.off.t);
@@ -568,7 +577,7 @@ function syncCars(dt: number, time: number): void {
   const p = race.player;
   underRing.visible = bridgeFade < 0.97 && p.mode !== 'off';
   if (underRing.visible) {
-    underRing.position.set(p.x, p.z + Y0 + 0.05, -p.y);
+    underRing.position.set(poses[0].x, poses[0].z + Y0 + 0.05, -poses[0].y);
     (underRing.material as THREE.MeshBasicMaterial).opacity = (1 - bridgeFade) * (0.6 + Math.sin(time * 6) * 0.25);
   }
 }
@@ -632,6 +641,7 @@ function syncAudio(): void {
 // ------------------------------------------------------------ loop
 /** one simulation step: physics, events, timing-line bookkeeping and ghost recording */
 function tick(dt: number): void {
+  prevPoses = race.cars.map(poseOf);
   race.update(dt, { up: keys.has('KeyW') || keys.has('ArrowUp'), down: keys.has('KeyS') || keys.has('ArrowDown') });
   for (const e of race.events) handle(e);
   race.events.length = 0;
@@ -643,18 +653,19 @@ function tick(dt: number): void {
 let last = performance.now();
 let time = 0;
 showTitle();
+const simulating = (): boolean => screen === 'race' || screen === 'results';
 function frame(now: number): void {
   requestAnimationFrame(frame);
-  const dt = Math.min(0.05, (now - last) / 1000);
+  // dt paces presentation only (camera, wheels, toasts) and keeps running on menus; race time comes from the stepper
+  const dt = Math.min(MAX_GAP, Math.max(0, (now - last) / 1000));
   last = now; time += dt;
-  if (screen === 'race' || screen === 'results') {
-    tick(dt);
-  } else if (screen === 'title') {
-    // idle: slow orbit-free pan over the grid
-  }
-  updateCamera(dt);
-  syncCars(dt, time);
-  ghost.update(race.raceTime, screen === 'race' ? dt : 0);
+  stepper.frame(now, simulating, tick);
+  const alpha = stepper.alpha;
+  const poses = race.cars.map((c, i) => blendPose(prevPoses[i], c, alpha));
+  updateCamera(dt, poses[0]);
+  syncCars(dt, time, poses);
+  // the blended cars trail the live state by up to a step; the ghost must trail with them to line up
+  ghost.update(race.raceTime - (1 - alpha) * STEP, screen === 'race' ? dt : 0);
   syncArrows(time);
   syncAudio();
   hud.root.style.display = screen === 'race' || screen === 'pause' || screen === 'results' ? '' : 'none';
@@ -664,4 +675,4 @@ function frame(now: number): void {
 requestAnimationFrame(frame);
 
 // debug/test hooks
-(window as unknown as { __game: unknown }).__game = { get race() { return race; }, T, R, PEN, DEF, PERSONAS, startRace, applyTrack, startSession, showTitle, showBoards, get mode() { return mode; }, get champ() { return champ; }, get ghost() { return ghost; }, get recorder() { return recorder; }, get pbMs() { return pbMs; }, get screen() { return screen; }, advance: (sec: number) => { for (let t = 0; t < sec && (screen === 'race' || screen === 'results'); t += 1 / 60) tick(1 / 60); }, setView: (m: 'follow' | 'full') => { camMode = m; }, zoom: (span: number) => { camMode = 'follow'; followSpan = span; curSpan = span; }, snapCam: () => { const p = race.player; camLead.set(0, 0); camTarget.set(p.x, 0, -p.y); }, info: () => ({ calls: renderer.info.render.calls, tris: renderer.info.render.triangles, objects: world.root.children.length }) };
+(window as unknown as { __game: unknown }).__game = { get race() { return race; }, T, R, PEN, DEF, PERSONAS, startRace, applyTrack, startSession, showTitle, showBoards, get mode() { return mode; }, get champ() { return champ; }, get ghost() { return ghost; }, get recorder() { return recorder; }, get pbMs() { return pbMs; }, get screen() { return screen; }, stepper, advance: (sec: number) => { for (let t = 0; t < sec && simulating(); t += STEP) tick(STEP); }, setView: (m: 'follow' | 'full') => { camMode = m; }, zoom: (span: number) => { camMode = 'follow'; followSpan = span; curSpan = span; }, snapCam: () => { const p = race.player; camLead.set(0, 0); camTarget.set(p.x, 0, -p.y); }, info: () => ({ calls: renderer.info.render.calls, tris: renderer.info.render.triangles, objects: world.root.children.length, frames: renderer.info.render.frame }) };
