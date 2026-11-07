@@ -12,6 +12,7 @@ import * as R from './records';
 import { GhostRecorder, GhostPlayer } from './ghost';
 import { FixedStepper, STEP, MAX_GAP, Pose, blendPose } from './timing';
 import { PRESETS, PresetId, pixelRatioFor, savedPreset, savePreset } from './graphics';
+import { COARSE_QUERY, DrivingInput, KEY_HOLDS, KEY_TAPS, PadButton, TOUCH_MODES, TouchMode, TouchPad, savedTouchMode, saveTouchMode, touchActive } from './input';
 
 const TRACK_KEY = 'srgp.track';
 function savedTrack(): string {
@@ -128,10 +129,16 @@ type Screen = 'title' | 'race' | 'pause' | 'results' | 'boards' | 'champ';
 let screen: Screen = 'title';
 let lbTrack = T.DEF.id;
 let lbKind: R.BoardKind = 'practice';
+/** Every change of screen ends the current hold, including restarting into the same one: what is still down needs pressing again. */
+function enter(s: Screen): void {
+  screen = s;
+  releaseDriving();
+  syncPad();
+}
 
 function controlsHtml(): string {
   const row = (k: string, id: string): string => `<div class="krow"><span class="keys">${k}</span><span>${t(id)}</span></div>`;
-  return `<div class="controls">
+  return `<p class="touch-hint">${t('touch.hint')}</p><div class="controls">
     ${row('<kbd>W</kbd><kbd>↑</kbd>', 'ctl.throttle')}
     ${row('<kbd>S</kbd><kbd>↓</kbd>', 'ctl.brake')}
     ${row('<kbd>Space</kbd>', 'ctl.lane')}
@@ -193,19 +200,19 @@ function carPickerHtml(): string {
 }
 
 const ARROW_STEP: Record<string, number> = { ArrowLeft: -1, ArrowUp: -1, ArrowRight: 1, ArrowDown: 1 };
-/** Low / Balanced / High radio group for the title and pause cards; wire it up with bindGraphics. */
-function graphicsHtml(): string {
-  const opts = PRESETS.map((p) => {
-    const on = p.id === preset;
-    return `<button class="tab ${on ? 'sel' : ''}" role="radio" aria-checked="${on}" tabindex="${on ? 0 : -1}" data-preset="${p.id}">${t(p.label)}</button>`;
+/** A settings radio group for the title and pause cards, named by the data attribute its buttons carry; wire it up with bindRadios. */
+function radiosHtml(name: string, label: string, opts: readonly { id: string; label: string }[], current: string): string {
+  const btns = opts.map((o) => {
+    const on = o.id === current;
+    return `<button class="tab ${on ? 'sel' : ''}" role="radio" aria-checked="${on}" tabindex="${on ? 0 : -1}" data-${name}="${o.id}">${t(o.label)}</button>`;
   }).join('');
-  return `<div class="gfx"><div class="lbl2" id="o-gfx">${t('gfx.label')}</div><div class="tabs" role="radiogroup" aria-labelledby="o-gfx">${opts}</div></div>`;
+  return `<div class="gfx"><div class="lbl2" id="o-${name}">${t(label)}</div><div class="tabs" role="radiogroup" aria-labelledby="o-${name}">${btns}</div></div>`;
 }
 
-function bindGraphics(): void {
-  const btns = [...overlay.querySelectorAll<HTMLButtonElement>('[data-preset]')];
+function bindRadios(name: string, choose: (id: string) => void): void {
+  const btns = [...overlay.querySelectorAll<HTMLButtonElement>(`[data-${name}]`)];
   const pick = (b: HTMLButtonElement): void => {
-    setPreset(b.dataset.preset as PresetId);
+    choose(b.dataset[name]!);
     btns.forEach((x) => {
       x.classList.toggle('sel', x === b);
       x.setAttribute('aria-checked', String(x === b));
@@ -227,8 +234,17 @@ function bindGraphics(): void {
   });
 }
 
+const TOUCH_OPTS = TOUCH_MODES.map((id) => ({ id, label: `touch.${id}` }));
+function settingsHtml(): string {
+  return radiosHtml('preset', 'gfx.label', PRESETS, preset) + radiosHtml('touch', 'touch.label', TOUCH_OPTS, touchMode);
+}
+function bindSettings(): void {
+  bindRadios('preset', (id) => setPreset(id as PresetId));
+  bindRadios('touch', (id) => setTouchMode(id as TouchMode));
+}
+
 function showTitle(): void {
-  screen = 'title';
+  enter('title');
   camMode = 'full';
   mode = 'race';
   overlay.className = 'overlay show';
@@ -249,7 +265,7 @@ function showTitle(): void {
     <div class="setup">
       <label class="ini"><span class="lbl2">${t('title.initials')}</span><input id="o-ini" maxlength="${R.MAX_INITIALS}" placeholder="${R.ANON}" value="${R.savedInitialsRaw().replace(/"/g, '')}" autocomplete="off" spellcheck="false"></label>
       <div><span class="lbl2">${t('title.car')}</span>${carPickerHtml()}</div>
-      ${graphicsHtml()}
+      ${settingsHtml()}
     </div>
     <div class="lbl2">${t('title.rivals')}</div>
     ${lineupHtml()}
@@ -273,7 +289,7 @@ function showTitle(): void {
     overlay.querySelectorAll('.car').forEach((x) => x.classList.toggle('sel', x === b));
     setRace(newRace());
   }));
-  bindGraphics();
+  bindSettings();
   const ini = overlay.querySelector<HTMLInputElement>('#o-ini')!;
   ini.addEventListener('input', () => R.saveInitialsRaw(ini.value));
   ini.addEventListener('keydown', (e) => { if (e.key === 'Enter') ini.blur(); e.stopPropagation(); });
@@ -286,29 +302,29 @@ function showTitle(): void {
 }
 
 function showPause(): void {
-  screen = 'pause';
+  enter('pause');
   overlay.className = 'overlay show';
   const title = mode === 'practice' ? t('prac.title') : mode === 'champ' && champ ? t('champ.round', { n: champ.rounds.length + 1, m: R.CHAMP_TRACKS.length }) : t('pause.title');
   overlay.innerHTML = `<div class="card">
     <h2>${title}</h2>
     ${mode === 'practice' ? `<p>${t('prac.hint')}</p>` : ''}
     ${controlsHtml()}
-    ${graphicsHtml()}
+    ${settingsHtml()}
     <div class="row"><button class="cta" id="o-resume">${t('pause.resume')}</button><button class="cta alt" id="o-restart">${t('pause.restart')}</button><button class="cta alt" id="o-menu">${t('pause.menu')}</button></div>
   </div>`;
-  bindGraphics();
+  bindSettings();
   overlay.querySelector('#o-resume')!.addEventListener('click', resume);
   overlay.querySelector('#o-restart')!.addEventListener('click', restartSession);
   overlay.querySelector('#o-menu')!.addEventListener('click', toMenu);
 }
 
-function resume(): void { screen = 'race'; overlay.className = 'overlay'; overlay.innerHTML = ''; stepper.rebase(); }
+function resume(): void { enter('race'); overlay.className = 'overlay'; overlay.innerHTML = ''; stepper.rebase(); }
 
 function colorDot(c: number): string { return `<i style="background:#${c.toString(16).padStart(6, '0')}"></i>`; }
 
 function showResults(): void {
   if (mode === 'champ') { recordChampRound(); showChamp(race); return; }
-  screen = 'results';
+  enter('results');
   const res = race.results();
   const pos = res.findIndex((r) => r.car.isPlayer) + 1;
   const winner = res[0].time;
@@ -350,7 +366,7 @@ function startChampRound(): void {
 /** Round results + cumulative standings (after a race), or the final table. */
 function showChamp(finished: Race | null): void {
   if (!champ) { showTitle(); return; }
-  screen = 'champ';
+  enter('champ');
   camMode = 'full';
   const c = champ;
   const nR = R.CHAMP_TRACKS.length;
@@ -382,7 +398,7 @@ function showChamp(finished: Race | null): void {
 
 // ---- leaderboards
 function showBoards(): void {
-  screen = 'boards';
+  enter('boards');
   overlay.className = 'overlay show';
   const tabs = T.TRACKS.map((d) => `<button class="tab ${d.id === lbTrack ? 'sel' : ''}" data-id="${d.id}">${t(`track.${d.id}.name`)}</button>`).join('');
   const kinds = (['practice', 'race'] as R.BoardKind[]).map((k) => `<button class="tab kind ${k === lbKind ? 'sel' : ''}" data-kind="${k}">${t(`boards.${k}`)}</button>`).join('');
@@ -453,15 +469,49 @@ function onPlayerCross(): void {
 }
 
 // ------------------------------------------------------------ input
-const keys = new Set<string>();
+const input = new DrivingInput({
+  lane: () => { if (screen === 'race') race.requestLane(); },
+  pit: () => { if (screen === 'race') race.requestPit(); },
+  view: () => toggleView(),
+  pause: () => { if (screen === 'race') showPause(); else if (screen === 'pause') resume(); },
+});
+const pad = new TouchPad([...hud.root.querySelectorAll<HTMLButtonElement>('[data-hold], [data-tap]')] as PadButton[], input, () => sfx.init());
+function releaseDriving(): void { pad.reset(); input.clear(); }
+
+let touchMode = savedTouchMode();
+const coarsePointer = window.matchMedia(COARSE_QUERY);
+/** Apply the touch setting and the current screen. Touches layout only, so a race in progress carries on untouched. */
+function syncPad(): void {
+  const on = touchActive(touchMode, { coarse: coarsePointer.matches, maxTouchPoints: navigator.maxTouchPoints });
+  document.body.classList.toggle('touch', on);
+  const show = on && screen === 'race';
+  if (!show) pad.reset();
+  hud.el['t-pad'].hidden = !show;
+}
+coarsePointer.addEventListener('change', syncPad);
+function setTouchMode(m: TouchMode): void {
+  touchMode = m;
+  saveTouchMode(m);
+  syncPad();
+}
+// every menu button counts as the interaction that lets audio start or resume
+overlay.addEventListener('click', () => sfx.init());
+
+const NON_SCROLL = ['Space', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'];
+/** This key belongs to what has focus: text fields take everything, and a focused menu button keeps Space and Enter. */
+function ownedByWidget(target: EventTarget | null, code: string): boolean {
+  const el = target instanceof Element ? target : null;
+  return !!el?.closest('input, textarea, select, [contenteditable]') || ((code === 'Space' || code === 'Enter') && !!el?.closest('.overlay button'));
+}
 window.addEventListener('keydown', (e) => {
   const k = e.code;
-  if (['Space', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(k)) e.preventDefault();
-  if (e.repeat) { keys.add(k); return; }
-  keys.add(k);
+  if (ownedByWidget(e.target, k)) return;
+  if (NON_SCROLL.includes(k)) e.preventDefault();
+  // auto-repeat is not a press: a key held across a pause stays released until it is pressed again
+  if (e.repeat) return;
   sfx.init();
+  if (screen === 'race' && KEY_HOLDS[k]) input.press(`key:${k}`, KEY_HOLDS[k]);
   if (screen === 'title') {
-    if ((e.target as HTMLElement)?.tagName === 'INPUT') return;
     if (k === 'Enter' || k === 'Space') startSession('race');
     const n = ['Digit1', 'Digit2', 'Digit3', 'Digit4', 'Digit5'].indexOf(k);
     if (n >= 0 && n < T.TRACKS.length) { applyTrack(T.TRACKS[n].id); showTitle(); }
@@ -470,30 +520,28 @@ window.addEventListener('keydown', (e) => {
   if (screen === 'boards' || screen === 'champ') { if (k === 'Escape') showTitle(); return; }
   if (k === 'KeyR') { restartSession(); return; }
   if (k === 'KeyG') toggleGhost();
-  if (k === 'KeyC') toggleView();
+  if (k === 'KeyC') input.tap('view');
   if (k === 'Equal' || k === 'NumpadAdd') zoomBy(0.8);
   if (k === 'Minus' || k === 'NumpadSubtract') zoomBy(1.25);
   if (k === 'KeyM') toggleSound();
-  if (k === 'Escape') { if (screen === 'race') showPause(); else if (screen === 'pause') resume(); return; }
+  if (k === 'Escape') { input.tap('pause'); return; }
   if (screen === 'pause' && k === 'Enter') { resume(); return; }
   if (screen === 'results' && k === 'Enter') { restartSession(); return; }
-  if (screen !== 'race') return;
-  if (k === 'Space') race.requestLane();
-  if (k === 'KeyP') race.requestPit();
+  if (KEY_TAPS[k]) input.tap(KEY_TAPS[k]);
 });
-window.addEventListener('keyup', (e) => keys.delete(e.code));
+window.addEventListener('keyup', (e) => input.release(`key:${e.code}`));
 /** The player has left: a key released while away never reports its keyup, and a race does not run unattended. */
-function suspend(): void { keys.clear(); if (screen === 'race') showPause(); }
+function suspend(): void { releaseDriving(); if (screen === 'race') showPause(); }
 window.addEventListener('blur', suspend);
 // the results screen keeps simulating when unfocused, so the rebase matters there too: time spent hidden is never replayed
 document.addEventListener('visibilitychange', () => { if (document.hidden) suspend(); stepper.rebase(); });
 renderer.domElement.addEventListener('wheel', (e) => { e.preventDefault(); zoomBy(e.deltaY > 0 ? 1.12 : 0.89); }, { passive: false });
 
-hud.el['b-view'].addEventListener('click', () => { sfx.init(); toggleView(); });
+hud.el['b-view'].addEventListener('click', () => { sfx.init(); input.tap('view'); });
 hud.el['b-zin'].addEventListener('click', () => zoomBy(0.8));
 hud.el['b-zout'].addEventListener('click', () => zoomBy(1.25));
 hud.el['b-snd'].addEventListener('click', () => { sfx.init(); toggleSound(); });
-hud.el['b-pause'].addEventListener('click', () => { if (screen === 'race') showPause(); else if (screen === 'pause') resume(); });
+hud.el['b-pause'].addEventListener('click', () => input.tap('pause'));
 function toggleSound(): void { sfx.setMuted(!sfx.muted); hud.el['b-snd'].textContent = sfx.muted ? '🔇' : '🔊'; }
 hud.el['b-ghost'].addEventListener('click', () => { sfx.init(); toggleGhost(); });
 function toggleGhost(): void { ghost.shown = !ghost.shown; hud.el['b-ghost'].classList.toggle('off', !ghost.shown); }
@@ -711,7 +759,7 @@ function syncAudio(): void {
 /** one simulation step: physics, events, timing-line bookkeeping and ghost recording */
 function tick(dt: number): void {
   prevPoses = race.cars.map(poseOf);
-  race.update(dt, { up: keys.has('KeyW') || keys.has('ArrowUp'), down: keys.has('KeyS') || keys.has('ArrowDown') });
+  race.update(dt, { up: input.held('throttle'), down: input.held('brake') });
   for (const e of race.events) handle(e);
   race.events.length = 0;
   const p = race.player;
@@ -746,4 +794,4 @@ function frame(now: number): void {
 requestAnimationFrame(frame);
 
 // debug/test hooks
-(window as unknown as { __game: unknown }).__game = { get race() { return race; }, T, R, PEN, DEF, PERSONAS, startRace, applyTrack, startSession, showTitle, showBoards, get mode() { return mode; }, get preset() { return preset; }, get champ() { return champ; }, get ghost() { return ghost; }, get recorder() { return recorder; }, get pbMs() { return pbMs; }, get screen() { return screen; }, get view() { return camMode; }, stepper, advance: (sec: number) => { for (let t = 0; t < sec && simulating(); t += STEP) tick(STEP); }, setView: (m: 'follow' | 'full') => { camMode = m; }, zoom: (span: number) => { camMode = 'follow'; followSpan = span; curSpan = span; }, snapCam: () => { const p = race.player; camLead.set(0, 0); camTarget.set(p.x, 0, -p.y); }, get marker() { return playerMarker; }, arrows: { lane: laneArrow, pit: pitArrow }, info: () => ({ calls: renderer.info.render.calls, tris: renderer.info.render.triangles, objects: world.root.children.length, frames: renderer.info.render.frame, geometries: renderer.info.memory.geometries, textures: renderer.info.memory.textures }) };
+(window as unknown as { __game: unknown }).__game = { get race() { return race; }, T, R, PEN, DEF, PERSONAS, startRace, applyTrack, startSession, showTitle, showBoards, get mode() { return mode; }, get preset() { return preset; }, get touchMode() { return touchMode; }, setTouchMode, input, get audio() { return sfx.ctx?.state ?? null; }, get muted() { return sfx.muted; }, suspendAudio: () => sfx.ctx?.suspend(), get champ() { return champ; }, get ghost() { return ghost; }, get recorder() { return recorder; }, get pbMs() { return pbMs; }, get screen() { return screen; }, get view() { return camMode; }, stepper, advance: (sec: number) => { for (let t = 0; t < sec && simulating(); t += STEP) tick(STEP); }, setView: (m: 'follow' | 'full') => { camMode = m; }, zoom: (span: number) => { camMode = 'follow'; followSpan = span; curSpan = span; }, snapCam: () => { const p = race.player; camLead.set(0, 0); camTarget.set(p.x, 0, -p.y); }, get marker() { return playerMarker; }, arrows: { lane: laneArrow, pit: pitArrow }, info: () => ({ calls: renderer.info.render.calls, tris: renderer.info.render.triangles, objects: world.root.children.length, frames: renderer.info.render.frame, geometries: renderer.info.memory.geometries, textures: renderer.info.memory.textures }) };

@@ -30,6 +30,7 @@ Functional runs default to 480×270 at Low so SwiftShader can run them. Perf cap
 | `practice` | Real keys, fixture saves | Valid lap, PB, ghost save and replay, invalid lap, reload |
 | `championship` | Fixture saves, race skipped by script | Continue, round stored once, reload, damaged saves |
 | `tracks` | Real frames | Every configured circuit loads and draws in both camera views |
+| `touch` | Chromium touch emulation and real mouse and keys, some scripted placement | Touch setting, multi-touch, release paths, lifecycle, Lane and Pit parity with the keyboard, touch-only flow, layouts. See [touch controls](touch.md) |
 
 `__game.advance` and scripted state are functional coverage only and are never used for timing or smoothness.
 

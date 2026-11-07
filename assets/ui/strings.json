@@ -169,6 +169,23 @@
     { "id": "pen.aiServed", "text": "{name} served a stop-and-go" },
     { "id": "pen.aiTime", "text": "{name}: +{n}s time penalty" },
     { "id": "res.pen", "text": "Penalties" },
-    { "id": "res.timePen", "text": "+{n}s" }
+    { "id": "res.timePen", "text": "+{n}s" },
+    { "id": "touch.label", "text": "Touch controls" },
+    { "id": "touch.auto", "text": "Auto" },
+    { "id": "touch.on", "text": "On" },
+    { "id": "touch.off", "text": "Off" },
+    { "id": "touch.hint", "text": "Hold Throttle and Brake to drive. Tap Lane to change lane, or to override a pit route for one switch. Tap Pit for a stop." },
+    { "id": "touch.throttle", "text": "Throttle" },
+    { "id": "touch.brake", "text": "Brake" },
+    { "id": "touch.hold", "text": "hold" },
+    { "id": "touch.lane", "text": "Lane" },
+    { "id": "touch.lane.idle", "text": "tap" },
+    { "id": "touch.lane.armed", "text": "✓ ready" },
+    { "id": "touch.lane.routed", "text": "P auto" },
+    { "id": "touch.lane.override", "text": "⇄ override" },
+    { "id": "touch.pit", "text": "Pit" },
+    { "id": "touch.pit.idle", "text": "tap" },
+    { "id": "touch.pit.armed", "text": "✓ armed" },
+    { "id": "touch.pit.compulsory", "text": "■ must stop" }
   ]
 }

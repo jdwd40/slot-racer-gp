@@ -2,6 +2,7 @@ import * as T from './track';
 import { Race, LAPS, LOW_FUEL, Car } from './race';
 import { t } from './i18n';
 import { fmtMs } from './records';
+import { laneCue, pitCue } from './input';
 
 export interface HudExtra { mode: 'race' | 'practice' | 'champ'; pbMs: number; round: string; }
 
@@ -15,6 +16,8 @@ export function routeChipId(r: { stay: boolean; override: boolean }): string {
   return `hud.route${r.override ? 'Inside' : 'Outside'}${r.stay ? 'Stay' : 'Move'}`;
 }
 const hex = (c: number): string => '#' + c.toString(16).padStart(6, '0');
+const VIEW_ICON = '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 5V1h4M11 1h4v4M15 11v4h-4M5 15H1v-4"/></svg>';
+const PAUSE_ICON = '<svg width="14" height="14" viewBox="0 0 14 14" fill="currentColor"><rect x="2" y="1" width="3.5" height="12" rx="1"/><rect x="8.5" y="1" width="3.5" height="12" rx="1"/></svg>';
 
 export class Hud {
   root: HTMLElement;
@@ -42,12 +45,14 @@ export class Hud {
         <div><span class="lbl" id="h-bestlbl" data-t="hud.best"></span><span id="h-best" class="mono best"></span></div>
       </div>
       <div class="tr">
-        <button id="b-view" class="btn" title="C"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 5V1h4M11 1h4v4M15 11v4h-4M5 15H1v-4"/></svg> <span data-t="hud.view"></span></button>
+        <button id="b-view" class="btn" title="C">${VIEW_ICON} <span data-t="hud.view"></span></button>
+        <button id="t-view" class="btn touch-only" tabindex="-1" data-tap="view">${VIEW_ICON} <span data-t="hud.view"></span></button>
         <button id="b-zout" class="btn sq" title="-">−</button>
         <button id="b-zin" class="btn sq" title="+">+</button>
         <button id="b-ghost" class="btn sq" title="G">👻</button>
         <button id="b-snd" class="btn sq" title="M">🔊</button>
-        <button id="b-pause" class="btn sq" title="Esc"><svg width="14" height="14" viewBox="0 0 14 14" fill="currentColor"><rect x="2" y="1" width="3.5" height="12" rx="1"/><rect x="8.5" y="1" width="3.5" height="12" rx="1"/></svg></button>
+        <button id="b-pause" class="btn sq" title="Esc">${PAUSE_ICON}</button>
+        <button id="t-pause" class="btn sq touch-only" tabindex="-1" data-tap="pause" aria-label="${t('ctl.pause')}">${PAUSE_ICON}</button>
       </div>
       <div class="panel bl">
         <div class="meter"><span class="lbl" data-t="hud.throttle"></span><div class="bar"><div id="h-thr" class="fill thr"></div></div></div>
@@ -59,6 +64,12 @@ export class Hud {
       <div id="h-status" class="status"></div>
       <div id="h-lights" class="lights">${'<i></i>'.repeat(5)}</div>
       <div id="h-go" class="go"></div>
+      <div id="t-pad" class="pad" hidden>
+        <button id="t-brake" class="tbtn hold" tabindex="-1" data-hold="brake"><b data-t="touch.brake"></b><small data-t="touch.hold"></small></button>
+        <button id="t-lane" class="tbtn" tabindex="-1" data-tap="lane"><b data-t="touch.lane"></b><small id="t-lane-cue"></small></button>
+        <button id="t-pit" class="tbtn" tabindex="-1" data-tap="pit"><b data-t="touch.pit"></b><small id="t-pit-cue"></small></button>
+        <button id="t-throttle" class="tbtn hold" tabindex="-1" data-hold="throttle"><b data-t="touch.throttle"></b><small data-t="touch.hold"></small></button>
+      </div>
     `;
     parent.appendChild(this.root);
     this.root.querySelectorAll<HTMLElement>('[id]').forEach((e) => (this.el[e.id] = e));
@@ -98,6 +109,14 @@ export class Hud {
     if (this.cache[id] === v) return;
     this.cache[id] = v;
     if (html) this.el[id].innerHTML = v; else this.el[id].textContent = v;
+  }
+
+  /** Show a tap control's state as a shape and a word, so it never rests on colour alone. */
+  cue(name: 'lane' | 'pit', state: string): void {
+    const b = this.el[`t-${name}`];
+    if (b.dataset.cue === state) return;
+    b.dataset.cue = state;
+    this.set(`t-${name}-cue`, t(`touch.${name}.${state}`));
   }
 
   toast(text: string, kind: string): void {
@@ -158,6 +177,8 @@ export class Hud {
     if (p.squeezeHold) chips.push(`<span class="chip org">▼ ${t('hud.yield')}</span>`);
     if (p.yielding) chips.push(`<span class="chip org">▼ ${t('hud.pitYield')}</span>`);
     this.set('h-chips', chips.join(''), true);
+    this.cue('lane', laneCue(p, route));
+    this.cue('pit', pitCue(p));
 
     // status line
     let st = '';
