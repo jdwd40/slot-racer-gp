@@ -75,7 +75,7 @@ AI cars never reverse. `reverseControl` runs only for the player, and AI speed s
 | AI determinism | 10 seeded all-AI races (5 circuits × 2 seeds, up to 200 s each) produced identical final state (position, speed, fuel, laps, stops, offences, penalties, best lap) before and after the change |
 | `reverse` browser scenario | 9 of 9 checks, 2 runs out of 2, at 480×270 Low |
 | `routing`, `controlled` | 16 of 16 and 17 of 17 passed. The one `controlled` n/a ("real window blur and tab switch") was already there |
-| `touch`, `practice` | See below |
+| `touch`, `practice` | 53 of 53 and 10 of 10 passed: touch release paths, lifecycle and parity, and practice ghost and records saves, are unchanged |
 
 `test/reverse.test.ts` covers:
 
