@@ -76,6 +76,6 @@ Smoke checks through the real game at a controlled 10 FPS:
 - Below 4 FPS the race still runs slower than wall time, by design. The 7 November playtest was not reproduced and its frame rate is unknown, so it may be in this range. If so, it needs the separate graphics work.
 - Real-GPU behaviour is untested, including how interpolation looks on 60 Hz and 120 Hz or faster displays.
 - Blur and hidden were simulated with synthetic events, not a real tab switch. The hidden-tab return on the results screen and the mid-callback stop were checked only in unit tests.
-- `test/timing.test.ts` drives real `Race` and `FixedStepper` objects but mirrors `tick()` in a small harness, because `main.ts` needs a DOM. The browser checks above cover the real code, and their script is not committed because Playwright is not a project dependency.
+- `test/timing.test.ts` drives real `Race` and `FixedStepper` objects but mirrors `tick()` in a small harness, because `main.ts` needs a DOM. The browser checks above cover the real code; that one-off script is not committed, and `docs/validation.md` has the repeatable checks.
 - Blending draws cars up to one step (16.7 ms) behind the simulation. The minimap is not blended.
 - Input is still sampled per callback. A key press applies to every step of that callback, and a tap shorter than a frame gap can be missed, as it could before.

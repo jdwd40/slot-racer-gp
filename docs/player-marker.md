@@ -16,7 +16,7 @@ During a tow the car is hidden from 0.9 s until it reaches the bay. The marker s
 
 ## Evidence
 
-**All browser results are SwiftShader diagnostics. The build host has no GPU, no real GPU was tested, and these runs show nothing about real hardware.** Environment: headless Chromium, ANGLE SwiftShader, Node 26.7.0. Before is `1a1ce1d`. After is this change. Random numbers were seeded and the race was stepped by script, so both builds show the same race state. The script is not committed because Playwright is not a project dependency.
+**All browser results are SwiftShader diagnostics. The build host has no GPU, no real GPU was tested, and these runs show nothing about real hardware.** Environment: headless Chromium, ANGLE SwiftShader, Node 26.7.0. Before is `1a1ce1d`. After is this change. Random numbers were seeded and the race was stepped by script, so both builds show the same race state. That one-off script is not committed; `docs/validation.md` has the repeatable checks.
 
 ### Before and after
 

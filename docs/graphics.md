@@ -74,7 +74,7 @@ Low in the full-circuit view with lane and pit requests armed, scaled to half si
 
 `npm run typecheck`, `npm test` (122 tests: 114 existing, 8 new in `test/graphics.test.ts`) and `npm run build` pass on Node 26.7.0. The `.nvmrc` pin (22) was not available on this host.
 
-Run through the production build in headless Chromium at 480×270, using real keyboard input. The script is not committed because Playwright is not a project dependency.
+Run through the production build in headless Chromium at 480×270, using real keyboard input. That one-off script is not committed; `docs/validation.md` has the repeatable checks.
 
 - **Selection:** presets select, apply, persist and reload. Missing and invalid values give Balanced, and an invalid value is left in storage on load.
 - **Blocked storage:** with `localStorage` throwing, presets still apply, a race runs and there are no page errors.
