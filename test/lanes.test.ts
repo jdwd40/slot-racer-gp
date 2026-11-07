@@ -77,7 +77,7 @@ describe('pit entry', () => {
     const P = r.player; P.isPlayer = true;
     place(P, T.PIT_IN0 - 0.5, 1, 10); P.pitReq = true;
     let ev = stepEvents(r, 6, UP);
-    expect(P.mode).toBe('race'); expect(P.pitReq).toBe(false); expect(msgs(ev)).toContain('msg.pitMissed');
+    expect(P.mode).toBe('race'); expect(P.pitReq).toBe(true); expect(msgs(ev)).toContain('msg.pitMissed');
 
     park(r); place(P, T.PIT_IN0 - 0.5, -1, 10); P.pitReq = true;
     ev = stepEvents(r, 6, UP);

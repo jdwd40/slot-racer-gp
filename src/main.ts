@@ -646,12 +646,13 @@ function syncCars(dt: number, time: number, poses: Pose[]): void {
 
 function syncArrows(time: number): void {
   const p = race.player;
-  // lane change arrow
-  if (p.laneReq || p.change) {
+  // lane change arrow: a pit route draws its choice for the next switch, straight when that means staying in lane
+  const route = race.nextRoute(p);
+  if (p.laneReq || p.change || route) {
     const sw = p.change ? { s0: p.change.s0, s1: p.change.s1 } : race.nextSwitch(p);
     const from = p.change ? p.change.from : Math.sign(p.laneSide) || 1;
-    const to = -from;
-    const key = `${sw.s0}:${from}`;
+    const to = p.change ? p.change.to : route ? route.to : -from;
+    const key = `${sw.s0}:${from}:${to}`;
     if (key !== laneArrowKey) {
       laneArrowKey = key;
       laneArrow.geometry.dispose();
@@ -660,10 +661,16 @@ function syncArrows(time: number): void {
     }
     laneArrow.visible = true;
     arrowMat.opacity = p.change ? 0.35 : 0.55 + Math.sin(time * 8) * 0.3;
+    arrowMat.color.setHex(route && !route.override ? 0x22d3ee : 0xffd23f);
   } else laneArrow.visible = false;
-  pitArrow.visible = p.pitReq;
+  pitArrow.visible = route !== null;
   pitArrowMat.opacity = 0.55 + Math.sin(time * 8) * 0.3;
-  pitArrowMat.color.setHex(p.laneSide < 0 || (p.change && p.change.to < 0) ? 0x22d3ee : 0xff6b6b);
+  if (route) {
+    // cyan when the car will reach the entrance in the outside lane: the next switch only counts if it comes first
+    const s = race.s(p);
+    const side = T.ahead(s, race.nextSwitch(p).s0) < T.ahead(s, T.PIT_IN0) ? route.to : p.change ? p.change.to : p.laneSide;
+    pitArrowMat.color.setHex(side < 0 ? 0x22d3ee : 0xff6b6b);
+  }
   // service bay glow when the player is in the pit lane
   const inPit = p.mode === 'pitlane' || p.mode === 'bayIn' || p.mode === 'service';
   world.bayGlow.forEach((m, j) => {
@@ -739,4 +746,4 @@ function frame(now: number): void {
 requestAnimationFrame(frame);
 
 // debug/test hooks
-(window as unknown as { __game: unknown }).__game = { get race() { return race; }, T, R, PEN, DEF, PERSONAS, startRace, applyTrack, startSession, showTitle, showBoards, get mode() { return mode; }, get preset() { return preset; }, get champ() { return champ; }, get ghost() { return ghost; }, get recorder() { return recorder; }, get pbMs() { return pbMs; }, get screen() { return screen; }, get view() { return camMode; }, stepper, advance: (sec: number) => { for (let t = 0; t < sec && simulating(); t += STEP) tick(STEP); }, setView: (m: 'follow' | 'full') => { camMode = m; }, zoom: (span: number) => { camMode = 'follow'; followSpan = span; curSpan = span; }, snapCam: () => { const p = race.player; camLead.set(0, 0); camTarget.set(p.x, 0, -p.y); }, get marker() { return playerMarker; }, info: () => ({ calls: renderer.info.render.calls, tris: renderer.info.render.triangles, objects: world.root.children.length, frames: renderer.info.render.frame, geometries: renderer.info.memory.geometries, textures: renderer.info.memory.textures }) };
+(window as unknown as { __game: unknown }).__game = { get race() { return race; }, T, R, PEN, DEF, PERSONAS, startRace, applyTrack, startSession, showTitle, showBoards, get mode() { return mode; }, get preset() { return preset; }, get champ() { return champ; }, get ghost() { return ghost; }, get recorder() { return recorder; }, get pbMs() { return pbMs; }, get screen() { return screen; }, get view() { return camMode; }, stepper, advance: (sec: number) => { for (let t = 0; t < sec && simulating(); t += STEP) tick(STEP); }, setView: (m: 'follow' | 'full') => { camMode = m; }, zoom: (span: number) => { camMode = 'follow'; followSpan = span; curSpan = span; }, snapCam: () => { const p = race.player; camLead.set(0, 0); camTarget.set(p.x, 0, -p.y); }, get marker() { return playerMarker; }, arrows: { lane: laneArrow, pit: pitArrow }, info: () => ({ calls: renderer.info.render.calls, tris: renderer.info.render.triangles, objects: world.root.children.length, frames: renderer.info.render.frame, geometries: renderer.info.memory.geometries, textures: renderer.info.memory.textures }) };

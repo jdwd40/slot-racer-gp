@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Bounded browser validation of the real game. Procedure and results: docs/validation.md.
 //
-//   node scripts/browser-check.mjs [tracks race controlled practice championship]   functional checks (default: all)
+//   node scripts/browser-check.mjs [tracks race controlled routing practice championship]   functional checks (default: all)
 //   node scripts/browser-check.mjs perf --label updated --machine "<name>"          frame-time capture
 //   node scripts/browser-check.mjs compare <baseline.json> <updated.json>           like-for-like comparison
 //
@@ -102,8 +102,9 @@ function instrument({ seed }) {
       const side = (p.change ? p.change.to : p.laneSide) < 0 ? -1 : 1;
       const outside = side < 0;
       const laneTest = !wantPit && o.laneTest && ((p.lapsDone === 1 && outside) || (p.lapsDone === 2 && !outside));
-      if (!p.change) cmd.lane = wantPit && outside ? p.laneReq : !p.laneReq && ((wantPit && !outside) || laneTest);
-      cmd.pit = wantPit && outside && !p.pitReq;
+      // routing takes the car outside for a pit request: Space would be an override here, so it is only used for the lane test
+      cmd.lane = !p.change && !p.pitReq && !p.laneReq && laneTest;
+      cmd.pit = wantPit && !p.pitReq;
       const n = r.profiles['player:1'].length;
       const at = (x) => Math.floor(T.wrapS(x) / T.PROFILE_STEP) % n;
       const look = p.v * 0.45;
@@ -385,6 +386,86 @@ async function race(run, c) {
   await frames(page, 2);
   const again = await game(page);
   c.ok('Play again gives a fresh countdown, zero clock and a full tank', again.screen === 'race' && again.phase === 'countdown' && again.raceTime === 0 && again.lap === 0 && again.fuel === 1, again);
+  return s;
+}
+
+/** Pit and stop-and-go routing with real keys and frames: a fuel stop on every circuit, then a stop-and-go. Cars are placed by script: functional coverage only. */
+async function routing(run, c) {
+  const s = await open(run, { viewport: { width: Math.max(run.viewport.width, 960), height: Math.max(run.viewport.height, 540) } });
+  const { page, keys } = s;
+  const CYAN = 0x22d3ee, YELLOW = 0xffd23f;
+  const chips = () => page.locator('#h-chips').textContent();
+  const arrows = () => read(page, () => { const a = window.__game.arrows; return { lane: a.lane.visible, pit: a.pit.visible, laneColour: a.lane.material.color.getHex(), pitColour: a.pit.material.color.getHex() }; });
+  /** a running race with the player on the inside lane, short of the last switch before the pit entrance, on a low tank */
+  const approach = (id) => read(page, (x) => {
+    const g = window.__game, T = g.T;
+    g.applyTrack(x);
+    g.startSession('race');
+    g.advance(7);
+    const r = g.race, p = r.player;
+    const sw = [...T.SWITCHES].sort((a, b) => T.ahead(a.s1, T.PIT_IN0) - T.ahead(b.s1, T.PIT_IN0))[0];
+    const put = (car, u, side, v) => { car.u = u; car.laneSide = side; car.d = side * T.LANE_HALF; car.v = v; car.change = null; car.mode = 'race'; car.throttle = 0; car.graceT = 0; car.recoverT = 0; car.cutT = 0; car.pushedT = 0; };
+    const u = p.crossed * T.L + T.wrapS(sw.s0 - 20);
+    r.cars.forEach((o, i) => { if (i) put(o, u + T.L / 2 + i * 8, 1, 0); });
+    put(p, u, 1, 10);
+    r.squeezeQ.length = 0; // a car moved by script past the squeeze never leaves its queue, and would hold everyone behind it
+    p.fuel = 0.2;
+    return sw.s0;
+  }, id);
+  const held = { budgetMs: 60000, opts: { laps: 3 } };
+  const ids = await read(page, () => window.__game.T.TRACKS.map((t) => t.id));
+
+  for (const id of ids) {
+    const first = id === ids[0];
+    await keys.release();
+    const sw = await approach(id);
+    await keys.tap('KeyP');
+    await frames(page, 3);
+    if (first) {
+      c.ok('Fuel: chip shows the automatic move outside', (await chips()).includes(STRINGS['hud.routeOutsideMove']), await chips());
+      const a = await arrows();
+      c.ok('Fuel: cyan lane and pit arrows show the automatic route', a.lane && a.pit && a.laneColour === CYAN && a.pitColour === CYAN, a);
+      await keys.tap('Space');
+      await frames(page, 3);
+      c.ok('Fuel: Space shows the one-switch inside choice as staying in lane', (await chips()).includes(STRINGS['hud.routeInsideStay']), await chips());
+      const b = await arrows();
+      c.ok('Fuel: arrows show the override, and warn the pit entrance will be missed', b.lane && b.laneColour === YELLOW && b.pitColour !== CYAN, b);
+      await page.screenshot({ path: path.join(run.out, 'routing-override.png') });
+      await keys.tap('Space');
+      await frames(page, 3);
+      c.ok('Fuel: a second Space restores automatic outside', (await chips()).includes(STRINGS['hud.routeOutsideMove']), await chips());
+    }
+    const entry = await driveUntil(s, (st) => st.mode === 'pitlane', held);
+    const inPit = await read(page, () => { const p = window.__game.race.player; return { pitReq: p.pitReq, override: p.laneOverride, moved: p.laneSide }; });
+    c.ok(`${id}: routed outside from the inside lane and entered the pits with no lane key`, entry.mode === 'pitlane' && !inPit.pitReq && !inPit.override, { sw, ...inPit });
+    if (!first) continue;
+    await driveUntil(s, (st) => st.mode === 'service', held);
+    const out = await driveUntil(s, (st) => st.mode === 'race', held);
+    await frames(page, 3);
+    const after = await read(page, () => { const p = window.__game.race.player; return { pitReq: p.pitReq, fuel: p.fuel, pitStops: p.pitStops }; });
+    c.ok('Fuel: serviced, rejoined and the request is over', out.mode === 'race' && !after.pitReq && after.fuel > 0.3 && after.pitStops >= 1, after);
+    c.ok('Fuel: no route chip after the stop', !(await chips()).includes('PIT ROUTE'), await chips());
+    await keys.release();
+  }
+
+  // stop-and-go: same routing with no P key
+  await keys.release();
+  await approach(ids[0]);
+  await read(page, () => { const r = window.__game.race, p = r.player; p.fuel = 1; p.offences = 2; r.offence(p, r.cars[2], 'rear'); p.sgSkipNext = false; });
+  await frames(page, 3);
+  c.ok('Stop-and-go: award alone shows the automatic route', (await chips()).includes(STRINGS['hud.routeOutsideMove']) && (await chips()).includes(STRINGS['hud.sgChip']), await chips());
+  await keys.tap('Space');
+  await frames(page, 3);
+  const over = await read(page, () => { const p = window.__game.race.player; return { sgOwed: p.sgOwed, sgChances: p.sgChances, pitReq: p.pitReq, override: p.laneOverride }; });
+  c.ok('Stop-and-go: override keeps the penalty and its deadline', over.override && over.pitReq && over.sgOwed === 3 && over.sgChances === 2, over);
+  await keys.tap('Space');
+  await frames(page, 3);
+  const served = await driveUntil(s, (st) => st.sgOwed === 0, held);
+  const left = await driveUntil(s, (st) => st.mode === 'race', held);
+  await keys.release();
+  await frames(page, 3);
+  const end = await read(page, () => { const p = window.__game.race.player; return { timePen: p.timePen, sgOwed: p.sgOwed, pitReq: p.pitReq, penaltyOnly: p.pitPenaltyOnly }; });
+  c.ok('Stop-and-go: routed in, served in the box, no time penalty, no stale request', served.mode === 'pitlane' && left.mode === 'race' && end.timePen === 0 && !end.pitReq && !end.penaltyOnly, end);
   return s;
 }
 
@@ -671,8 +752,8 @@ async function perf(run) {
 }
 
 // ------------------------------------------------------------ cli
-const SCENARIOS = { tracks, race, controlled, practice, championship };
-const USAGE = 'usage: browser-check.mjs [tracks|race|controlled|practice|championship ...] | perf | compare <a.json> <b.json>\n'
+const SCENARIOS = { tracks, race, controlled, routing, practice, championship };
+const USAGE = 'usage: browser-check.mjs [tracks|race|controlled|routing|practice|championship ...] | perf | compare <a.json> <b.json>\n'
   + 'options: --dist <dir> --url <url> --commit <sha> --machine <name> --label <name> --viewport WxH --dpr N --preset low|balanced|high\n'
   + '         --seconds N --headed --channel <chrome|msedge> --out <dir> --max-minutes N';
 
