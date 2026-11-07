@@ -42,13 +42,13 @@ HUD buttons (More, zoom, sound, ghost) act on `touchstart` for a finger and on `
 
 ## Interaction checklist
 
-Results come from `node scripts/browser-check.mjs responsive` and `touchrace` (emulated touch, SwiftShader). ✓ means checked by an automated check in that run.
+Results come from `node scripts/browser-check.mjs responsive` and `touchrace` (emulated touch, SwiftShader). See [Runs](#runs). ✓ means an automated check passed in that run.
 
 | Check | 360×640 | 390×844 | 640×360 | 844×390 | 768×1024 | 1440×900 |
 | --- | --- | --- | --- | --- | --- | --- |
 | Pad controls on screen, 48 px or more, 8 px or more apart, on top where tapped | ✓ | ✓ | ✓ | ✓ | ✓ | n/a (no touch) |
 | Position, lap, time, fuel, chips, status, toast and minimap on screen, overlapping no control or each other, with every message showing at once | ✓ | ✓ | ✓ | ✓ | ✓ | unchanged |
-| Screen middle (the car) clear, and at least half the screen is track view | ✓ 70% | ✓ 77% | ✓ 67% | ✓ 72% | ✓ 85% | unchanged |
+| Screen middle (the car) clear, and at least half the screen is track view | ✓ 70% | ✓ 77% | ✓ 67%, but see [Runs](#runs) | ✓ 72% | ✓ 85% | unchanged |
 | Minimap backing = CSS size × DPR, projection matches | ✓ 108×94 | ✓ 117×102 | ✓ 108×94 | ✓ 117×102 | ✓ 138×120 | ✓ 230×200 |
 | Canvas fills the box, camera aspect follows | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | More tray: labelled, opens by touch, View/zoom/sound on screen, 48 px, clear of the pad | ✓ | ✓ | ✓ | ✓ | n/a (full row) | n/a |
@@ -66,17 +66,31 @@ Other checks in the same runs:
 - **Settings:** Balanced and Touch On chosen by tap survive rotation and a reload. Viewport changes never rewrite the saved preset.
 - **Initials with a keyboard:** typed after a tap on the field. The keyboard is simulated by shrinking `visualViewport` to 508 of 844 px, as iOS Safari would. The card clears it, the field and Start stay in view, and the canvas keeps its size. Enter closes the field, the space comes back and the initials are kept.
 - **Safe areas:** Chromium's `Emulation.setSafeAreaInsetsOverride` at 47 / 47 / 21 px on 844×390. The controls, the top bar and the pause card stay inside the insets.
-- **Full race by touch (`touchrace`):** see [results](#touch-race-and-performance).
+- **Full race by touch (`touchrace`):** see [Runs](#runs).
 
 Lane override and the stop-and-go workflow by touch are covered by the existing `touch` scenario (Pit, override, restore and cancel parity with the keyboard, and the compulsory stop that Pit cannot cancel). It now opens the More tray where View and sound moved.
 
 ### Screenshots
 
-Small WebP copies of the emulated runs are in [`responsive/`](responsive/): the race HUD with every message shown at 360×640 and 640×360, the More tray, the title card at 360×640, and the desktop HUD at 1440×900.
+Half-size WebP copies from the emulated runs are in [`responsive/`](responsive/). The HUD shots are from before the chip-size tweak.
 
-## Touch race and performance
+- `race-360x640.webp`, `race-640x360.webp`: the race HUD with every message shown at once (scripted worst case)
+- `race-tray-360x640.webp`: the More tray open
+- `title-360x640.webp`: the title card with its pinned actions
+- `touchrace-service.webp`: refuelling during the touch race at 844×390
+- `desktop-1440x900.webp`: the desktop HUD, for regression comparison
 
-See the run notes below. All numbers are from SwiftShader and say nothing about phone performance.
+## Runs
+
+| Run | Environment | Result |
+| --- | --- | --- |
+| `responsive` on the source of commit `42ae65c`, before the last CSS tweak below | Headless Chromium 156.0.8078.4, mobile and touch emulation (`isMobile`, `hasTouch`, `maxTouchPoints` 1, coarse pointer), DPR 2, Low, SwiftShader (ANGLE Vulkan, software) | Every layout, lifecycle, menu, keyboard, safe-area, Practice and Championship check above passed, except one: at 640×360 with every message shown at once, the stacked messages reached the middle of the screen. The run then hit its 8-minute limit during the Balanced timing step, so it wrote no report file. Its console output is the record |
+| `touchrace` on the source of commit `42ae65c` | Same browser and renderer, 844×390, DPR 1, Low, 422×195 drawing buffer | **7 of 7 passed in 479 s.** 13 laps of Clubman Park driven on the pad alone, finishing P4 in 416.2 s with no unplanned pause. Fuel stop: pit lane, bay, service, bay exit, pit lane, race, in order. The status read "REFUELLING 45% · Hold throttle to leave", clear of every control. Results fit with no overflow, and Race Again gave a fresh countdown, zero clock and a full tank |
+| `npm run typecheck`, `npm test`, `npm run build` | Node 22 | Pass, 232 tests, including new `controlsMoved` cases |
+
+After the first `responsive` run, the compact chips and the stop-and-go text were made smaller, and the start lights in portrait moved below the toast, which they could cover. The middle-of-screen check now uses the normal HUD, and reports the everything-at-once case separately. `responsive` has not been re-run on that final CSS.
+
+**Frame time and control response (Low, 844×390, DPR 2, SwiftShader):** the median frame took 233 ms (p95 267 ms), about 4 frames a second. All 12 emulated Brake presses reached the race on the next frame. The press-to-frame figure from that run is not valid: it compared clocks wrongly, and the probe has since been fixed. Balanced was not measured, because the run hit its time limit first. Low and Balanced were both chosen and saved by touch in the same run. These figures describe a software renderer on a CPU-only host. They are not phone frame times or input latency, and no physical-phone performance is claimed.
 
 ## Not verified
 
@@ -85,3 +99,5 @@ See the run notes below. All numbers are from SwiftShader and say nothing about 
 - **Real browser chrome:** address bars were simulated as a 56 px height change.
 - **Real GPU and phone performance:** SwiftShader frame times are many times slower than any phone GPU, and say nothing about frame time or input latency on a device.
 - **Screen readers** with the More tray and the pad.
+- **The final CSS** (smaller chips, portrait lights) has not been through `responsive` again. Balanced timing, and press-to-frame timing with the fixed probe, are also unmeasured.
+- The existing `touch`, `race`, `routing`, `controlled`, `practice`, `championship` and `tracks` scenarios were not re-run. `touch` and `race` were changed to open the More tray where View and sound moved.
