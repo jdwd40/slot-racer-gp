@@ -68,7 +68,7 @@ Audio starts from the existing `Sfx.init()`. The pad calls it on press and relea
 | --- | --- |
 | `npm run typecheck`, `npm test`, `npm run build` | Pass, 229 tests. `test/input.test.ts` runs the pad's real listeners on event-target doubles: sources, multi-pointer, release paths, reset, single dispatch, parity with direct `Race` calls, storage |
 | Mutation spot-check of `src/input.ts` | 16 deliberate faults, all caught |
-| `touch` scenario | Pending the final run |
+| `touch` scenario | 53 of 53 checks, run alone in 315 s on the source of commit `ab896ea`. Touch is emulated and rendering is SwiftShader |
 | `controlled`, `routing` | Run alone on commit `ab896ea`: 17 passed with 1 unavailable, and 16 of 16 |
 
 The `touch` scenario covers the setting and its fallbacks, text and settings focus, mouse and mixed keyboard input, and multi-touch. It also covers each release path, pause, blur, hidden, restart and race end with a finger down, and removing the pad. It runs the same Lane and Pit sequences by touch and by key, a stop-and-go, a pad-only drive into the pit lane, audio and mute, and the menus by touch alone. Layouts are measured at 667×375, 844×390, 1024×768, 768×1024 and 390×844.
@@ -79,6 +79,6 @@ Blur and hidden are synthetic events. Car placement is scripted, so this is func
 
 - Not tested on a physical device, iOS Safari, Firefox or a real GPU.
 - Running browser scenarios at the same time starves them on this host. `controlled` and `routing` timed out on their driving budgets when run alongside others, then passed alone. Run them one at a time.
-- `race` was stopped early: it had passed its first 7 checks, through pause and resume, when it was halted to free the host. `tracks`, `practice` and `championship` were not re-run. All four use the keyboard path changed here, and `race`, `controlled`, `routing` and `perf` needed no change beyond the driver pressing again after a pause.
+- `race` was stopped early: it had passed its first 7 checks, through pause and resume, when it was halted to free the host. `tracks`, `practice` and `championship` were not re-run. All four use the keyboard path changed here. The only change to the existing scenarios is that the driver presses again after a pause.
 - `npm run check:browser` now takes longer than the 11 minutes in [validation](validation.md): `touch` adds about 5.
 - Screen-reader use of the pad is untested. The controls are out of the tab order because every action has a key.
