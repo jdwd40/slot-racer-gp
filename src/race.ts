@@ -329,6 +329,7 @@ export class Race {
     const sgNow = c.sgOwed > 0 && c.sgDue <= k;
     const fuelNow = c.fuelDue > 0 && c.fuelDue <= k;
     if (!c.fuelReq && c.sgOwed <= 0 && c.fuelDue <= 0) return 'none';
+    if (c.mode === 'off' || c.mode === 'tow') return 'phase';   // nothing to choose until the car is back on the road
     if (c.mode !== 'race') return 'pit';
     if (c.routeHold === k) return 'held';
     if (fuelNow || (sgNow && (c.sgDeferred || c.sgDue < k))) return 'used';
