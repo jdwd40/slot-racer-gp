@@ -16,6 +16,7 @@ The game can be played without a keyboard. **Touch controls: Auto / On / Off** i
 | Throttle | Hold | Bottom right, the largest control |
 | Brake | Hold. Keep holding at rest to reverse: see [reverse](reverse.md) | Bottom left |
 | Lane, Pit | Tap | Beside Brake, or above it in portrait, so the left thumb has them while the right holds Throttle |
+| Defer | Tap. Shown above Pit only while a pit visit can be put back one lap, which then makes it compulsory: see [service obligations](penalties.md) | Same column as Lane and Pit |
 | View, Pause | Tap | Top right, replacing the desktop buttons so they work with a finger already down. On phones View is in the More tray |
 
 Zoom, sound and ghost are enlarged to 48×48 CSS pixels and act on `touchstart`, so they also work with a finger already down. Menu buttons also grow to at least 48 pixels in touch mode. The keyboard legend gives way to a one-line hint.
@@ -27,7 +28,9 @@ Zoom, sound and ghost are enlarged to 48×48 CSS pixels and act on `touchstart`,
 | Automatic pit route | `P auto`, double border |
 | Override | `⇄ override`, dashed border |
 | Pit armed | `✓ armed`, solid border |
-| Compulsory stop-and-go | `■ must stop`, thick double border |
+| Compulsory stop (stop-and-go or committed fuel stop) | `■ must stop`, thick double border |
+| Approach deferred | Pit shows `⏭ next lap`, dashed orange border |
+| Deferral available | Defer button, `⏭ next lap`, dashed orange border |
 | Reversing | Brake shows `R reverse`, white border |
 
 Lane and Pit states come from `Race` every frame through `laneCue` and `pitCue`. The pad keeps no request state of its own.
@@ -37,7 +40,7 @@ Lane and Pit states come from `Race` every frame through `laneCue` and `pitCue`.
 `src/input.ts` holds the shared layer. `src/main.ts` connects it to the race.
 
 - `DrivingInput` records which source holds which action. Each key is `key:<code>` and each finger is `pointer:<id>`, so one source letting go never releases another. An action is held while any source holds it.
-- Taps call one handler per action, and those handlers call `Race.requestLane()` and `Race.requestPit()`. Space and P use the same path, so [pit routing](pit-routing.md) needs no touch logic.
+- Taps call one handler per action, and those handlers call `Race.requestLane()`, `Race.requestPit()` and `Race.requestDefer()`. Space, P and N use the same path, so [pit routing](pit-routing.md) needs no touch logic.
 - `TouchPad` follows each pointer id. Every control captures its pointer, and `pointerup`, `pointercancel` and `lostpointercapture` all release it. Repeats are no-ops, and a pointer id only counts on the control that holds it.
 - Taps fire on `pointerdown`, because browsers do not reliably send `click` for a second finger while the first is held. `touchstart` is cancelled on the controls, so no `click` follows and a tap cannot land on the menu it opens. A second finger on a pressed tap control is not another tap.
 

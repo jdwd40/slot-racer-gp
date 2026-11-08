@@ -39,5 +39,7 @@ The build output is plain HTML/JS/CSS; serve the `dist/` folder from any static 
 - `docs/graphics.md` — graphics presets, their trade-offs and measurements.
 - `docs/touch.md` — touch controls, the shared input layer and their evidence.
 - `docs/reverse.md` — hold-Brake reverse: tuning, recovery limits, race-integrity rules and evidence.
+- `docs/penalties.md` — service obligations: deferral, deadlines, disqualification, results and save compatibility.
+- `docs/pit-routing.md` — automatic outside-lane routing for pit visits.
 - `docs/validation.md` — repeatable browser checks, results and the remaining hardware validation.
 - `scripts/` — the browser check and its frame-time statistics.

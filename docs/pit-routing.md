@@ -11,28 +11,31 @@ While a pit request or stop-and-go is active, the player's car takes the outside
 | Inside | One-switch override | Stay inside |
 | Outside | One-switch override | Change to inside |
 
-- `Race.requestLane()` (Space) toggles the override while routing is active, and is the normal lane request otherwise. `Race.requestPit()` (P) arms or cancels. Touch controls call these same two actions: see [touch controls](touch.md).
+- `Race.requestLane()` (Space) toggles the override while routing is active, and is the normal lane request otherwise. `Race.requestPit()` (P) arms or cancels an optional fuel stop. `Race.requestDefer()` (N) puts the visit back one lap: see [service obligations](penalties.md). Touch controls call these same actions: see [touch controls](touch.md).
 - `Race.nextRoute()` is the single decision. The switch logic, HUD chip and arrows all read it.
-- The override is used up at the next switch, even if the move is blocked or a committed change is still running.
+- The override is used up at the next switch, even if the move is blocked or a committed change is still running. The approach it was used on is recorded (`overAppr`).
 - A blocked automatic move retries at the next switch. Committed changes are never reversed.
 
 ## Why a request is active
 
-`pitReq` means a request exists, and `pitPenaltyOnly` records that it exists only because of a stop-and-go.
+Routing (`pitReq`) is kept apart from the reasons for a visit: the optional request `fuelReq`, the committed fuel stop `fuelDue` and the stop-and-go `sgOwed`. `Race.syncRoute()` runs every step on the road and turns routing on while any reason exists, except on the approach a deferral released (`routeHold`). `pitPenaltyOnly` means the only reason is a stop-and-go. Clearing routing never clears a debt.
 
 | Event | Effect |
 | --- | --- |
-| Stop-and-go awarded, nothing armed | Penalty-only request |
+| Stop-and-go awarded, nothing armed | Penalty-only route, due on the first reachable entrance |
 | Stop-and-go awarded, fuel stop armed | Fuel stop stays independent |
-| P while a stop is owed | Adds or drops the fuel stop. The penalty route cannot be cancelled |
-| Missed or blocked entry | Request stays armed. Opportunity counts are unchanged |
-| Successful entry | Request and override clear. One visit can settle both reasons |
-| Pit exit or tow with the stop still owed | Routing resumes as penalty-only |
-| Served or converted | Penalty-only request ends. A fuel stop carries on |
+| P while a stop-and-go is owed | Adds or drops the optional fuel stop. The penalty route cannot be cancelled |
+| P with a committed fuel stop | Refused: it cannot be cancelled |
+| N (Defer), when offered | Releases routing for this approach only, and moves what is due to the next lap. Re-arms once past the entrance |
+| P while the approach is deferred | Routing back on for this approach. Deadlines unchanged |
+| Missed or blocked entry | Request stays armed. Driving past an optional request after using the override on that approach commits it to the next lap |
+| Successful entry | Routing, override and the optional request clear. Owed stops stay until served |
+| Pit exit or tow with a stop still owed | Routing resumes |
+| Stop-and-go served | Penalty-only routing ends. A fuel stop carries on |
 | De-slot | Override clears, request stays |
-| Tow, finish, restart | Request and override clear |
+| Tow, finish, restart | Routing, override and the optional request clear |
 
-`sgChances`, `sgSkipNext`, the box timer and `convertUnserved` amounts are unchanged. AI cars are never assisted.
+Deadlines, deferral and disqualification are described in [service obligations](penalties.md). AI cars are never assisted and never defer.
 
 ## Evidence
 
