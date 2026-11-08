@@ -27,7 +27,8 @@ const crossSwitch = (r: Race, i: number, side: number) => cross(r, T.SWITCHES[i]
 const settle = (r: Race) => { for (let i = 0; i < 240 && r.player.change; i++) stepEvents(r, 1, UP); };
 const award = (r: Race, P: Car, rival: Car) => { P.offences = 2; r.offence(P, rival, 'rear'); r.events.length = 0; };
 /** Into the pit lane at the entrance, then out of the far end without stopping. */
-const enterPit = (r: Race) => cross(r, T.PIT_IN0, OUTSIDE);
+/** At the pit limit, so a stop-and-go entrance is not refused as too fast (see docs/auto-stop-go.md). */
+const enterPit = (r: Race) => { place(r.player, T.PIT_IN0 - 0.2, OUTSIDE, T.PIT_SPEED); return stepEvents(r, 3, UP); };
 function exitPit(r: Race): ReturnType<typeof stepEvents> {
   const P = r.player;
   P.u = T.PIT_OUT1 - 0.3; P.d = T.pitD(P.u); P.v = 5;

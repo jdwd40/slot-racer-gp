@@ -207,27 +207,35 @@ describe('protecting stop-and-go service', () => {
     const { r, P } = solo();
     inPit(P, T.PEN_S); P.sgOwed = 3; P.sgDue = 2;
     const u = P.u;
-    const ev = run(r, BRAKE, PEN.stopSeconds + 2);
+    let minV = 0;
+    const ev: RaceEvent[] = [];
+    for (let i = 0; i < (PEN.stopSeconds + 1) / DT && !ev.some((e) => e.type === 'served'); i++) ev.push(...stepEvents(r, 1, BRAKE));
     expect(ev.some((e) => e.type === 'served')).toBe(true);
     expect(msgs(ev)).not.toContain('msg.penReset');
-    expect(P.u).toBe(u);
+    expect(Math.abs(P.u - u)).toBeLessThan(0.01);    // still at the stop (it may pull away in the frame's last substep)
     expect(P.revOn).toBe(false);
-    run(r, BRAKE, 2);
-    expect(P.u).toBe(u);
+    // automatic control then drives the penalty-only visit to the exit with Brake still held, and hands over there
+    until(r, BRAKE, () => P.mode === 'pitlane', () => { minV = Math.min(minV, P.v); });
+    expect(P.sgCtl).toBe(false);
+    run(r, BRAKE, 2, () => { minV = Math.min(minV, P.v); });
+    expect(minV).toBe(0);                    // never backwards on the press held through the box
+    expect(P.revOn).toBe(false); expect(P.v).toBe(0);
     // a fresh press may back up again
+    const at = P.u;
     run(r, NONE, DT);
     engage(r, P);
     run(r, BRAKE, 0.5);
-    expect(P.u).toBeLessThan(u);
+    expect(P.u).toBeLessThan(at);
   });
 
   it('an overshot box: stop beyond it, back up into it, and the stop is served in full', () => {
     const { r, P } = solo();
     inPit(P, T.PEN_S + T.PEN_HALF + 0.5); P.sgOwed = 3; P.sgDue = 2;
     engage(r, P);
-    let served = false;
-    const ev = run(r, BRAKE, PEN.stopSeconds + 3, (e) => { if (e.some((x) => x.type === 'served')) served = true; });
-    expect(served).toBe(true);
+    // backing into the box ends reverse there: automatic control takes the car and holds it for the stop
+    const ev: RaceEvent[] = [];
+    for (let i = 0; i < (PEN.stopSeconds + 3) / DT && !ev.some((x) => x.type === 'served'); i++) ev.push(...stepEvents(r, 1, BRAKE));
+    expect(ev.some((x) => x.type === 'served')).toBe(true);
     expect(Math.abs(T.gapS(r.s(P), T.PEN_S))).toBeLessThan(T.PEN_HALF);
     expect(P.sgOwed).toBe(0); expect(P.timePen).toBe(0);
     expect(msgs(ev)).toContain('msg.penServed');
@@ -243,9 +251,11 @@ describe('protecting stop-and-go service', () => {
     run(r, NONE, 1.5);
     expect(P.v).toBe(0);
     expect(P.sgServing).toBe(true);
+    // Throttle while serving cannot move the car: the stop is never reset early, and never cleared early either
+    const before = P.sgServed, u = P.u;
     const ev = run(r, UP, 0.5);
-    expect(msgs(ev)).toContain('msg.penReset');
-    expect(P.sgServed).toBe(0); expect(P.sgOwed).toBe(3);
+    expect(msgs(ev)).not.toContain('msg.penReset');
+    expect(P.u).toBe(u); expect(P.sgServed).toBeGreaterThan(before); expect(P.sgOwed).toBe(3);
   });
 
   it('a reversing car is not stationary: no service while it rolls backwards through the box', () => {
@@ -367,14 +377,12 @@ describe('recovering a missed pit entrance', () => {
     expect(P.mode).toBe('race');
     until(r, UP, () => P.change === null);
     run(r, BRAKE, 1.5); engage(r, P);
-    until(r, BRAKE, () => r.s(P) > T.PIT_IN0 - 1.5);
-    run(r, NONE, 0.6);
-    expect(P.pitReq).toBe(true); // an owed stop keeps routing on: no Pit press is needed
-    run(r, UP, 1.5);
+    // backing up over the entrance: automatic entry takes over short of it (an owed stop keeps routing on, no Pit press)
+    until(r, BRAKE, () => !P.sgCtl && r.s(P) > T.PIT_IN0 - 1.5);
+    expect(P.pitReq).toBe(true);
+    // with no pedal at all, it enters, stops in the box and serves: the stop is settled, the breach is not
+    until(r, NONE, () => P.sgOwed > 0);
     expect(P.mode).toBe('pitlane');
-    // stop in the box: the stop is settled, the breach is not
-    P.u += T.gapS(r.s(P), T.PEN_S); P.d = T.pitD(P.u); P.v = 0;
-    run(r, NONE, 3.5);
     expect(P.sgOwed).toBe(0);
     expect([P.svcBreach, P.timePen]).toEqual(['stopGo', 0]);
   });

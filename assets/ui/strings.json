@@ -256,6 +256,9 @@
     { "id": "res.dqReason.fuel", "text": "deferred fuel stop not served" },
     { "id": "champ.dq", "text": "DQ" },
     { "id": "hud.flagDq", "text": "DQ" },
-    { "id": "pen.flashBreach", "text": "DEADLINE MISSED" }
+    { "id": "pen.flashBreach", "text": "DEADLINE MISSED" },
+    { "id": "msg.sgTooLate", "text": "Too fast for this pit entrance — the stop-and-go stays owed" },
+    { "id": "msg.sgHandover", "text": "Out of the pits — you have control" },
+    { "id": "msg.sgAuto", "text": "Auto entry — the car brakes, stops and serves by itself" }
   ]
 }

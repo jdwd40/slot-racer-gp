@@ -435,8 +435,10 @@ describe('reservation lifecycle', () => {
   it('driving through the box, then backing into it, moves the reservation without a new deferral', () => {
     const r = setup(1, true);
     const P = r.cars[0];
-    inPit(P, T.PIT_IN1, 6); P.sgOwed = PEN.stopSeconds; P.sgDue = LAP + 1; P.sgDeferred = false;
-    sim(r, 1.2, UP, watch(), DT, () => T.gapS(T.PEN_S + T.PEN_HALF - 0.5, r.s(P)) > 0);
+    // placed inside the far end of the box too fast to stop in it (automatic control only drives a reachable stop):
+    // it brakes, rolls out of the box and is then driven by hand
+    inPit(P, T.PEN_S + T.PEN_HALF - 0.3, 6); P.sgOwed = PEN.stopSeconds; P.sgDue = LAP + 1; P.sgDeferred = false;
+    sim(r, 1.2, UP, watch(), DT, () => T.gapS(T.PEN_S + T.PEN_HALF + 0.3, r.s(P)) > 0);
     sim(r, 0.5, BRAKE);
     expect(r.pit.box).toBe(-1);
     expect(trail(r, 'box')).toEqual([`${P.idx}:box:grant`, `${P.idx}:box:release:passed`]);

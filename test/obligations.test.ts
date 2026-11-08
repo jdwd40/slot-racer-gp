@@ -251,12 +251,12 @@ describe('stop-and-go and the box', () => {
     award(r, P, rival);
     expect(P.sgDue).toBe(LAPS + 1);
     for (let i = 0; i < 120 && !P.revOn; i++) stepEvents(r, 1, BRAKE);
-    for (let i = 0; i < 600 && r.s(P) > T.PIT_IN0 - 1.5; i++) stepEvents(r, 1, BRAKE);
-    stepEvents(r, 40);
-    for (let i = 0; i < 120 && P.mode !== 'pitlane'; i++) stepEvents(r, 1, UP);
+    // backed up short of the entrance, the automatic entry takes over: Brake still held neither reverses nor stops it
+    for (let i = 0; i < 600 && P.mode !== 'pitlane'; i++) stepEvents(r, 1, BRAKE);
     expect(P.mode).toBe('pitlane');
-    serveBox(r, P, LAPS);
+    for (let i = 0; i < 600 && P.sgOwed > 0; i++) stepEvents(r, 1, BRAKE);
     expect(P.sgOwed).toBe(0);
+    expect(Math.abs(T.gapS(r.s(P), T.PEN_S))).toBeLessThan(T.PEN_HALF);
     // on to the line in the pit lane
     P.u = LAPS * T.L + T.FINISH_S - 0.3; P.hiU = P.u; P.d = T.pitD(P.u); P.v = 5;
     stepEvents(r, 6, UP);
@@ -299,6 +299,7 @@ describe('fuel service', () => {
     r.requestPit(); r.requestDefer();
     award(r, P, rival);
     expect([P.sgOwed, P.fuelDue]).toEqual([PEN.stopSeconds, 4]);
+    P.pitFuel = true;                       // set at the entrance for a visit with a fuel reason; serveBox places the car past it
     serveBox(r, P, 3);
     expect([P.sgOwed, P.fuelDue]).toEqual([0, 4]);
     standInBay(r, P, 3, SERVICE_READY + 0.1);
