@@ -98,6 +98,34 @@ describe('championship', () => {
     expect(st.map((s) => [s.idx, s.points])).toEqual([[2, 10], [0, 6], [1, 4], [3, 0]]);
     expect(st[0].wins).toBe(1); expect(st[1].seconds).toBe(1);
   });
+  it('loads a save written before disqualifications existed and scores it exactly as before', () => {
+    // a stored v1 championship has no dq fields: it must load, continue and keep its points
+    const old = { v: 1, car: 'frost', initials: 'JD', startedAt: 1, rounds: [{ track: 'circuit-1', order: [{ idx: 1, dnf: false, time: 260.1 }, { idx: 0, dnf: false, time: 262 }, { idx: 2, dnf: false, time: 270 }, { idx: 3, dnf: true, time: 0 }] }] };
+    localStorage.setItem('srgp.champ', JSON.stringify(old));
+    localStorage.setItem('srgp.lb.race.circuit-1', JSON.stringify([{ id: 'a', initials: 'JD', car: 'frost', ms: 19000, at: 1 }]));
+    const c = R.loadChamp()!;
+    expect(c).toEqual(old);
+    expect(R.standings(c, 4).map((x) => [x.idx, x.points])).toEqual([[1, 10], [0, 6], [2, 4], [3, 0]]);
+    expect(R.roundPoints(c.rounds[0], 1)).toBe(6);
+    // a new round with a DQ is added beside it, and the old round is untouched
+    c.rounds.push(R.roundRecord('circuit-2', [
+      { car: { idx: 2 }, status: 'finished', time: 250.04 }, { car: { idx: 1 }, status: 'finished', time: 251 },
+      { car: { idx: 3 }, status: 'finished', time: 252 }, { car: { idx: 0 }, status: 'dq', time: NaN },
+    ]));
+    R.saveChamp(c);
+    const back = R.loadChamp()!;
+    expect(back.rounds[0]).toEqual(old.rounds[0]);
+    expect(back.rounds[1].order[3]).toEqual({ idx: 0, dnf: false, dq: true, time: 0 });
+    expect(back.rounds[1].order[0].time).toBe(250);
+    expect(R.standings(back, 4).find((x) => x.idx === 0)).toMatchObject({ points: 6, lastPos: 99 });
+    expect(R.board('race', 'circuit-1')).toHaveLength(1);
+  });
+  it('never gives a DQ or DNF a scoring place, wherever it sits in the order', () => {
+    const c = R.newChamp('blaze', 'JD');
+    c.rounds.push({ track: 'circuit-1', order: [{ idx: 0, dnf: false, dq: true, time: 0 }, { idx: 1, dnf: false, time: 1 }, { idx: 2, dnf: true, time: 0 }, { idx: 3, dnf: false, time: 2 }] });
+    const pts = Object.fromEntries(R.standings(c, 4).map((x) => [x.idx, x.points]));
+    expect(pts[0]).toBe(0); expect(pts[2]).toBe(0);
+  });
   it('breaks ties on wins, then second places, then the last round position', () => {
     const c = R.newChamp('blaze', 'JD');
     // round 1: 0 wins, 1 second; round 2: 1 wins, 0 second -> both 16 points, one win each, one second each

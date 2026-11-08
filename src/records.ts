@@ -102,6 +102,22 @@ export function saveChamp(c: Championship): void { set(CHAMP_KEY, c); }
 export function clearChamp(): void { del(CHAMP_KEY); }
 export function champDone(c: Championship): boolean { return c.rounds.length >= CHAMP_TRACKS.length; }
 
+/**
+ * A round's record from the race result rows. Only classified finishers keep a time and a scoring place; a DQ is stored
+ * as a DQ, and anything else not classified as a DNF. No estimated time ever reaches a record.
+ */
+export function roundRecord(track: string, rows: { car: { idx: number }; status: 'running' | 'finished' | 'dq' | 'dnf'; time: number }[]): RoundResult {
+  const fin = rows.filter((r) => r.status === 'finished');
+  const rest = rows.filter((r) => r.status !== 'finished').sort((a, b) => (a.status === 'dq' ? 1 : 0) - (b.status === 'dq' ? 1 : 0));
+  return {
+    track,
+    order: [
+      ...fin.map((r) => ({ idx: r.car.idx, dnf: false, time: Math.round(r.time * 10) / 10 })),
+      ...rest.map((r) => (r.status === 'dq' ? { idx: r.car.idx, dnf: false, dq: true, time: 0 } : { idx: r.car.idx, dnf: true, time: 0 })),
+    ],
+  };
+}
+
 /** Points for the entry at position `pos` of a round: nothing for a DNF or DQ. */
 export function roundPoints(r: RoundResult, pos: number): number {
   const o = r.order[pos];

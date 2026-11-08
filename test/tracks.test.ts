@@ -65,7 +65,7 @@ describe.each(ids)('%s all-AI simulation', (id) => {
     for (let t = 0; t < 90; t += DT) {
       r.update(DT, NONE);
       if (++n % 10) { r.events.length = 0; continue; }
-      for (const e of r.events) expect(['msg', 'bump', 'deslot', 'switch', 'lap', 'finish', 'tow', 'offence', 'served', 'timePen', 'go', 'light']).toContain(e.type);
+      for (const e of r.events) expect(['msg', 'bump', 'deslot', 'switch', 'lap', 'finish', 'tow', 'offence', 'served', 'dq', 'breach', 'go', 'light']).toContain(e.type);
       r.events.length = 0;
       for (const c of r.cars) {
         for (const v of [c.u, c.v, c.d, c.x, c.y, c.z, c.h, c.fuel, c.slip]) expect(Number.isFinite(v)).toBe(true);
@@ -94,9 +94,12 @@ describe('full race', () => {
     while (r.phase !== 'done' && t < 900) { r.update(DT, NONE); r.events.length = 0; t += DT; }
     expect(r.phase).toBe('done');
     const res = r.results();
-    expect(res.filter((x) => !x.est).length).toBeGreaterThanOrEqual(1);
-    for (let i = 1; i < res.length; i++) expect(res[i].time).toBeGreaterThanOrEqual(res[i - 1].time);
-    for (const c of r.cars.filter((c) => c.finished)) {
+    // the field is run on to the flag: every car has a real result, none an estimate
+    expect(res.every((x) => !x.est && x.status !== 'running')).toBe(true);
+    const classified = res.filter((x) => x.status === 'finished');
+    expect(classified.length).toBeGreaterThanOrEqual(1);
+    for (let i = 1; i < classified.length; i++) expect(classified[i].time).toBeGreaterThanOrEqual(classified[i - 1].time);
+    for (const c of r.cars.filter((c) => c.status === 'finished')) {
       expect(c.lapsDone).toBe(LAPS);
       expect(c.finishTime).toBeGreaterThan(0); expect(c.finishTime).toBeLessThanOrEqual(r.raceTime);
       expect(c.bestLap).toBeGreaterThan(0);

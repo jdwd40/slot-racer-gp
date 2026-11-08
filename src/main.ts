@@ -362,13 +362,7 @@ const driverColor = (idx: number): number => (idx === 0 ? R.livery(champ?.car ??
 /** Store the finished round's result once (points are never awarded twice). */
 function recordChampRound(): void {
   if (!champ || champRoundSaved || R.champDone(champ) || race.phase !== 'done') return;
-  // only classified finishers carry a time and score; a DQ is recorded as such, and anything not classified counts as a DNF
-  const order: R.RoundResult['order'] = race.results().map((r) => {
-    if (r.status === 'finished') return { idx: r.car.idx, dnf: false, time: Math.round(r.time * 10) / 10 };
-    if (r.status === 'dq') return { idx: r.car.idx, dnf: false, dq: true, time: 0 };
-    return { idx: r.car.idx, dnf: true, time: 0 };
-  });
-  champ.rounds.push({ track: T.DEF.id, order });
+  champ.rounds.push(R.roundRecord(T.DEF.id, race.results()));
   R.saveChamp(champ);
   champRoundSaved = true;
 }
