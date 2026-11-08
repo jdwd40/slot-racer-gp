@@ -1017,6 +1017,15 @@ export class Race {
   /** The stop-and-go is settled: a request that existed only for it ends, a chosen fuel stop carries on. */
   endPenaltyRoute(c: Car): void { if (c.pitPenaltyOnly) this.clearPitIntent(c); }
 
+  /**
+   * The first approach this car can still be served at: the entrance physically ahead of it (or the one after, if that is
+   * out of reach), never earlier than its current approach, so reversing back over an entrance gains no lap.
+   */
+  firstReachableAppr(c: Car): number {
+    const next = Math.round((c.u + T.ahead(this.s(c), T.PIT_IN0) - T.PIT_IN0) / T.L);
+    return Math.max(this.apprLap(c), this.reachablePitEntry(c) ? next : next + 1);
+  }
+
   /** can this car still make the upcoming pit entrance (outside lane, or a switch to it, with room to spare)? */
   reachablePitEntry(c: Car): boolean {
     const s = this.s(c);
@@ -1075,7 +1084,7 @@ export class Race {
     if (stop) {
       // a fresh stop-and-go is due on the first entrance the car can still make; more stop time keeps the existing deadline
       const first = c.sgOwed <= 0;
-      if (first) { const k = this.apprLap(c); c.sgDue = this.reachablePitEntry(c) ? k : k + 1; c.sgDeferred = false; c.sgServed = 0; }
+      if (first) { c.sgDue = this.firstReachableAppr(c); c.sgDeferred = false; c.sgServed = 0; }
       c.sgOwed += PEN.stopSeconds;
       if (c.isPlayer) {
         if (first) c.routeHold = -1;

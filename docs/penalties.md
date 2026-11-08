@@ -20,7 +20,7 @@ Laps and approaches are numbered so that the pit entrance on lap *n* is approach
 
 - **Lap** is `crossed`, which only increases. A deadline "by the end of lap *n*" is judged at the forward timing-line crossing that makes `crossed` reach *n* + 1.
 - **Approach** is `Race.apprLap()`, counted from `hiU`, the furthest distance the car has ever reached. Reversing over the entrance, a de-slot re-slot behind it, a tow or a pause can never bring an approach back.
-- **A new stop-and-go** is due on the first entrance the car can still make: this lap's, or the next lap's if `reachablePitEntry()` says this one is already out of reach. **More stop time** from a later offence adds seconds and keeps the existing deadline and deferral.
+- **A new stop-and-go** is due on the first entrance the car can still make (`firstReachableAppr()`): the one physically ahead of it, or the one after if `reachablePitEntry()` says that one is already out of reach, but never earlier than its current approach (`apprLap()`). So a car that reversed back short of an entrance it had already passed is due on the next lap's entrance, not one lap later still. **More stop time** from a later offence adds seconds and keeps the existing deadline and deferral.
 - **A committed fuel stop** is due on the lap after the one it was deferred from.
 
 At the crossing that ends lap *n*, for each obligation due by then and still owed:

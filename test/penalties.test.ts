@@ -152,6 +152,25 @@ describe('pit entrance reachability', () => {
     place(B, T.PIT_IN0 - 0.5, 1, 10); stepEvents(r, 6);
     expect(B.sgDue).toBe(k + 1); expect(B.sgDeferred).toBe(false); expect(B.sgOwed).toBe(3);
   });
+  it('after reversing back short of a passed entrance, the stop is due on the next entrance it can physically make', () => {
+    const r = fresh(); park(r);
+    const A = r.cars[1], B = r.cars[2];
+    const e3 = T.PIT_IN0 + 3 * T.L;                                        // the entrance on lap 3
+    // B has been past it (now heading for approach 4), then reversed to just short of it: lap 4's entrance is a lap away
+    B.offences = 2; place(A, e3 - 2, 1, 10); place(B, A.u - T.CAR_LEN + 0.1, 1, 16); B.hiU = e3 + 5;
+    expect(r.apprLap(B)).toBe(4); expect(r.reachablePitEntry(B)).toBe(false);
+    stepEvents(r);
+    expect(B.sgOwed).toBe(PEN.stopSeconds); expect([B.sgDue, B.sgDeferred]).toEqual([4, false]);
+  });
+  it('reversing far enough back to reach a passed entrance again never brings that approach back', () => {
+    const r = fresh(); park(r);
+    const A = r.cars[1], B = r.cars[2];
+    const e3 = T.PIT_IN0 + 3 * T.L;
+    B.offences = 2; place(A, e3 - 30, -1, 10); place(B, A.u - T.CAR_LEN + 0.1, -1, 16); B.hiU = e3 + 5;
+    expect(r.reachablePitEntry(B)).toBe(true);
+    stepEvents(r);
+    expect(B.sgOwed).toBe(PEN.stopSeconds); expect([B.sgDue, B.sgDeferred]).toEqual([4, false]);
+  });
 });
 
 describe('stop-and-go deadline', () => {
