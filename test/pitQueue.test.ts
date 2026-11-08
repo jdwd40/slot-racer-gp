@@ -236,6 +236,29 @@ describe('occupancy', () => {
     expect(w.overlaps).toBe(0);
   });
 
+  it('the box is exclusive: a player behind its owner is held outside it and serves nothing until granted the box', () => {
+    const r = setup(2, true);
+    const [P, A] = r.cars;
+    inPit(A, T.PEN_S + T.PEN_HALF - 0.05); owes(A); A.sgOwed = 2 * PEN.stopSeconds;   // at the very front of the box, owing 6 s
+    const ai = r.ai.bind(r);
+    r.ai = (c, t) => (c === A && c.sgOwed > 0 ? { t: 0, b: 1 } : ai(c, t));
+    inPit(P, T.PIT_IN1 - 3, 6); P.sgOwed = PEN.stopSeconds; P.sgDue = LAPS;
+    const inBox = (c: Car) => Math.abs(T.gapS(r.s(c), T.PEN_S)) < T.PEN_HALF;
+    let shared = false, servedEarly = false;
+    // Throttle alone while A serves; once A has gone, the player brakes in the box to serve its own stop
+    const w = sim(r, 14, () => (A.sgOwed > 0 || !inBox(P) ? UP : BRAKE), watch(), DT, () => {
+      if (inBox(P) && inBox(A) && A.mode === 'pitlane') shared = true;
+      if (A.sgOwed > 0 && (P.sgServed > 0 || P.sgServing)) servedEarly = true;
+      return P.sgOwed === 0;
+    });
+    expect(shared).toBe(false);
+    expect(servedEarly).toBe(false);
+    expect(w.held.get(P.idx)).toBeGreaterThan(1);         // queued on Throttle alone while A served
+    expect(served(w)).toEqual([A.idx, P.idx]);
+    expect(trail(r, 'box')).toEqual([`${A.idx}:box:grant`, `${A.idx}:box:release:done`, `${P.idx}:box:grant`, `${P.idx}:box:release:done`]);
+    expect(w.overlaps).toBe(0); expect(w.offences).toBe(0);
+  });
+
   it('a bay reservation keeps other cars out, and nobody ever holds two bays', () => {
     const r = setup(3, true);
     const [P, A, B] = r.cars;

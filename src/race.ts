@@ -1060,7 +1060,8 @@ export class Race {
   /** continuous stationary countdown inside the penalty box; moving early resets it */
   servePenalty(c: Car, s: number, dt: number): void {
     if (c.sgOwed <= 0) { c.sgServing = false; return; }
-    const inBox = Math.abs(T.gapS(s, T.PEN_S)) < T.PEN_HALF;
+    // only the box's reservation holder serves: a car that stops in it behind another, without the grant, accumulates nothing
+    const inBox = this.pit.box === c.idx && Math.abs(T.gapS(s, T.PEN_S)) < T.PEN_HALF;
     if (inBox && Math.abs(c.v) < REV.still) {
       c.sgServing = true;
       c.sgServed += dt;

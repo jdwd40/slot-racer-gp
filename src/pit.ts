@@ -20,6 +20,7 @@ export const PIT_Q = {
   mergeSpacing: 4,   // bay merges closer than this are never under way together (adjacent bays are 3 m apart)
   mergeTime: 1.0,    // seconds of a reversing car's travel a bay departure allows for
   exitWin: 4,        // yield window before the pit exit merge starts
+  boxMargin: 0.4,    // a car held out of an occupied box plans to stop this far short of its entry line
 };
 
 const BAY_MODES = new Set(['bayIn', 'service', 'bayOut']);
@@ -173,7 +174,22 @@ export class PitTraffic {
       const held = cap < PIT_Q.hold || (Math.abs(vl) < 0.05 && room < 0.3);
       if (!best || cap < best.cap) best = { cap, bay: inBay(o), held };
     }
+    // the stop-and-go box is exclusive: while another car stands in it, a car on the pit path stops short of its entry line
+    const g = T.gapS(s, T.PEN_S - T.PEN_HALF);
+    if (isMem && !onlyHeld && g > 0 && g <= PIT_Q.look && this.boxTaken(c)) {
+      const room = Math.max(0, g - PIT_Q.boxMargin);
+      const cap = Math.sqrt(2 * PIT_Q.decel * room);
+      const held = cap < PIT_Q.hold || (Math.abs(c.v) < 0.05 && room < 0.3);
+      if (!best || cap < best.cap) best = { cap, bay: false, held };
+    }
     return best;
+  }
+
+  /** Another car holds the stop-and-go box and is standing (or rolling) in it. */
+  boxTaken(c: Car): boolean {
+    if (this.box < 0 || this.box === c.idx) return false;
+    const h = this.r.cars.find((o) => o.idx === this.box);
+    return !!h && h.mode === 'pitlane' && Math.abs(T.gapS(this.r.s(h), T.PEN_S)) < T.PEN_HALF;
   }
 
   /** The single stop-and-go box goes to the foremost car that owes a stop and has not passed it. */

@@ -26,6 +26,7 @@ Each pit-traffic car gets an assisted speed cap (`Car.pitCap`) from the nearest 
 - The player joins a queue on Throttle alone and is stopped behind the car ahead. Braking is never needed.
 - Queues can spill back past the entrance. The tail then waits on the outside road lane short of `PIT_IN0` and is never forced into an occupied pit lane. A road car behind such a held car on the outside lane also brakes for it, but never for ordinary racing traffic.
 - The box sits in the single pit lane, so a car serving there blocks every car behind it, including cars going to later bays.
+- The box is exclusive. While another car holds `pit.box` and stands or rolls in it, every pit-traffic car behind its entry line (`PEN_S − PEN_HALF`) is capped to stop 0.4 m short of that line and is held there as `queued`. This applies even when the owner stands at the very front of the box. Only the holder of `pit.box` accumulates stop-and-go time, so a car that ends up stationary in the box without the grant serves nothing.
 - A held player does not capture a bay just by being stopped level with it. Braking there still captures it.
 
 ## Bay departures and passage priority
@@ -86,7 +87,7 @@ While held, the touch Brake button reads `queued · no R`. The old `YIELD TO TRA
 - **Order:** two AI cars arriving behind a car in the box, with the array reversed and at 1/24, 1/30, 1/60 and 1/144 s frames. Served order and every box grant and release are identical. An exact tie in progress goes to the lower car number in either array order.
 - **Four cars, mixed:** three AI cars and the player (on Throttle only) behind a car serving at the back of the box. The tail waits on the road short of the entrance, nobody overtakes, the stops are served in order, and the player's bay is released when it drives past. The same results come out with the array reversed and at 1/30 and 1/144 s frames.
 - **Gaps:** stopping behind a stopped leader with a real gap, following a slower one, and an AI car driving at the player while the player reverses down the pit lane (stops short, never pushed backwards).
-- **Occupancy:** a car parked in its bay does not slow the through lane. A car serving in the box holds back a car going to bay 3. A reserved bay cannot be captured, and nobody holds two.
+- **Occupancy:** a car parked in its bay does not slow the through lane. A car serving in the box holds back a car going to bay 3. With the owner standing at the very front of the box and owing 6 s, the player on Throttle alone is held outside the box and serves nothing. Once the owner is done, the player is granted the box and serves. A reserved bay cannot be captured, and nobody holds two.
 - **Bay departures:** a request waits for a committed lane car and completes exactly once from one press. Adjacent bays never merge together, downstream first in either array order. A bay car goes before a lane car that can still stop. No deadlock with a lane car standing in the merge zone behind a blocked exit.
 - **Exit:** a car standing in the outside lane at the merge, and a car reversing towards it.
 - **Lifecycle:** Defer releases the box and bay and keeps the debt, and is refused on the final lap. Drive-through then reverse back into the box, with no deferral granted. Tow, de-slot and restart.
