@@ -32,6 +32,7 @@ Zoom, sound and ghost are enlarged to 48×48 CSS pixels and act on `touchstart`,
 | Approach deferred | Pit shows `⏭ next lap`, dashed orange border |
 | Deferral available | Defer button, `⏭ next lap`, dashed orange border |
 | Reversing | Brake shows `R reverse`, white border |
+| Held by the pit queue or exit | Brake shows `queued · no R`, dashed orange border. Brake held now cannot reverse: see [pit queues](pit-queue.md) |
 
 Lane and Pit states come from `Race` every frame through `laneCue` and `pitCue`. The pad keeps no request state of its own.
 

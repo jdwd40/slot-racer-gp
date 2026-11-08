@@ -31,7 +31,6 @@
     { "id": "hud.pitFuelToo", "text": "+ FUEL STOP" },
     { "id": "hud.yield", "text": "YIELD — SQUEEZE" },
     { "id": "hud.reverse", "text": "REVERSING" },
-    { "id": "hud.pitYield", "text": "YIELD TO TRAFFIC" },
     { "id": "hud.refuel", "text": "REFUELLING {n}%" },
     { "id": "hud.refuelHint", "text": "Hold throttle to leave" },
     { "id": "hud.penalty", "text": "PENALTY {n}s" },
