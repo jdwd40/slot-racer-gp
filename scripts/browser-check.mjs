@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Bounded browser validation of the real game. Procedure and results: docs/validation.md.
 //
-//   node scripts/browser-check.mjs [tracks race controlled routing practice championship touch responsive touchrace reverse]   functional checks (default: all)
+//   node scripts/browser-check.mjs [tracks race controlled routing practice championship touch responsive touchrace reverse service queue]   functional checks (default: all)
 //   node scripts/browser-check.mjs perf --label updated --machine "<name>"          frame-time capture
 //   node scripts/browser-check.mjs compare <baseline.json> <updated.json>           like-for-like comparison
 //
@@ -1734,6 +1734,138 @@ async function reverse(run, c) {
   return s;
 }
 
+/** Shared pit queue HUD and holds. Scripted placement, then real keys and emulated touch: functional diagnostics only. */
+async function queue(run, c) {
+  const st = (page) => read(page, () => { const g = window.__game, r = g.race, p = r.player, T = g.T; return { mode: p.mode, s: +T.wrapS(p.u).toFixed(2), v: +p.v.toFixed(3), wait: p.pitWait, hold: p.pitHold, revOn: p.revOn, latch: p.revLatch, exitReq: p.exitReq, serviced: p.serviced, offences: (window.__qa.scene ?? []).reduce((n, i) => n + r.cars[i].offences, 0), chips: document.getElementById('h-chips').textContent, status: document.getElementById('h-status').textContent, brakeCue: document.getElementById('t-brake').dataset.cue, brakeText: document.getElementById('t-brake-cue').textContent, minV: window.__qa.minV, minGap: window.__qa.minGap, seen: window.__qa.seen, inputs: window.__qa.inputs.join(' '), merges: r.pit.log.filter((e) => e.car === p.idx && e.zone.startsWith('merge')).map((e) => `${e.op}${e.why ? ':' + e.why : ''}`) }; });
+  /** lap 3 under way, every car placed by script: listed cars where given, the rest parked half a lap on; AI cars in `hold` keep their brakes on */
+  const setup = (page, o) => read(page, (x) => {
+    const g = window.__game, T = g.T, L = 3;
+    if (g.screen !== 'race') g.startSession('race');
+    if (g.race.phase === 'countdown') g.advance(7);
+    const r = g.race, p = r.player;
+    if (!r.__ai) { const ai = r.ai.bind(r); r.__ai = ai; r.ai = (car, dt) => ((window.__qa.holdAI ?? []).includes(car.idx) ? { t: 0, b: 1 } : ai(car, dt)); }
+    window.__qa.holdAI = x.hold ?? [];
+    r.pit = new r.pit.constructor(r);
+    r.squeezeQ.length = 0;
+    const put = (car, s, mode, v, side = -1) => Object.assign(car, { u: L * T.L + s, hiU: L * T.L + s, v, change: null, laneSide: side, mode, d: mode === 'pitlane' ? T.pitD(s) : side * T.LANE_HALF, throttle: 0, graceT: 0, recoverT: 0, cutT: 0, pushedT: 0, revMark: null, revOn: false, crossed: s >= T.FINISH_S ? L + 1 : L, lapsDone: s >= T.FINISH_S ? L : L - 1, serviced: false, exitReq: false, sgOwed: 0, sgServed: 0, sgServing: false, sgDue: 0, pitPlan: false, pitReq: false, fuelReq: false, fuelDue: 0, pitFuel: false, laneOverride: false, routeHold: -1, offences: 0, fuel: 1, refuelTarget: 1 });
+    r.cars.forEach((car, i) => { if (i) put(car, T.L / 2 + i * 8, 'race', 0, 1); });
+    for (const k of x.cars) {
+      const car = r.cars[k.i];
+      put(car, k.s, k.mode === 'race' ? 'race' : 'pitlane', k.v ?? 0);
+      if (k.sg) Object.assign(car, { sgOwed: k.sg, sgDue: 13, pitReq: true });
+      if (k.serviced) car.serviced = true;
+      if (k.bay !== undefined) { r.enterBay(car, k.bay); Object.assign(car, { mode: 'service', d: T.BAY_D, bayT: 1, serviceT: 1, fuel: 0.5, refuelTarget: k.leave ? 0 : 2 }); }
+    }
+    window.__qa.minV = 0; window.__qa.minGap = 99; window.__qa.seen = {}; window.__qa.inputs = []; window.__qa.scene = x.cars.map((k) => k.i);
+    // the HUD is watched as it changes: a short hold can fall between two reads on slow software frames
+    if (!window.__qa.chipObs) {
+      const el = document.getElementById('h-chips');
+      window.__qa.chipObs = new MutationObserver(() => { for (const k of x.labels) if (el.textContent.includes(k)) window.__qa.seen[k] = true; });
+      window.__qa.chipObs.observe(el, { childList: true, subtree: true, characterData: true });
+    }
+    clearInterval(window.__qa.qT);
+    window.__qa.qT = setInterval(() => {
+      const rr = window.__game.race, pp = rr.player;
+      window.__qa.minV = Math.min(window.__qa.minV, pp.v);
+      const ik = `${window.__game.input.held('throttle') ? 'T' : '-'}${window.__game.input.held('brake') ? 'B' : '-'}${pp.pitHold ? 'H' : '-'}${pp.mode[0]}`;
+      if (window.__qa.inputs.at(-1)?.split('@')[0] !== ik) window.__qa.inputs.push(`${ik}@${T.wrapS(pp.u).toFixed(1)}`);
+      for (const o2 of rr.cars) if (o2 !== pp && ['race', 'pitlane'].includes(o2.mode) && ['race', 'pitlane'].includes(pp.mode) && Math.abs(o2.d - pp.d) < T.CAR_W) window.__qa.minGap = Math.min(window.__qa.minGap, Math.abs(T.gapS(rr.s(pp), rr.s(o2))));
+    }, 5);
+  }, { labels: [STRINGS['hud.qQueued'], STRINGS['hud.qBay'], STRINGS['hud.qExit']], ...o });
+  const ok = (a) => a.minGap >= 1.38 && a.offences === 0;
+
+  // ---- keyboard
+  const s = await open(run);
+  const { page, keys } = s;
+  await pickRaceSetup(page);
+  await page.click('#o-start');
+  const G = await read(page, () => { const T = window.__game.T; return { PEN_S: T.PEN_S, PIT_IN0: T.PIT_IN0, BAYS: T.BAYS, PIT_OUT0: T.PIT_OUT0, PIT_OUT1: T.PIT_OUT1 }; });
+  // Queued: an AI car serves in the box; the player arrives on Throttle alone and is held behind it
+  await setup(page, { cars: [{ i: 1, s: G.PEN_S, sg: 6 }, { i: 0, s: G.PIT_IN0 + 1.5, v: 6 }] });
+  await keys.set('KeyW', true);
+  await waitFor(page, () => window.__game.race.player.pitWait === 'queued', null, 15000);
+  await frames(page, 3);
+  let a = await st(page);
+  c.ok('Keyboard: Throttle alone joins the box queue; HUD shows Queued with its reason', a.wait === 'queued' && a.chips.includes(STRINGS['hud.qQueued']) && a.status.includes(text('hud.qQueuedLine')) && a.v < 0.1 && ok(a), a);
+  await page.screenshot({ path: path.join(run.out, 'queue-queued.png') });
+  // Brake held through the hold and the box car's departure: never reverses; a fresh press later can
+  await keys.set('KeyW', false);
+  await keys.set('ArrowDown', true);
+  await read(page, () => { window.__qa.minV = 0; });
+  await waitFor(page, () => { const r = window.__game.race; return r.cars[1].sgOwed === 0 && !r.player.pitHold; }, null, 20000);
+  await sleep(1500);
+  const held = await st(page);
+  c.ok('Keyboard: Brake held through the queue and its release never arms reverse', held.minV >= 0 && !held.revOn && held.latch && ok(held), held);
+  await keys.set('ArrowDown', false);
+  await frames(page, 2);
+  await keys.set('ArrowDown', true);
+  await waitFor(page, () => window.__game.race.player.revOn, null, 10000).catch(() => null);
+  const fresh = await st(page);
+  c.ok('Keyboard: a fresh Brake press after the hold is deliberate reverse again', fresh.revOn, fresh);
+  await keys.set('ArrowDown', false);
+
+  // Waiting for bay: a car pulls out of bay 2 just ahead of the player (already refuelled, driving out), who is held clear of its merge
+  await setup(page, { cars: [{ i: 2, s: G.BAYS[2], bay: 2, leave: true }, { i: 0, s: G.BAYS[2] - 2, serviced: true }] });
+  await keys.set('KeyW', true);
+  await waitFor(page, () => window.__qa.seen['WAITING FOR BAY'] || window.__game.race.player.mode !== 'pitlane', null, 15000).catch(() => null);
+  await waitFor(page, () => { const g = window.__game; return g.T.gapS(g.T.wrapS(g.race.player.u), g.T.BAYS[3]) < 0; }, null, 15000).catch(() => null);
+  a = await st(page);
+  await keys.set('KeyW', false);
+  c.ok('Keyboard: a departing bay car holds the through lane; HUD shows Waiting for bay, no contact', a.seen[STRINGS['hud.qBay']] === true && ok(a), a);
+
+  // Waiting for clear exit: one Throttle press in the bay waits for a car standing in the merge, then leaves by itself
+  await setup(page, { cars: [{ i: 0, s: G.BAYS[1], bay: 1 }, { i: 3, s: G.BAYS[1] + 0.3 }], hold: [3] });
+  await frames(page, 3);
+  await keys.tap('KeyW');
+  await frames(page, 4);
+  a = await st(page);
+  c.ok('Keyboard: an exit request waits in the bay; HUD shows Waiting for clear exit', a.mode === 'service' && a.exitReq && a.wait === 'exit' && a.chips.includes(STRINGS['hud.qExit']) && a.status.includes(text('hud.waitClear')), a);
+  await page.screenshot({ path: path.join(run.out, 'queue-exit-bay.png') });
+  await read(page, () => { window.__qa.holdAI = []; });
+  await waitFor(page, () => { const p = window.__game.race.player; return p.mode === 'pitlane' && p.serviced; }, null, 15000).catch(() => null);
+  a = await st(page);
+  c.ok('Keyboard: the bay exit completes exactly once, with no second press', a.mode === 'pitlane' && a.serviced && a.merges.join() === 'grant,release:done' && ok(a), a);
+
+  // the pit exit: a car standing in the outside lane at the merge holds the pit car at the line
+  await setup(page, { cars: [{ i: 0, s: G.PIT_OUT0 - 3, v: 6 }, { i: 3, s: G.PIT_OUT1 + 1, mode: 'race' }], hold: [3] });
+  await keys.set('KeyW', true);
+  await waitFor(page, () => window.__game.race.player.pitWait === 'exit', null, 15000).catch(() => null);
+  await frames(page, 3);
+  a = await st(page);
+  c.ok('Keyboard: stationary traffic at the pit exit; HUD shows Waiting for clear exit and the car waits at the line', a.wait === 'exit' && a.mode === 'pitlane' && a.s < G.PIT_OUT0 && a.chips.includes(STRINGS['hud.qExit']), a);
+  await read(page, () => { window.__qa.holdAI = []; });
+  await waitFor(page, () => window.__game.race.player.mode === 'race', null, 15000).catch(() => null);
+  a = await st(page);
+  await keys.set('KeyW', false);
+  c.ok('Keyboard: the merge goes once the outside lane clears, with no contact', a.mode === 'race' && ok(a), a);
+
+  // ---- emulated touch
+  const t = await open(run, { viewport: { width: 844, height: 390 }, device: PHONE });
+  await read(t.page, () => window.__game.setTouchMode('on'));
+  await pickRaceSetup(t.page);
+  await t.page.click('#o-start');
+  const f = new Fingers(t.page, await t.context.newCDPSession(t.page));
+  // a longer stop in the box: emulated touches land several slow software frames apart
+  await setup(t.page, { cars: [{ i: 1, s: G.PEN_S, sg: 15 }, { i: 0, s: G.PIT_IN0 + 1.5, v: 6 }] });
+  const thr = await f.put('#t-throttle');
+  await waitFor(t.page, () => window.__game.race.player.pitWait === 'queued', null, 15000).catch(() => null);
+  await frames(t.page, 3);
+  const tq = await st(t.page);
+  await f.lift(thr);
+  const brk = await f.put('#t-brake');
+  await read(t.page, () => { window.__qa.minV = 0; });
+  c.ok('Touch: Throttle alone joins the queue; chips show Queued and Brake says reverse is off', tq.wait === 'queued' && tq.chips.includes(STRINGS['hud.qQueued']) && tq.brakeCue === 'held' && tq.brakeText === STRINGS['touch.brake.held'], tq);
+  await t.page.screenshot({ path: path.join(run.out, 'queue-touch.png') });
+  await waitFor(t.page, () => { const r = window.__game.race; return r.cars[1].sgOwed === 0 && !r.player.pitHold; }, null, 60000).catch(() => null);
+  await sleep(1500);
+  const tb = await st(t.page);
+  c.ok('Touch: holding Brake through the queue and its release never reverses', tb.minV >= 0 && !tb.revOn && tb.latch && tb.mode === 'pitlane' && tb.inputs.split(' ').some((e) => e.startsWith('-BH')) && ok(tb), tb);
+  await f.lift(brk);
+  c.ok('Touch: no page or console errors', t.errors.length === 0, t.errors.slice(0, 5));
+  await t.context.close();
+  return s;
+}
+
 /** Real-time frame capture with the renderer on. Reports presentation and clock separately. */
 async function perf(run) {
   const s = await open(run);
@@ -1765,8 +1897,8 @@ async function perf(run) {
 }
 
 // ------------------------------------------------------------ cli
-const SCENARIOS = { tracks, race, controlled, routing, practice, championship, touch, responsive, touchrace, reverse, service };
-const USAGE = 'usage: browser-check.mjs [tracks|race|controlled|routing|practice|championship|touch|responsive|touchrace|reverse|service ...] | perf | compare <a.json> <b.json>\n'
+const SCENARIOS = { tracks, race, controlled, routing, practice, championship, touch, responsive, touchrace, reverse, service, queue };
+const USAGE = 'usage: browser-check.mjs [tracks|race|controlled|routing|practice|championship|touch|responsive|touchrace|reverse|service|queue ...] | perf | compare <a.json> <b.json>\n'
   + 'options: --dist <dir> --url <url> --commit <sha> --machine <name> --label <name> --viewport WxH --dpr N --preset low|balanced|high\n'
   + '         --seconds N --headed --channel <chrome|msedge> --out <dir> --max-minutes N';
 

@@ -1,4 +1,5 @@
 import * as T from './track';
+import { PitTraffic, PitWait } from './pit';
 
 export const LAPS = 13;
 export const ACC = 30, VMAX = 26, COAST = 9, BRAKE = 30, DRAG = 0.006;
@@ -161,6 +162,18 @@ export interface Car {
   revLatch: boolean;
   /** furthest u reached before backing up: fixed points short of it are not decided again when driving forward over them */
   revMark: number | null;
+  /** shared pit traffic (see docs/pit-queue.md), set by the simulation each step: what an assisted car is held for */
+  pitWait: PitWait;
+  /** assisted speed cap from the pit queue this step (1e9 when none) */
+  pitCap: number;
+  /** held by the pit queue or the exit this step: Brake held now cannot arm reverse */
+  pitHold: boolean;
+  /** must wait at the pit-exit line this step */
+  exitHold: boolean;
+  /** a departure from the bay was asked for and waits for a safe merge; latched, so it completes without pressing again */
+  exitReq: boolean;
+  /** this pit visit is for fuel (set at the entrance, from the reasons the car entered with) */
+  pitFuel: boolean;
 }
 
 export type RaceEvent =
@@ -204,6 +217,8 @@ export class Race {
   t = 0; goT = 4.6; raceTime = 0; lights = 0;
   events: RaceEvent[] = [];
   squeezeQ: Car[] = [];
+  /** simulation-owned pit-lane reservations and queue order: the HUD reads this, it never keeps its own */
+  pit: PitTraffic = new PitTraffic(this);
   profiles: Record<string, Float32Array> = {};
   playerDoneT = -1;
   practice = false;
@@ -243,6 +258,7 @@ export class Race {
         threatIdx: -1, reactT: 0, defendOk: false, defendCooldown: 0, defendPending: false, defendSw: -1,
         x: 0, y: 0, h: 0, z: 0, roll: 0, pitch: 0, bumpT: 0,
         revOn: false, revHoldT: 0, revLatch: false, revMark: null,
+        pitWait: null, pitCap: 1e9, pitHold: false, exitHold: false, exitReq: false, pitFuel: false,
       };
       this.cars.push(c);
     }
@@ -250,7 +266,7 @@ export class Race {
     for (const c of this.cars) this.pose(c);
   }
 
-  get player(): Car { return this.cars[0]; }
+  get player(): Car { return this.cars.find((c) => c.isPlayer) ?? this.cars[0]; }
 
   s(c: Car): number { return T.wrapS(c.u); }
 
@@ -261,8 +277,16 @@ export class Race {
 
   requestLane(): void {
     const c = this.player;
-    if (c.finished || (c.mode !== 'race' && c.mode !== 'grid')) return;
+    if (c.finished) return;
+    // inside the single-file pit lane there is no other lane: nothing moves, and the player is told why
+    if (c.mode === 'pitlane' || c.mode === 'bayIn' || c.mode === 'service' || c.mode === 'bayOut') { this.pmsg(c, 'msg.pitSingleFile', 'warn'); return; }
+    if (c.mode !== 'race' && c.mode !== 'grid') return;
     if (this.pitAssist(c)) {
+      // queued on the approach with no switch left before the entrance: an override could not be used, so it is not armed
+      if (c.pitHold && !c.laneOverride && !this.switchBeforeEntry(c)) {
+        this.pmsg(c, this.deferBlock(c) === null ? 'msg.queueNoSwitch' : 'msg.queueNoSwitchFinal', 'warn');
+        return;
+      }
       c.laneOverride = !c.laneOverride;
       this.pmsg(c, c.laneOverride ? 'msg.routeInside' : 'msg.routeOutside', 'info');
       return;
@@ -315,6 +339,8 @@ export class Race {
       return;
     }
     const k = this.apprLap(c);
+    // the planned service route is given up for this approach: its reservations go, the debt stays
+    this.pit.releaseAll(c, 'defer');
     if (c.fuelReq) { c.fuelReq = false; c.fuelDue = k + 1; }
     if (c.sgOwed > 0 && c.sgDue <= k) { c.sgDue = k + 1; c.sgDeferred = true; }
     c.routeHold = k;
@@ -353,6 +379,7 @@ export class Race {
 
   /** Another car is standing in (or rolling through) the stop-and-go box. */
   boxBusy(c: Car): boolean {
+    if (this.pit.box >= 0 && this.pit.box !== c.idx) return true;
     return this.cars.some((o) => o !== c && o.mode === 'pitlane' && Math.abs(T.gapS(this.s(o), T.PEN_S)) < T.PEN_HALF);
   }
 
@@ -371,6 +398,12 @@ export class Race {
     if (c.routeHold === k) { c.pitReq = false; c.laneOverride = false; }
     else if ((c.sgOwed > 0 || c.fuelDue > 0 || c.fuelReq) && !c.pitReq) { c.pitReq = true; c.laneReq = false; }
     c.pitPenaltyOnly = c.pitReq && c.sgOwed > 0 && !c.fuelReq && c.fuelDue <= 0;
+  }
+
+  /** A lane switch still lies ahead of the car before the coming pit entrance. */
+  switchBeforeEntry(c: Car): boolean {
+    const s = this.s(c), entry = T.ahead(s, T.PIT_IN0);
+    return T.SWITCHES.some((sw) => { const a = T.ahead(s, sw.s0); return a > 0.05 && a < entry; });
   }
 
   /** Routing state only: debts (stop-and-go, committed fuel stop) are untouched. */
@@ -431,6 +464,8 @@ export class Race {
     } else {
       this.raceTime += dt;
     }
+    // pit traffic is decided from where every car is before any of them moves, so array order never grants priority
+    this.pit.update();
     for (const c of this.cars) this.stepCar(c, dt, input);
     this.collide();
     for (const c of this.cars) this.pose(c);
@@ -484,12 +519,15 @@ export class Race {
     c.squeezeHold = false; c.yielding = false;
     if (c.mode === 'pitlane') {
       cap = T.PIT_SPEED;
-      const a = T.gapS(s0, T.PIT_OUT0);
-      if (a > 0 && a < 4 && this.mergeBlocked(c)) {
+      // the pit exit: wait at the line while the outside lane is not clear or another car is merging
+      if (c.exitHold) {
+        const a = T.gapS(s0, T.PIT_OUT0);
         cap = Math.min(cap, Math.sqrt(2 * 25 * Math.max(0, a - 0.4)));
         c.yielding = true;
       }
     }
+    // shared pit queue: a stopping gap behind whatever is ahead on the car's own path
+    cap = Math.min(cap, c.pitCap);
     const qi = this.squeezeQ.indexOf(c);
     if (qi > 0) {
       const ah = this.squeezeQ[qi - 1];
@@ -556,6 +594,7 @@ export class Race {
         if (c.pitReq) {
           if (c.laneSide < 0 && !c.change && !c.finished) {
             c.mode = 'pitlane'; c.lapValid = false; entered = true;
+            c.pitFuel = c.fuelReq || c.fuelDue > 0 || c.pitPlan;
             this.clearPitIntent(c);
             this.pmsg(c, c.sgOwed > 0 ? 'msg.pitInPen' : 'msg.pitIn', 'info');
           } else {
@@ -578,11 +617,12 @@ export class Race {
       c.d = T.pitD(s);
       this.servePenalty(c, s, dt);
       if (crossed(T.PIT_OUT1)) {
-        c.mode = 'race'; c.laneSide = -1; c.d = -T.LANE_HALF; c.serviced = false; c.graceT = PEN.grace;
+        c.mode = 'race'; c.laneSide = -1; c.d = -T.LANE_HALF; c.serviced = false; c.graceT = PEN.grace; c.pitFuel = false;
+        this.pit.release('exit', c, 'done');
         if (c.sgOwed > 0 && !c.finished) this.pmsg(c, 'msg.penStillOwed', 'bad');
       }
-      // a bay is only captured nearly stopped: never while reversing past it
-      else if (Math.abs(c.v) < 0.7 && !c.revOn && c.isPlayer && !c.serviced && !c.sgServing) this.tryBay(c, s);
+      // a bay is only captured nearly stopped: never while reversing past it, nor while the queue holds the car (unless braking there)
+      else if (Math.abs(c.v) < 0.7 && !c.revOn && c.isPlayer && !c.serviced && !c.sgServing && (!c.pitHold || input.down)) this.tryBay(c, s);
       else if (!c.isPlayer && c.pitPlan) {
         const bs = T.BAYS[c.bay];
         if (Math.abs(T.gapS(s, bs)) < 0.45 && c.v < 1.5 && this.bayFree(c.bay, c)) this.enterBay(c, c.bay);
@@ -615,6 +655,7 @@ export class Race {
     // out of fuel
     if (c.fuel <= 0 && c.mode === 'race' && Math.abs(c.v) < 0.4) {
       c.mode = 'tow'; c.towT = 0; c.lapValid = false; this.leaveSqueeze(c); c.laneReq = false; this.clearPitIntent(c);
+      this.pit.releaseAll(c, 'terminal');
       if (c.change) { c.laneSide = c.change.to; c.change = null; }
       this.emit({ type: 'tow', car: c });
       this.pmsg(c, 'msg.outOfFuel', 'bad');
@@ -632,9 +673,11 @@ export class Race {
 
   // ---------------------------------------------------------------- reverse (player only)
   /** Why reverse cannot engage now, or null. Checked by speed magnitude and position, never by direction alone. */
-  reverseBlock(c: Car): 'phase' | 'mode' | 'change' | 'fuel' | 'service' | null {
+  reverseBlock(c: Car): 'phase' | 'mode' | 'change' | 'fuel' | 'service' | 'assist' | null {
     if (this.phase !== 'racing' || c.finished) return 'phase';
     if (c.mode !== 'race' && c.mode !== 'pitlane') return 'mode';
+    // held by the pit queue or the exit: automatic control, so Brake held now never backs away when the hold ends
+    if (c.pitHold) return 'assist';
     if (c.change) return 'change';
     if (c.fuel <= 0) return 'fuel';
     // standing (or arriving) in the penalty box with a stop owed is service: Brake must keep the car still for all of it
@@ -732,21 +775,28 @@ export class Race {
     return true;
   }
 
+  /**
+   * The outside lane is not clear for a pit-exit merge: a car standing, crawling or backing up in the merge's conflict zone
+   * (or too close beyond it to stop behind), a car backing towards it, or traffic passing alongside.
+   */
   mergeBlocked(c: Car): boolean {
     const s = this.s(c);
+    const zone = T.PIT_OUT1 - T.PIT_OUT0 + T.CAR_LEN + 2;
     for (const o of this.cars) {
-      // a car backing up counts however slow: it is coming towards the merge from ahead
-      if (o === c || o.mode !== 'race' || (o.v >= 0 && o.v < 1)) continue;
+      if (o === c || o.mode !== 'race') continue;
       if (!(o.change || o.laneSide < 0)) continue;
+      const z = T.gapS(T.PIT_OUT0, this.s(o));
+      if (o.v < 1 && z > 1.5 && z < zone + Math.max(0, -o.v) * 1.5) return true;
+      // a car backing up counts however slow: it is coming towards the merge from ahead
+      if (o.v >= 0 && o.v < 1) continue;
       const g = T.gapS(s, this.s(o));
-      if (g < 2.5 + Math.max(0, -o.v) * 0.75 && g > -(3 + Math.max(0, o.v) * 0.75)) return true;
+      if (g < 2.5 + Math.max(0, -o.v) * 1.5 && g > -(3 + Math.max(0, o.v) * 0.75)) return true;
     }
     return false;
   }
 
-  bayFree(j: number, self: Car): boolean {
-    return !this.cars.some((o) => o !== self && o.bay === j && (o.mode === 'bayIn' || o.mode === 'service' || o.mode === 'bayOut'));
-  }
+  /** Nobody else is in bay j or has reserved it. */
+  bayFree(j: number, self: Car): boolean { return this.pit.bayAvail(j, self); }
 
   tryBay(c: Car, s: number): void {
     for (let j = 0; j < T.BAYS.length; j++) {
@@ -769,9 +819,18 @@ export class Race {
   }
 
   enterBay(c: Car, j: number): void {
-    c.mode = 'bayIn'; c.bay = j; c.bayT = 0; c.v = 0; c.serviceT = 0; c.fuelAtBay = c.fuel; c.towSvc = false;
+    this.holdBay(c, j);
+    c.mode = 'bayIn'; c.bay = j; c.bayT = 0; c.v = 0; c.serviceT = 0; c.fuelAtBay = c.fuel; c.towSvc = false; c.exitReq = false;
     c.pitStops++;
     if (!c.isPlayer) c.refuelTarget = Math.min(1, Math.max(0.3, this.fuelToFinish(c, this.s(c)) + rnd(0.06, 0.2)));
+  }
+
+  /** The car's bay reservation is bay j: a reservation it held for another bay moves here. */
+  holdBay(c: Car, j: number): void {
+    const had = this.pit.bayOf(c);
+    if (had === j) return;
+    if (had >= 0) this.pit.release(`bay${had}`, c, 'moved');
+    this.pit.grant(`bay${j}`, c);
   }
 
   stepBay(c: Car, dt: number, input: Input): void {
@@ -791,20 +850,22 @@ export class Race {
       if (c.serviceT > 0.4) c.fuel = Math.min(1, c.fuel + REFUEL_RATE * dt);
       // a committed fuel stop counts once the car has stood in its bay for the departure-ready time (a full tank is fine; a tow is not a visit)
       if (c.fuelDue > 0 && !c.towSvc && c.serviceT > SERVICE_READY) { c.fuelDue = 0; this.pmsg(c, 'msg.fuelDone', 'good'); }
+      // a departure request is latched: it waits in the bay for a safe merge and then goes, once, without pressing again
       let wantGo: boolean;
       if (c.isPlayer && !c.finished) wantGo = input.up && c.serviceT > SERVICE_READY;
       else wantGo = c.fuel >= c.refuelTarget || c.fuel >= 1;
-      c.waitingClear = false;
-      if (wantGo && c.penalty <= 0) {
-        const blocked = this.cars.some((o) => o !== c && (o.mode === 'pitlane') && Math.abs(T.gapS(s, this.s(o))) < 2.2);
-        if (blocked) c.waitingClear = true;
-        else { c.mode = 'bayOut'; c.bayT = 0; c.pitPlan = false; }
-      }
+      if (wantGo && c.penalty <= 0) c.exitReq = true;
+      // the merge is granted by the shared pit traffic at the start of a step, from where everyone is
+      if (c.exitReq && this.pit.merges[c.bay] === c.idx) { c.mode = 'bayOut'; c.bayT = 0; c.pitPlan = false; c.waitingClear = false; }
     } else {
       c.bayT = Math.min(1, c.bayT + dt / 0.4);
       c.d = T.BAY_D + (T.PIT_D - T.BAY_D) * T.smooth(c.bayT);
       c.yawOff = Math.sin(c.bayT * Math.PI) * 0.5;
-      if (c.bayT >= 1) { c.mode = 'pitlane'; c.v = 0; c.d = T.PIT_D; c.yawOff = 0; c.serviced = true; }
+      if (c.bayT >= 1) {
+        c.mode = 'pitlane'; c.v = 0; c.d = T.PIT_D; c.yawOff = 0; c.serviced = true; c.exitReq = false;
+        // back in the through lane: the merge and the bay are released, once
+        this.pit.release(`merge${c.bay}`, c, 'done'); this.pit.release(`bay${c.bay}`, c, 'done');
+      }
     }
   }
 
@@ -823,7 +884,7 @@ export class Race {
       u0: c.u, lane: c.change ? c.change.to : Math.sign(c.laneSide) || 1,
     };
     c.mode = 'off'; c.slip = 0; c.laneReq = false; c.laneOverride = false; c.change = null; c.throttle = 0; c.lapValid = false;
-    this.leaveSqueeze(c);
+    this.leaveSqueeze(c); this.pit.releaseAll(c, 'terminal');
     this.emit({ type: 'deslot', car: c });
     this.pmsg(c, 'msg.deslot', 'bad');
   }
@@ -861,7 +922,8 @@ export class Race {
     const s = this.s(c);
     const dist = T.ahead(s, T.BAYS[j]);
     c.u += dist;
-    c.bay = j; c.mode = 'service'; c.serviceT = 0; c.d = T.BAY_D; c.laneSide = -1; c.yawOff = 0; c.revMark = null; c.towSvc = true;
+    this.holdBay(c, j);
+    c.bay = j; c.mode = 'service'; c.serviceT = 0; c.d = T.BAY_D; c.laneSide = -1; c.yawOff = 0; c.revMark = null; c.towSvc = true; c.exitReq = false;
     if (c.u > c.hiU) c.hiU = c.u;
     c.penalty = 8 + dist / 11; c.pitStops++;
     c.refuelTarget = Math.max(c.refuelTarget, 0.75);
@@ -998,7 +1060,8 @@ export class Race {
   /** continuous stationary countdown inside the penalty box; moving early resets it */
   servePenalty(c: Car, s: number, dt: number): void {
     if (c.sgOwed <= 0) { c.sgServing = false; return; }
-    const inBox = Math.abs(T.gapS(s, T.PEN_S)) < T.PEN_HALF;
+    // only the box's reservation holder serves: a car that stops in it behind another, without the grant, accumulates nothing
+    const inBox = this.pit.box === c.idx && Math.abs(T.gapS(s, T.PEN_S)) < T.PEN_HALF;
     if (inBox && Math.abs(c.v) < REV.still) {
       c.sgServing = true;
       c.sgServed += dt;

@@ -34,6 +34,7 @@ Functional runs default to 480×270 at Low so SwiftShader can run them. Perf cap
 | `responsive` | Chromium mobile emulation at DPR 2, 1440×900 desktop, some scripted state | HUD and menus at 360×640, 390×844, 640×360, 844×390 and 768×1024, desktop geometry, rotation and browser bars with input held, overlays, keyboard, safe areas, Practice and Championship by touch, frame and press timing. See [responsive layouts](responsive.md) |
 | `touchrace` | Real frames, emulated touch only, 844×390 | Clubman Park, 13 laps on the pad: fuel stop, finish, results, Race Again |
 | `reverse` | Scripted placement, then real keys and emulated touch | Hold-Brake reverse: HUD cue, overshot box and bay, blur and resume, touch Brake and pointer cancel. See [reverse](reverse.md) |
+| `queue` | Scripted placement, then real keys and emulated touch at 844×390 | Shared pit queue: Queued behind the box on Throttle alone, Brake held through the hold, Waiting for bay, a latched bay exit, Waiting for clear exit at the pit exit, the same on the touch pad. See [pit queues](pit-queue.md) |
 | `service` | Scripted placement, then real keys and emulated touch at 360×640 and 640×360 | Service obligations: request, N and touch Defer, route release and re-arm, refused toggles, latched breach, DQ on the results screen and in a championship round, Defer layout, final lap with the box occupied. See [service obligations](penalties.md) |
 
 `__game.advance` and scripted state are functional coverage only and are never used for timing or smoothness.

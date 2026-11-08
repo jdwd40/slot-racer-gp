@@ -35,7 +35,7 @@ Routing (`pitReq`) is kept apart from the reasons for a visit: the optional requ
 | De-slot | Override clears, request stays |
 | Tow, finish, restart | Routing, override and the optional request clear |
 
-Deadlines, deferral and disqualification are described in [service obligations](penalties.md). AI cars are never assisted and never defer.
+Deadlines, deferral and disqualification are described in [service obligations](penalties.md). Queueing in the pit lane, the box and bay reservations and the exits are in [pit queues](pit-queue.md). AI cars are never assisted and never defer.
 
 ## Evidence
 

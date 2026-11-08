@@ -40,6 +40,7 @@ Keyboard and touch both feed `DrivingInput`'s `brake` hold. The race sees only `
 | `mode` | De-slotted, towed, bay entry, refuelling or bay exit (automatic manoeuvres) |
 | `service` | In the pit lane, inside the penalty box with a stop-and-go owed |
 | `fuel` | Tank empty |
+| `assist` | Held by the shared pit queue or waiting at the pit-exit line (`pitHold`): see [pit queues](pit-queue.md) |
 | `change` | A committed lane change is running. A stationary attempt shows "Finish the lane change before reversing" once and latches that press. Braking through a switch at speed never latches, because the timer only counts at rest |
 
 AI cars never reverse. `reverseControl` runs only for the player, and AI speed stays clamped at zero or above.

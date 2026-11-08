@@ -56,7 +56,7 @@ Repeated N or P presses, lane overrides, reversing, pauses, tows, re-slots and f
 
 ### Occupied box
 
-If another car is in the stop-and-go box, the car still routes in and queues by default. While another lap remains and the deferral is unused, the status line says "box occupied — queue, or defer one lap", and Defer is offered. On the final lap it says "queue: final lap, no deferral". A manual lane override cannot waive the stop.
+If another car is in the stop-and-go box or holds its reservation (see [pit queues](pit-queue.md)), the car still routes in and queues by default. While another lap remains and the deferral is unused, the status line says "box occupied — queue, or defer one lap", and Defer is offered. On the final lap it says "queue: final lap, no deferral". A manual lane override cannot waive the stop.
 
 ### Late awards
 
