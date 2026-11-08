@@ -36,7 +36,7 @@
     { "id": "hud.refuelHint", "text": "Hold throttle to leave" },
     { "id": "hud.penalty", "text": "PENALTY {n}s" },
     { "id": "hud.stopBay", "text": "Brake to stop in a service bay" },
-    { "id": "hud.waitClear", "text": "Waiting for clear exit — you leave automatically" },
+    { "id": "hud.waitClear", "text": "auto-exit when clear" },
     { "id": "hud.qQueued", "text": "QUEUED" },
     { "id": "hud.qBay", "text": "WAITING FOR BAY" },
     { "id": "hud.qExit", "text": "WAITING FOR CLEAR EXIT" },

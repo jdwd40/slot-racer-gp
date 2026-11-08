@@ -170,7 +170,7 @@ export class PitTraffic {
       const room = g - T.CAR_LEN - PIT_Q.gap + (vl > 0 ? (vl * vl) / (2 * PIT_Q.leadBrake) : vl * 0.5);
       const cap = Math.sqrt(2 * PIT_Q.decel * Math.max(0, room));
       // held: the cap stops the car, or it already stands at the stopping gap behind something standing still
-      const held = cap < PIT_Q.hold || (Math.abs(vl) < 0.05 && room < 0.3 && c.v < 0.3);
+      const held = cap < PIT_Q.hold || (Math.abs(vl) < 0.05 && room < 0.3);
       if (!best || cap < best.cap) best = { cap, bay: inBay(o), held };
     }
     return best;

@@ -469,6 +469,24 @@ describe('player controls', () => {
     expect(P.u).toBe(u); expect(P.laneSide).toBe(-1);
   });
 
+  it('an override before the entrance releases the route at a safe switch and keeps the committed stop owed', () => {
+    const r = setup(1, true);
+    const P = r.cars[0];
+    const s0 = T.wrapS(T.PIT_IN0 - 20);
+    T.SWITCHES.push({ s0, s1: s0 + T.SWITCH_LEN });
+    approach(P, 30, 8); P.fuelDue = LAP;              // a committed fuel stop due this lap
+    r.syncRoute(P);
+    sim(r, DT, UP);
+    expect(r.pit.bays[0]).toBe(P.idx);
+    r.requestLane();                                  // one-switch override: stay off the pit route
+    sim(r, DT, UP);
+    expect(r.pit.held(P)).toEqual([]);
+    expect(trail(r, 'bay0')).toEqual([`${P.idx}:bay0:grant`, `${P.idx}:bay0:release:route`]);
+    sim(r, 3, UP, watch(), DT, () => T.ahead(r.s(P), T.PIT_IN0) > 100);
+    expect(P.mode).toBe('race'); expect(P.laneSide).toBe(1);   // took the real switch, never the pit
+    expect(P.fuelDue).toBe(LAP);                     // the debt is untouched
+  });
+
   it('Brake held through a queue hold never reverses; a fresh press afterwards still can', () => {
     const { r, P, A } = queued();
     sim(r, 1, UP);
