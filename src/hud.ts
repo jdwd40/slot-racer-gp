@@ -15,6 +15,7 @@ export function fmt(sec: number): string {
 export function routeChipId(r: { stay: boolean; override: boolean }): string {
   return `hud.route${r.override ? 'Inside' : 'Outside'}${r.stay ? 'Stay' : 'Move'}`;
 }
+const QUEUE_CHIP = { queued: 'hud.qQueued', bay: 'hud.qBay', exit: 'hud.qExit' } as const;
 const hex = (c: number): string => '#' + c.toString(16).padStart(6, '0');
 const VIEW_ICON = '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 5V1h4M11 1h4v4M15 11v4h-4M5 15H1v-4"/></svg>';
 const PAUSE_ICON = '<svg width="14" height="14" viewBox="0 0 14 14" fill="currentColor"><rect x="2" y="1" width="3.5" height="12" rx="1"/><rect x="8.5" y="1" width="3.5" height="12" rx="1"/></svg>';
@@ -208,7 +209,9 @@ export class Hud {
     const route = race.nextRoute(p);
     if (route) chips.push(`<span class="chip ${route.override ? 'yel' : 'cyan'}">${route.override ? '⇄' : 'P'} ${t(routeChipId(route))}</span>`);
     if (p.squeezeHold) chips.push(`<span class="chip org">▼ ${t('hud.yield')}</span>`);
-    if (p.yielding) chips.push(`<span class="chip org">▼ ${t('hud.pitYield')}</span>`);
+    // shared pit queue: what the simulation is holding the car for (the HUD keeps no queue of its own)
+    const wait = p.finished ? null : p.pitWait;
+    if (wait) chips.push(`<span class="chip org">⏸ ${t(QUEUE_CHIP[wait])}</span>`);
     const rev = reversing(p);
     if (rev) chips.push(`<span class="chip rev">R ${t('hud.reverse')}</span>`);
     this.set('h-chips', chips.join(''), true);
@@ -217,7 +220,7 @@ export class Hud {
     const dEl = this.el['t-defer'];
     if (dEl.hidden === canDefer) dEl.hidden = !canDefer;
     this.root.classList.toggle('defer', canDefer);
-    this.cue('brake', rev ? 'reverse' : 'idle');
+    this.cue('brake', rev ? 'reverse' : p.pitHold && !p.finished ? 'held' : 'idle');
 
     // status line. fuelVisit: this bay visit is settling (or has settled) a committed fuel stop
     const inBay = p.mode === 'bayIn' || p.mode === 'service' || p.mode === 'bayOut';
@@ -226,11 +229,13 @@ export class Hud {
     if (p.sgServing) {
       st = `<b class="red">${t('hud.sgServing', { n: Math.max(0, p.sgOwed - p.sgServed).toFixed(1) })}</b>`;
     } else if (p.sgOwed > 0 && !p.finished) {
-      if (p.mode === 'pitlane') st = `<b class="red">${t('hud.sgBox')}</b>`;
+      if (p.mode === 'pitlane') st = wait === 'queued' || wait === 'bay' ? `<b class="org">${t(wait === 'bay' ? 'hud.qBayLine' : 'hud.qQueuedLine')}</b>` : `<b class="red">${t('hud.sgBox')}</b>`;
       else {
         st = `<b class="red">${t('hud.sgOwed')}</b> · ${t('hud.sgDetail', { n: Math.round(p.sgOwed), due: dueText(p.sgDue) }).replace(/ · $/, '')}`;
         if (!held && race.boxBusy(p)) st += ` · <small>${t(race.deferBlock(p) === null ? 'hud.boxBusy' : 'hud.boxBusyFinal')}</small>`;
       }
+    } else if (wait && wait !== 'exit' && p.mode !== 'service') {
+      st = `<b class="org">${t(wait === 'bay' ? 'hud.qBayLine' : 'hud.qQueuedLine')}</b>`;
     } else if (p.mode === 'service') {
       st = `<b>${t('hud.refuel', { n: Math.round(p.fuel * 100) })}</b>`;
       if (p.fuelDue > 0 && !p.towSvc) st += ` · <span class="org">${t('hud.fuelServing', { n: Math.max(0, SERVICE_READY - p.serviceT + 0.05).toFixed(1) })}</span>`;
@@ -238,6 +243,8 @@ export class Hud {
       if (p.penalty > 0) st += ` · <span class="red">${t('hud.penalty', { n: Math.ceil(p.penalty) })}</span>`;
       else if (p.waitingClear) st += ` · ${t('hud.waitClear')}`;
       else if (!p.finished) st += ` · ${t('hud.refuelHint')}`;
+    } else if (wait === 'exit') {
+      st = `<b class="org">${t('hud.qExitLine')}</b>`;
     } else if (p.fuelDue > 0 && !p.finished && !held) {
       st = `<b class="org">${t('hud.fuelDueOwed')}</b>${dueText(p.fuelDue) ? ` · ${dueText(p.fuelDue)}` : ''}`;
     } else if (p.mode === 'pitlane' && T.gapS(race.s(p), T.BAYS[3] + T.BAY_HALF) > 0 && !p.finished) {
