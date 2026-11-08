@@ -195,8 +195,10 @@ export class Hud {
     const live = !practice && !p.finished;
     const held = live && p.routeHold >= 0 && p.routeHold === race.apprLap(p);
     if (live && p.svcBreach) chips.push(`<span class="chip red blink">✕ ${t('hud.breach')}</span>`);
-    if (p.sgOwed > 0 && !p.finished) chips.push(`<span class="chip red ${p.svcBreach ? '' : 'blink'}">■ ${t('hud.sgChip')} · ${t(`hud.dueChip.${race.dueState(p, p.sgDue)}`)}</span>`);
-    if (p.fuelDue > 0 && !p.finished) chips.push(`<span class="chip org">⛽ ${t('hud.fuelChip')} · ${t(`hud.dueChip.${race.dueState(p, p.fuelDue)}`)}</span>`);
+    const dueChip = (lap: number): string => { const d = race.dueState(p, lap); return d === 'none' ? '' : ` · ${t(`hud.dueChip.${d}`)}`; };
+    const dueText = (lap: number): string => { const d = race.dueState(p, lap); return d === 'none' ? '' : t(`hud.due.${d}`); };
+    if (p.sgOwed > 0 && !p.finished) chips.push(`<span class="chip red ${p.svcBreach ? '' : 'blink'}">■ ${t('hud.sgChip')}${dueChip(p.sgDue)}</span>`);
+    if (p.fuelDue > 0 && !p.finished) chips.push(`<span class="chip org">⛽ ${t('hud.fuelChip')}${dueChip(p.fuelDue)}</span>`);
     if (p.fuelReq && !p.finished) chips.push(`<span class="chip cyan">⛽ ${t('hud.fuelReq')}</span>`);
     if (held) chips.push(`<span class="chip yel">⏭ ${t('hud.held')}</span>`);
     const canDefer = race.deferBlock(p) === null;
@@ -226,7 +228,7 @@ export class Hud {
     } else if (p.sgOwed > 0 && !p.finished) {
       if (p.mode === 'pitlane') st = `<b class="red">${t('hud.sgBox')}</b>`;
       else {
-        st = `<b class="red">${t('hud.sgOwed')}</b> · ${t('hud.sgDetail', { n: Math.round(p.sgOwed), due: t(`hud.due.${race.dueState(p, p.sgDue)}`) })}`;
+        st = `<b class="red">${t('hud.sgOwed')}</b> · ${t('hud.sgDetail', { n: Math.round(p.sgOwed), due: dueText(p.sgDue) }).replace(/ · $/, '')}`;
         if (!held && race.boxBusy(p)) st += ` · <small>${t(race.deferBlock(p) === null ? 'hud.boxBusy' : 'hud.boxBusyFinal')}</small>`;
       }
     } else if (p.mode === 'service') {
@@ -237,7 +239,7 @@ export class Hud {
       else if (p.waitingClear) st += ` · ${t('hud.waitClear')}`;
       else if (!p.finished) st += ` · ${t('hud.refuelHint')}`;
     } else if (p.fuelDue > 0 && !p.finished && !held) {
-      st = `<b class="org">${t('hud.fuelDueOwed')}</b> · ${t(`hud.due.${race.dueState(p, p.fuelDue)}`)}`;
+      st = `<b class="org">${t('hud.fuelDueOwed')}</b>${dueText(p.fuelDue) ? ` · ${dueText(p.fuelDue)}` : ''}`;
     } else if (p.mode === 'pitlane' && T.gapS(race.s(p), T.BAYS[3] + T.BAY_HALF) > 0 && !p.finished) {
       st = t('hud.stopBay');
     } else if (live && p.svcBreach) {

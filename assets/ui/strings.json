@@ -242,9 +242,9 @@
     { "id": "res.dnf", "text": "DNF" },
     { "id": "res.youDq", "text": "You were disqualified" },
     { "id": "res.youDnf", "text": "You did not finish" },
-    { "id": "res.dqReason.deadline", "text": "DQ · missed service deadline" },
-    { "id": "res.dqReason.stopGo", "text": "DQ · stop-and-go not served" },
-    { "id": "res.dqReason.fuel", "text": "DQ · deferred fuel stop not served" },
+    { "id": "res.dqReason.deadline", "text": "missed service deadline" },
+    { "id": "res.dqReason.stopGo", "text": "stop-and-go not served" },
+    { "id": "res.dqReason.fuel", "text": "deferred fuel stop not served" },
     { "id": "champ.dq", "text": "DQ" },
     { "id": "hud.flagDq", "text": "DQ" },
     { "id": "pen.flashBreach", "text": "DEADLINE MISSED" }
