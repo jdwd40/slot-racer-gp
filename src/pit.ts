@@ -17,6 +17,7 @@ export const PIT_Q = {
   look: 40,          // obstacles further ahead than this are ignored
   approach: 40,      // road distance before the pit entrance in which a routed car joins the queue
   hold: 0.6,         // an assisted cap below this (m/s) holds the car: it is queued
+  join: 2,           // a road car whose queue cap comes within this (m/s) of its speed is braking for the queue: it joins it
   mergeSpacing: 4,   // bay merges closer than this are never under way together (adjacent bays are 3 m apart)
   mergeTime: 1.0,    // seconds of a reversing car's travel a bay departure allows for
   exitWin: 4,        // yield window before the pit exit merge starts
@@ -146,10 +147,15 @@ export class PitTraffic {
       if (c.exitHold) { c.pitWait = 'exit'; c.pitHold = true; }
     };
     for (const c of cars) if (mem.has(c) && (c.mode === 'race' || c.mode === 'pitlane')) assist(c, true, null);
-    const heldQ = new Set(cars.filter((c) => c.pitHold));
-    for (const c of cars) {
-      const follower = !mem.has(c) && c.mode === 'race' && !c.change && c.laneSide < 0 && T.ahead(r.s(c), T.PIT_IN0) < PIT_Q.approach;
-      if (follower && heldQ.size) assist(c, false, heldQ);
+    // road followers nearest the entrance first: one braking for the queue joins it, so the car behind brakes for it in turn
+    const queue = new Set(cars.filter((c) => c.pitHold));
+    const toEntry = (c: Car): number => T.ahead(r.s(c), T.PIT_IN0);
+    const road = cars.filter((c) => !mem.has(c) && c.mode === 'race' && !c.change && c.laneSide < 0 && toEntry(c) < PIT_Q.approach)
+      .sort((a, b) => (toEntry(a) - toEntry(b)) || a.idx - b.idx);
+    for (const c of road) {
+      if (!queue.size) break;
+      assist(c, false, queue);
+      if (c.pitHold || c.pitCap < c.v + PIT_Q.join) queue.add(c);
     }
   }
 

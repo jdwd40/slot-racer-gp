@@ -201,6 +201,25 @@ describe('stopping gap', () => {
     expect(minV).toBe(0);                      // the queued car is never pushed backwards
     expect(w2.overlaps).toBe(0); expect(w2.offences).toBe(0);
   });
+
+  it('road cars behind a held queue on the approach each brake for the car in front, in physical order', () => {
+    for (const rev of [false, true]) {
+      const r = setup(4, true);
+      const [P, A, B, C] = r.cars;
+      inPit(C, T.PIT_IN0 + 0.9); C.pitReq = true;     // standing just inside the entrance
+      approach(A, 1, 0); owes(A);                     // pit-bound, held behind it
+      approach(B, 12, 8);                             // two road cars that are not pitting: an AI car, then the player
+      approach(P, 18, 8);
+      r.ai = (c) => (c === A || c === C ? { t: 0, b: 1 } : { t: 1, b: 0 });
+      if (rev) r.cars.reverse();
+      const w = sim(r, 4, UP);
+      expect(A.pitHold).toBe(true); expect(B.pitHold).toBe(true); expect(P.pitHold).toBe(true);
+      expect(P.pitWait).toBe('queued');
+      expect(T.gapS(r.s(B), r.s(A))).toBeGreaterThan(T.CAR_LEN);
+      expect(T.gapS(r.s(P), r.s(B))).toBeGreaterThan(T.CAR_LEN);
+      expect(w.overlaps).toBe(0); expect(w.offences).toBe(0);
+    }
+  });
 });
 
 describe('occupancy', () => {
