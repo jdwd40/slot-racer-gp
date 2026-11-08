@@ -141,7 +141,7 @@ export class PitTraffic {
     }
     const assist = (c: Car, isMem: boolean, onlyHeld: Set<Car> | null): void => {
       const lead = this.leader(c, isMem, onlyHeld);
-      if (lead) { c.pitCap = lead.cap; if (lead.cap < PIT_Q.hold) { c.pitHold = true; c.pitWait = lead.bay ? 'bay' : 'queued'; } }
+      if (lead) { c.pitCap = lead.cap; if (lead.held) { c.pitHold = true; c.pitWait = lead.bay ? 'bay' : 'queued'; } }
       if (c.exitHold) { c.pitWait = 'exit'; c.pitHold = true; }
     };
     for (const c of cars) if (mem.has(c) && (c.mode === 'race' || c.mode === 'pitlane')) assist(c, true, null);
@@ -153,10 +153,10 @@ export class PitTraffic {
   }
 
   /** The nearest thing ahead on the car's own path and the speed that still stops short of it. */
-  leader(c: Car, isMem: boolean, onlyHeld: Set<Car> | null): { cap: number; bay: boolean } | null {
+  leader(c: Car, isMem: boolean, onlyHeld: Set<Car> | null): { cap: number; bay: boolean; held: boolean } | null {
     const r = this.r;
     const s = r.s(c);
-    let best: { cap: number; bay: boolean } | null = null;
+    let best: { cap: number; bay: boolean; held: boolean } | null = null;
     for (const o of r.cars) {
       if (o === c) continue;
       const counts = o.mode === 'race' || o.mode === 'pitlane' || o.mode === 'grid' || o.mode === 'bayIn' || this.merging(o);
@@ -169,7 +169,9 @@ export class PitTraffic {
       const vl = inBay(o) ? 0 : o.v;
       const room = g - T.CAR_LEN - PIT_Q.gap + (vl > 0 ? (vl * vl) / (2 * PIT_Q.leadBrake) : vl * 0.5);
       const cap = Math.sqrt(2 * PIT_Q.decel * Math.max(0, room));
-      if (!best || cap < best.cap) best = { cap, bay: inBay(o) };
+      // held: the cap stops the car, or it already stands at the stopping gap behind something standing still
+      const held = cap < PIT_Q.hold || (Math.abs(vl) < 0.05 && room < 0.3 && c.v < 0.3);
+      if (!best || cap < best.cap) best = { cap, bay: inBay(o), held };
     }
     return best;
   }
