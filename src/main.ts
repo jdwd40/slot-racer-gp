@@ -147,12 +147,13 @@ function controlsHtml(): string {
     ${row('<kbd>S</kbd><kbd>↓</kbd>', 'ctl.brake')}
     ${row('<kbd>Space</kbd>', 'ctl.lane')}
     ${row('<kbd>P</kbd>', 'ctl.pit')}
+    ${row('<kbd>N</kbd>', 'ctl.defer')}
     ${row('<kbd>C</kbd>', 'ctl.view')}
     ${row('<kbd>+</kbd><kbd>−</kbd> / 🖱', 'ctl.zoom')}
     ${row('<kbd>Esc</kbd>', 'ctl.pause')}
     ${row('<kbd>R</kbd>', 'ctl.restart')}
     ${row('<kbd>G</kbd>', 'ctl.ghost')}
-  </div>`;
+  </div><p class="rules"><small>${t('ctl.rules')}</small></p>`;
 }
 
 /** Small SVG map of a circuit for the track picker. */
@@ -330,15 +331,23 @@ function showResults(): void {
   if (mode === 'champ') { recordChampRound(); showChamp(race); return; }
   enter('results');
   const res = race.results();
+  const me = race.player;
   const pos = res.findIndex((r) => r.car.isPlayer) + 1;
-  const winner = res[0].time;
-  const rows = res.map((r, i) => `<tr class="${r.car.isPlayer ? 'me' : ''}"><td>${i + 1}</td><td>${colorDot(r.car.color)}${carLabel(r.car)}</td>
-    <td class="mono">${i === 0 ? fmt(r.time) : '+' + (r.time - winner).toFixed(1) + 's'}${r.est ? ` <small>(${t('res.est')})</small>` : ''}</td>
-    <td class="mono">${fmt(r.car.bestLap)}</td><td>${r.car.pitStops}</td><td>${flags(r.car) || '–'}</td></tr>`).join('');
+  // classified rows only get a position and a time; DQ and DNF rows say so instead and never inherit a place
+  const winner = res[0].status === 'finished' ? res[0].time : NaN;
+  const timeCell = (r: (typeof res)[number], i: number): string => {
+    if (r.status === 'dq') return `<td class="mono dq">${t('res.dq')}</td>`;
+    if (r.status === 'dnf') return `<td class="mono">${t('res.dnf')}</td>`;
+    return `<td class="mono">${i === 0 ? fmt(r.time) : '+' + (r.time - winner).toFixed(1) + 's'}${r.est ? ` <small>(${t('res.est')})</small>` : ''}</td>`;
+  };
+  const rows = res.map((r, i) => `<tr class="${r.car.isPlayer ? 'me' : ''}"><td>${r.status === 'finished' ? i + 1 : '–'}</td><td>${colorDot(r.car.color)}${carLabel(r.car)}</td>
+    ${timeCell(r, i)}
+    <td class="mono">${fmt(r.car.bestLap)}</td><td>${r.car.pitStops}</td><td>${flags(r.car) || '–'}${r.status === 'dq' ? ` <small>${t(`res.dqReason.${r.car.dqReason}`)}</small>` : ''}</td></tr>`).join('');
+  const place = me.status === 'dq' ? `${t('res.youDq')} · ${t(`res.dqReason.${me.dqReason}`)}` : me.status === 'finished' ? t('res.youPlace', { n: pos }) : t('res.youDnf');
   overlay.className = 'overlay show';
   overlay.innerHTML = `<div class="card results">
-    <h2>${pos === 1 ? '🏆 ' + t('res.win') : t('res.title')}</h2>
-    <div class="place">${t('res.youPlace', { n: pos })}</div>
+    <h2>${pos === 1 && me.status === 'finished' ? '🏆 ' + t('res.win') : t('res.title')}</h2>
+    <div class="place">${place}</div>
     <div class="tscroll"><table><thead><tr><th>#</th><th>${t('res.driver')}</th><th>${t('res.time')}</th><th>${t('res.best')}</th><th>${t('res.pits')}</th><th>${t('res.pen')}</th></tr></thead><tbody>${rows}</tbody></table></div>
     <div class="row"><button class="cta" id="o-again">${t('res.again')} <small>(R)</small></button><button class="cta alt" id="o-menu">${t('pause.menu')}</button></div>
   </div>`;
@@ -353,8 +362,7 @@ const driverColor = (idx: number): number => (idx === 0 ? R.livery(champ?.car ??
 /** Store the finished round's result once (points are never awarded twice). */
 function recordChampRound(): void {
   if (!champ || champRoundSaved || R.champDone(champ) || race.phase !== 'done') return;
-  const order = race.results().map((r) => ({ idx: r.car.idx, dnf: !r.car.finished && (r.car.mode === 'tow' || r.car.fuel <= 0), time: Math.round(r.time * 10) / 10 }));
-  champ.rounds.push({ track: T.DEF.id, order });
+  champ.rounds.push(R.roundRecord(T.DEF.id, race.results()));
   R.saveChamp(champ);
   champRoundSaved = true;
 }
@@ -378,7 +386,7 @@ function showChamp(finished: Race | null): void {
   const last = c.rounds[c.rounds.length - 1];
   let roundHtml = '';
   if (finished && last) {
-    const rows = last.order.map((o, i) => `<tr class="${o.idx === 0 ? 'me' : ''}"><td>${i + 1}</td><td>${colorDot(driverColor(o.idx))}${driverName(o.idx)}</td><td class="mono">${o.dnf ? t('champ.dnf') : fmt(o.time)}</td><td class="mono">${o.dnf ? 0 : R.CHAMP_POINTS[i]}</td></tr>`).join('');
+    const rows = last.order.map((o, i) => `<tr class="${o.idx === 0 ? 'me' : ''}"><td>${o.dq || o.dnf ? '–' : i + 1}</td><td>${colorDot(driverColor(o.idx))}${driverName(o.idx)}</td><td class="mono">${o.dq ? t('champ.dq') : o.dnf ? t('champ.dnf') : fmt(o.time)}</td><td class="mono">${R.roundPoints(last, i)}</td></tr>`).join('');
     roundHtml = `<h3>${t('champ.roundResults')} · ${t(`track.${last.track}.name`)}</h3>
       <div class="tscroll"><table><thead><tr><th>#</th><th>${t('res.driver')}</th><th>${t('res.time')}</th><th>${t('champ.points')}</th></tr></thead><tbody>${rows}</tbody></table></div>`;
   }
@@ -476,6 +484,7 @@ function onPlayerCross(): void {
 const input = new DrivingInput({
   lane: () => { if (screen === 'race') race.requestLane(); },
   pit: () => { if (screen === 'race') race.requestPit(); },
+  defer: () => { if (screen === 'race') race.requestDefer(); },
   view: () => toggleView(),
   pause: () => { if (screen === 'race') showPause(); else if (screen === 'pause') resume(); },
 });
@@ -676,12 +685,20 @@ function handle(e: RaceEvent): void {
       const reason = t(e.cause === 'cut' ? 'pen.reasonCut' : 'pen.reasonRear', { name: carLabel(e.other) });
       if (e.n === 1) { hud.toast(t('pen.warn1', { reason }), 'warn'); sfx.beep(); }
       else if (e.n === 2) { hud.toast(t('pen.warn2', { reason }), 'bad'); hud.goFlash(t('pen.flashFinal')); sfx.bad(); }
-      else if (e.n === 3 || e.car.sgOwed <= PEN.stopSeconds) { hud.toast(t('pen.stop', { reason, k: e.car.sgChances }), 'bad'); hud.goFlash(t('pen.flashStop')); sfx.bad(); }
+      else if (e.n === 3 || e.car.sgOwed <= PEN.stopSeconds) {
+        const late = e.car.sgDue > LAPS;
+        // a late award's consequence arrives as its own race message
+        if (!late) hud.toast(t('pen.stop', { reason, due: t(e.car.sgDue >= LAPS ? 'pen.due.final' : e.car.sgDue > race.apprLap(e.car) ? 'pen.due.next' : 'pen.due.due') }), 'bad');
+        hud.goFlash(t('pen.flashStop')); sfx.bad();
+      }
       else { hud.toast(t('pen.stopAdd', { n: PEN.stopSeconds, reason }), 'bad'); sfx.bad(); }
       break;
     }
     case 'served': if (!e.car.isPlayer) hud.toast(t('pen.aiServed', { name: e.car.name }), 'info'); break;
-    case 'timePen': if (!e.car.isPlayer) hud.toast(t('pen.aiTime', { name: e.car.name, n: e.secs }), 'info'); break;
+    case 'dq':
+      if (e.car === p) { sfx.bad(); hud.goFlash(t('res.dq')); } else hud.toast(t('pen.aiDq', { name: e.car.name }), 'info');
+      break;
+    case 'breach': if (e.car === p) hud.goFlash(t('pen.flashBreach')); break;
     case 'lap':
       if (e.car !== p) break;
       if (mode === 'practice') { pendingLap = e; break; }

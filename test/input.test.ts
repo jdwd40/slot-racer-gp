@@ -28,7 +28,7 @@ class FakeButton extends EventTarget implements PadButton {
 function rig() {
   const calls: TapAction[] = [];
   const log = (a: TapAction) => () => { calls.push(a); };
-  const input = new DrivingInput({ lane: log('lane'), pit: log('pit'), view: log('view'), pause: log('pause') });
+  const input = new DrivingInput({ lane: log('lane'), pit: log('pit'), defer: log('defer'), view: log('view'), pause: log('pause') });
   const throttle = new FakeButton({ hold: 'throttle' }), brake = new FakeButton({ hold: 'brake' });
   const lane = new FakeButton({ tap: 'lane' }), pit = new FakeButton({ tap: 'pit' });
   const gesture = vi.fn();
@@ -78,7 +78,7 @@ describe('DrivingInput sources', () => {
 
   it('maps the desktop keys unchanged', () => {
     expect(KEY_HOLDS).toEqual({ KeyW: 'throttle', ArrowUp: 'throttle', KeyS: 'brake', ArrowDown: 'brake' });
-    expect(KEY_TAPS).toEqual({ Space: 'lane', KeyP: 'pit' });
+    expect(KEY_TAPS).toEqual({ Space: 'lane', KeyP: 'pit', KeyN: 'defer' });
   });
 });
 
@@ -248,7 +248,7 @@ describe('reset', () => {
     const calls: string[] = [];
     const button = new FakeButton({ tap: 'pause' }), throttle = new FakeButton({ hold: 'throttle' });
     const nop = (): void => {};
-    const input = new DrivingInput({ lane: nop, pit: nop, view: nop, pause: () => { calls.push('pause'); pad.reset(); input.clear(); } });
+    const input = new DrivingInput({ lane: nop, pit: nop, defer: nop, view: nop, pause: () => { calls.push('pause'); pad.reset(); input.clear(); } });
     const pad: TouchPad = new TouchPad([button, throttle], input, nop);
     throttle.fire('pointerdown', 1);
     button.fire('pointerdown', 2);
@@ -273,26 +273,27 @@ describe('reset', () => {
 describe('same race behaviour as the keyboard', () => {
   beforeEach(() => seedRandom(9));
   afterEach(() => vi.restoreAllMocks());
-  const snapshot = (r: Race) => { const p = r.player; return { lane: p.laneReq, pit: p.pitReq, only: p.pitPenaltyOnly, over: p.laneOverride, route: r.nextRoute(p), cues: [laneCue(p, r.nextRoute(p)), pitCue(p)] }; };
-  function setup(side: number): { r: Race; P: Car; tap: (a: 'lane' | 'pit') => void } {
+  const held = (r: Race) => r.player.routeHold >= 0 && r.player.routeHold === r.apprLap(r.player);
+  const snapshot = (r: Race) => { const p = r.player; return { lane: p.laneReq, pit: p.pitReq, only: p.pitPenaltyOnly, over: p.laneOverride, fuelReq: p.fuelReq, fuelDue: p.fuelDue, sgDue: p.sgDue, hold: p.routeHold, route: r.nextRoute(p), cues: [laneCue(p, r.nextRoute(p)), pitCue(p, held(r))] }; };
+  function setup(side: number): { r: Race; P: Car; tap: (a: 'lane' | 'pit' | 'defer') => void } {
     const r = fresh('circuit-1');
     const P = r.player;
     P.isPlayer = true;
     place(P, T.SWITCHES[0].s0 - 8, side, 8);
-    const button = { lane: new FakeButton({ tap: 'lane' }), pit: new FakeButton({ tap: 'pit' }) };
+    const button = { lane: new FakeButton({ tap: 'lane' }), pit: new FakeButton({ tap: 'pit' }), defer: new FakeButton({ tap: 'defer' }) };
     const nop = (): void => {};
-    const input = new DrivingInput({ lane: () => r.requestLane(), pit: () => r.requestPit(), view: nop, pause: nop });
-    new TouchPad([button.lane, button.pit], input, nop);
+    const input = new DrivingInput({ lane: () => r.requestLane(), pit: () => r.requestPit(), defer: () => r.requestDefer(), view: nop, pause: nop });
+    new TouchPad([button.lane, button.pit, button.defer], input, nop);
     let id = 10;
-    const tap = (a: 'lane' | 'pit'): void => { id++; button[a].fire('pointerdown', id); button[a].fire('pointerup', id); button[a].fire('lostpointercapture', id); };
+    const tap = (a: 'lane' | 'pit' | 'defer'): void => { id++; button[a].fire('pointerdown', id); button[a].fire('pointerup', id); button[a].fire('lostpointercapture', id); };
     return { r, P, tap };
   }
 
   it.each([[-1, 'outside'], [1, 'inside']])('a tap sequence from the %s lane matches direct requests step by step', (side) => {
     const a = setup(side as number), b = setup(side as number);
-    for (const act of ['lane', 'lane', 'pit', 'lane', 'lane', 'lane', 'pit', 'pit'] as const) {
+    for (const act of ['lane', 'lane', 'pit', 'lane', 'lane', 'lane', 'pit', 'pit', 'defer', 'pit', 'defer', 'lane', 'pit'] as const) {
       a.tap(act);
-      if (act === 'lane') b.r.requestLane(); else b.r.requestPit();
+      if (act === 'lane') b.r.requestLane(); else if (act === 'pit') b.r.requestPit(); else b.r.requestDefer();
       expect(snapshot(a.r)).toEqual(snapshot(b.r));
     }
   });
@@ -313,17 +314,24 @@ describe('same race behaviour as the keyboard', () => {
     P.offences = 2;
     r.offence(P, r.cars[1], 'rear');
     expect(snapshot(r).cues).toEqual(['routed', 'compulsory']);
-    // Pit cannot cancel a stop-and-go: it adds a fuel stop on top and takes it off again
-    tap('pit');
-    expect(snapshot(r).cues).toEqual(['routed', 'armed']);
-    expect(P.pitReq).toBe(true);
+    // Pit cannot cancel a stop-and-go: it adds a fuel stop on top and takes it off again. The owed stop keeps the cue compulsory
     tap('pit');
     expect(snapshot(r).cues).toEqual(['routed', 'compulsory']);
+    expect(P.pitReq).toBe(true); expect(P.fuelReq).toBe(true);
+    tap('pit');
+    expect(snapshot(r).cues).toEqual(['routed', 'compulsory']);
+    expect(P.fuelReq).toBe(false);
+    // Defer releases this approach: no route, Pit shows held
+    r.phase = 'racing';
+    tap('defer');
+    expect(snapshot(r).cues).toEqual(['idle', 'held']);
+    expect(r.nextRoute(P)).toBeNull();
   });
 
   it('has a label for every state', () => {
     for (const s of ['idle', 'armed', 'routed', 'override']) expect(t(`touch.lane.${s}`)).not.toBe(`touch.lane.${s}`);
-    for (const s of ['idle', 'armed', 'compulsory']) expect(t(`touch.pit.${s}`)).not.toBe(`touch.pit.${s}`);
+    for (const s of ['idle', 'armed', 'compulsory', 'held']) expect(t(`touch.pit.${s}`)).not.toBe(`touch.pit.${s}`);
+    for (const id of ['touch.defer', 'touch.defer.idle', 'ctl.defer', 'ctl.rules']) expect(t(id)).not.toBe(id);
     for (const m of TOUCH_MODES) expect(t(`touch.${m}`)).not.toBe(`touch.${m}`);
   });
 });

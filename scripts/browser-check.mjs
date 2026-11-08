@@ -463,13 +463,13 @@ async function routing(run, c) {
   // stop-and-go: same routing with no P key
   await keys.release();
   await approach(ids[0]);
-  await read(page, () => { const r = window.__game.race, p = r.player; p.fuel = 1; p.offences = 2; r.offence(p, r.cars[2], 'rear'); p.sgSkipNext = false; });
+  const due0 = await read(page, () => { const r = window.__game.race, p = r.player; p.fuel = 1; p.offences = 2; r.offence(p, r.cars[2], 'rear'); return p.sgDue; });
   await frames(page, 3);
   c.ok('Stop-and-go: award alone shows the automatic route', (await chips()).includes(STRINGS['hud.routeOutsideMove']) && (await chips()).includes(STRINGS['hud.sgChip']), await chips());
   await keys.tap('Space');
   await frames(page, 3);
-  const over = await read(page, () => { const p = window.__game.race.player; return { sgOwed: p.sgOwed, sgChances: p.sgChances, pitReq: p.pitReq, override: p.laneOverride }; });
-  c.ok('Stop-and-go: override keeps the penalty and its deadline', over.override && over.pitReq && over.sgOwed === 3 && over.sgChances === 2, over);
+  const over = await read(page, () => { const p = window.__game.race.player; return { sgOwed: p.sgOwed, sgDue: p.sgDue, sgDeferred: p.sgDeferred, pitReq: p.pitReq, override: p.laneOverride }; });
+  c.ok('Stop-and-go: override keeps the penalty and its deadline', over.override && over.pitReq && over.sgOwed === 3 && over.sgDue === due0 && !over.sgDeferred, over);
   await keys.tap('Space');
   await frames(page, 3);
   const served = await driveUntil(s, (st) => st.sgOwed === 0, held);
@@ -546,7 +546,7 @@ async function controlled(run, c) {
   c.ok('Stop-and-go served in the box with no time penalty', served.mode === 'pitlane' && servedState.timePen === 0, servedState);
   c.ok('Served message shown', (await toast(page)).startsWith(text('msg.penServed')));
 
-  // an unserved stop becomes a time penalty on the real results screen
+  // an unserved stop disqualifies at the flag, on the real results screen
   await hit();
   const finish = await read(page, () => {
     const g = window.__game, T = g.T, r = g.race, p = r.player;
@@ -559,8 +559,8 @@ async function controlled(run, c) {
   await read(page, () => window.__game.advance(5));
   await keys.release();
   await waitFor(page, () => window.__game.screen === 'results');
-  const res = await read(page, () => { const r = window.__game.race, p = r.player; const mine = r.results().find((x) => x.car.isPlayer); return { timePen: p.timePen, time: mine.time, finishTime: p.finishTime, row: document.querySelector('.card.results tr.me').textContent }; });
-  c.ok('Unserved stop adds its time penalty at the flag and on the results screen', finish.owed === 3 && res.timePen === 10 && Math.abs(res.time - res.finishTime - 10) < 0.001 && res.row.includes('10'), res);
+  const res = await read(page, () => { const r = window.__game.race, p = r.player; const mine = r.results().find((x) => x.car.isPlayer); return { timePen: p.timePen, status: mine.status, reason: p.dqReason, est: r.results().some((x) => x.est), row: document.querySelector('.card.results tr.me').textContent, place: document.querySelector('.card.results .place').textContent, title: document.querySelector('.card.results h2').textContent }; });
+  c.ok('Unserved stop disqualifies at the flag: DQ row and reason on the results screen, no time penalty, no estimate', finish.owed === 3 && res.status === 'dq' && res.reason === 'stopGo' && res.timePen === 0 && !res.est && res.row.includes(STRINGS['res.dq']) && res.place.startsWith(STRINGS['res.youDq']) && !res.title.includes('🏆'), res);
 
   // lifecycle. Blur and hidden are synthetic events here: headless pages cannot really lose focus
   await setup();
@@ -770,7 +770,7 @@ class PadKeys {
     if (on) this.held.set(code, await this.fingers.put(code === 'KeyW' ? '#t-throttle' : '#t-brake'));
     else { await this.fingers.lift(this.held.get(code)); this.held.delete(code); }
   }
-  async tap(code) { await this.fingers.tap({ Space: '#t-lane', KeyP: '#t-pit', Escape: '#t-pause' }[code]); }
+  async tap(code) { await this.fingers.tap({ Space: '#t-lane', KeyP: '#t-pit', KeyN: '#t-defer', Escape: '#t-pause' }[code]); }
   async release() { for (const k of [...this.held.keys()]) await this.set(k, false); }
 }
 
@@ -1039,7 +1039,7 @@ async function touch(run, c) {
   c.ok('Pit, override, restore, cancel: touch and keyboard give the same states', JSON.stringify(byTouch) === JSON.stringify(byKey) && byTouch[1].lane === 'override', byTouch.map((x) => `${x.pitCue}/${x.lane}`));
 
   await placed();
-  await read(page, () => { const r = window.__game.race, p = r.player; p.fuel = 1; p.offences = 2; r.offence(p, r.cars[2], 'rear'); p.sgSkipNext = false; });
+  await read(page, () => { const r = window.__game.race, p = r.player; p.fuel = 1; p.offences = 2; r.offence(p, r.cars[2], 'rear'); });
   await frames(page, 2);
   const sg1 = await state(page);
   await f.tap('#t-pit');
@@ -1127,13 +1127,159 @@ async function touch(run, c) {
   return s;
 }
 
+/**
+ * Service obligations (docs/penalties.md): Defer by key and by touch, routing release and re-arm, the latched breach, DQ on the
+ * real results screen and in a championship round, and the Defer button's place at phone sizes. Scripted placement, then real keys
+ * and emulated touch: functional coverage only.
+ */
+async function service(run, c) {
+  const st = (page) => read(page, () => { const g = window.__game, r = g.race, p = r.player; return { fuelReq: p.fuelReq, fuelDue: p.fuelDue, sgOwed: p.sgOwed, sgDue: p.sgDue, sgDeferred: p.sgDeferred, hold: p.routeHold, appr: r.apprLap(p), pitReq: p.pitReq, route: !!r.nextRoute(p), mode: p.mode, breach: p.svcBreach, status: p.status, reason: p.dqReason, block: r.deferBlock(p), crossed: p.crossed, screen: g.screen, pitArrow: g.arrows.pit.visible, chips: document.getElementById('h-chips').textContent, status2: document.getElementById('h-status').textContent, toast: document.getElementById('h-toast').textContent, defer: !document.getElementById('t-defer').hidden, pitCue: document.getElementById('t-pit').dataset.cue, pitText: document.getElementById('t-pit-cue').textContent }; });
+  /** racing on lap `lap`, the player stopped on the outside lane `into` m past the line, rivals parked half a lap on (or by the line, `field`) */
+  const setup = (page, o) => read(page, (x) => {
+    const g = window.__game, T = g.T;
+    if (g.screen !== 'race') g.startSession(g.mode === 'champ' ? 'champ' : 'race');
+    if (g.race.phase === 'countdown') g.advance(7);
+    const r = g.race, p = r.player;
+    const put = (car, u, side, v) => Object.assign(car, { u, hiU: u, laneSide: side, d: side * T.LANE_HALF, v, change: null, mode: 'race', throttle: 0, graceT: 0, recoverT: 0, cutT: 0, pushedT: 0, revMark: null });
+    const into = x.into < 0 ? T.L + x.into : x.into; // negative: metres before the line that ends the lap
+    const u = T.FINISH_S + (x.lap - 1) * T.L + into;
+    r.cars.forEach((c2, i) => { if (!i) return; c2.crossed = x.lap; c2.lapsDone = x.lap - 1; put(c2, x.field ? u - 30 - i * 10 : u + T.L / 2 + i * 8, 1, x.field ? 14 : 0); });
+    p.crossed = x.lap; p.lapsDone = x.lap - 1; p.sectors = into > T.L / 2 ? 7 : 0;
+    put(p, u, -1, x.v ?? 0);
+    r.squeezeQ.length = 0;
+  }, o);
+  const award = (page) => read(page, () => { const r = window.__game.race, p = r.player; p.offences = 2; r.offence(p, r.cars[2], 'rear'); });
+
+  // ---- keyboard
+  const s = await open(run);
+  const { page, keys } = s;
+  await pickRaceSetup(page);
+  await page.click('#o-start');
+  await setup(page, { lap: 3, into: 60 });
+  await keys.tap('KeyP');
+  await frames(page, 3);
+  let a = await st(page);
+  c.ok('Optional request: chip says requested and optional, N offers deferral, nothing owed', a.fuelReq && a.fuelDue === 0 && a.chips.includes(STRINGS['hud.fuelReq']) && a.chips.includes(STRINGS['hud.deferKey']) && a.block === null, a);
+  await keys.tap('KeyN');
+  await frames(page, 3);
+  a = await st(page);
+  c.ok('N defers: fuel stop due next lap, route and pit arrow released for this approach, consequence shown', a.fuelDue === a.appr + 1 && a.hold === a.appr && !a.route && !a.pitArrow && a.chips.includes(STRINGS['hud.held']) && a.chips.includes(STRINGS['hud.dueChip.next']) && a.toast.startsWith(text('msg.deferred')), a);
+  await page.screenshot({ path: path.join(run.out, 'service-deferred.png') });
+  const due = a.fuelDue;
+  await keys.tap('KeyN');
+  await frames(page, 2);
+  const again = await st(page);
+  await keys.tap('KeyP');
+  await frames(page, 2);
+  const back = await st(page);
+  await keys.tap('KeyP');
+  await frames(page, 2);
+  const noCancel = await st(page);
+  c.ok('Second N refused, P brings the route back, a further P cannot cancel, and the deadline never moves', again.toast.startsWith(text('msg.deferHeld')) && back.route && back.toast.startsWith(text('msg.pitUndefer')) && noCancel.toast.startsWith(text('msg.pitDue')) && noCancel.pitReq && [again, back, noCancel].every((x) => x.fuelDue === due), { again: again.toast, back: back.toast, noCancel: noCancel.toast, due });
+  await keys.tap('KeyN'); // release this approach again
+  await frames(page, 2);
+  // drive past the released entrance with real keys: no entry, then routing re-arms for the due lap
+  await read(page, () => { const g = window.__game, T = g.T, p = g.race.player; Object.assign(p, { u: 2 * T.L + T.L + T.PIT_IN0 - 6, v: 8 }); p.hiU = p.u; });
+  await keys.set('KeyW', true);
+  await waitFor(page, () => { const g = window.__game, T = g.T, p = g.race.player; return p.u > 3 * T.L + T.PIT_IN0 + 2 || p.mode !== 'race'; }, undefined, 30000);
+  await keys.set('KeyW', false);
+  await frames(page, 3);
+  a = await st(page);
+  c.ok('Released approach passed without entering; routing re-armed for the due lap', a.mode === 'race' && a.hold === -1 && a.pitReq && a.route && a.fuelDue === due && a.block === 'used', a);
+  // miss it on the due lap: the breach is latched at the line and shown at once
+  await setup(page, { lap: due, into: -3, v: 12 });
+  await keys.set('KeyW', true);
+  await waitFor(page, (n) => window.__game.race.player.crossed > n, due, 30000);
+  await keys.set('KeyW', false);
+  await frames(page, 3);
+  a = await st(page);
+  c.ok('Missed due lap: breach latched and shown at once, the race carries on', a.breach === 'fuel' && a.status === 'running' && a.chips.includes(STRINGS['hud.breach']) && a.toast.startsWith(text('msg.breachFuel')), a);
+  await page.screenshot({ path: path.join(run.out, 'service-breach.png') });
+  // the flag: DQ, results reached, no estimate anywhere
+  await setup(page, { lap: LAPS, into: -3, v: 12, field: true });
+  await keys.set('KeyW', true);
+  await waitFor(page, () => window.__game.race.player.finished, undefined, 30000);
+  await keys.set('KeyW', false);
+  await waitFor(page, () => window.__game.screen === 'results', undefined, 30000);
+  const res = await read(page, () => { const r = window.__game.race; return { rows: r.results().map((x) => ({ s: x.status, est: x.est })), me: document.querySelector('.card.results tr.me').textContent, place: document.querySelector('.card.results .place').textContent, title: document.querySelector('.card.results h2').textContent, reason: r.player.dqReason }; });
+  c.ok('Flag: DQ (missed deadline) on the real results screen, below the classified finishers, no trophy, no estimates', res.reason === 'deadline' && res.me.includes(STRINGS['res.dq']) && res.place.startsWith(STRINGS['res.youDq']) && !res.title.includes('🏆') && res.rows[res.rows.length - 1].s === 'dq' && res.rows.every((x) => !x.est && x.s !== 'running'), res);
+  await page.screenshot({ path: path.join(run.out, 'service-dq-results.png') });
+  await keys.tap('KeyR');
+  await frames(page, 2);
+  a = await st(page);
+  c.ok('Race Again starts with no obligation, hold or breach', a.status === 'running' && !a.fuelReq && a.fuelDue === 0 && a.sgOwed === 0 && a.hold === -1 && a.breach === null, a);
+  c.ok('Keyboard part: no page or console errors', s.errors.length === 0, s.errors.slice(0, 5));
+  await s.context.close();
+
+  // ---- championship: a DQ round is stored as a DQ and scores nothing
+  const round = (track) => ({ track, order: [0, 1, 2, 3].map((idx, i) => ({ idx, dnf: false, time: 300 + i })) });
+  const champ = JSON.stringify({ v: 1, car: CAR, initials: 'QA', rounds: [round('circuit-1'), round('circuit-2')], startedAt: 1 });
+  const ch = await open(run, { fixtures: { 'srgp.champ': champ } });
+  {
+    const { page, keys } = ch;
+    await page.click('#o-champ-cont');
+    await frames(page, 2);
+    await setup(page, { lap: LAPS, into: -3, v: 12, field: true });
+    await read(page, () => { window.__game.race.player.svcBreach = 'stopGo'; });
+    await keys.set('KeyW', true);
+    await waitFor(page, () => window.__game.screen === 'champ', undefined, 30000);
+    await keys.release();
+    await frames(page, 2);
+    const saved = await read(page, () => JSON.parse(localStorage.getItem('srgp.champ')));
+    const last = saved.rounds[2];
+    const row = await read(page, () => document.querySelector('.card.champ tr.me')?.textContent ?? '');
+    const pts = await read(page, () => window.__game.R.standings(window.__game.R.loadChamp(), 4).find((x) => x.idx === 0).points);
+    c.ok('Championship: the DQ round is stored once as a DQ with no points, earlier rounds unchanged', saved.rounds.length === 3 && last.order[last.order.length - 1].idx === 0 && last.order[last.order.length - 1].dq === true && row.includes(STRINGS['champ.dq']) && JSON.stringify(saved.rounds.slice(0, 2)) === JSON.stringify(JSON.parse(champ).rounds) && pts === 20, { last, row, pts });
+    await page.screenshot({ path: path.join(run.out, 'service-champ-dq.png') });
+  }
+  c.ok('Championship part: no page or console errors', ch.errors.length === 0, ch.errors.slice(0, 5));
+  await ch.context.close();
+
+  // ---- emulated touch, phone sizes
+  const t = await open(run, { viewport: { width: 360, height: 640 }, dpr: 2, device: PHONE });
+  {
+    const { page } = t;
+    const cdp = await t.context.newCDPSession(page);
+    const f = new Fingers(page, cdp);
+    await page.locator('#o-start').tap();
+    await waitFor(page, () => window.__game.screen === 'race');
+    await setup(page, { lap: 3, into: 60 });
+    await award(page);
+    for (const [w, h] of [[360, 640], [640, 360]]) {
+      await page.setViewportSize({ width: w, height: h });
+      await frames(page, 3);
+      a = await st(page);
+      const m = await read(page, measureHud, [...CONTROLS, 't-defer']);
+      const sized = m.controls.every((r) => r.x >= 0 && r.y >= 0 && r.r <= w && r.b <= h && r.w >= 48 && r.h >= 48 && r.top === r.id);
+      c.ok(`Touch ${w}x${h}: Defer shown for a stop-and-go due this lap, on screen, 48 px or more, nothing overlapping`, a.defer && sized && m.pairs.length === 0 && m.gap >= 8, { overlaps: m.pairs, gap: m.gap, chips: a.chips, status: a.status2 });
+      await page.screenshot({ path: path.join(run.out, `service-defer-${w}x${h}.png`) });
+    }
+    const due2 = (await st(page)).sgDue;
+    await f.tap('#t-defer');
+    await frames(page, 3);
+    a = await st(page);
+    c.ok('Touch Defer: stop-and-go moved one lap and its deferral used, Pit shows next lap, Defer hidden', a.sgDue === due2 + 1 && a.sgDeferred && !a.defer && a.pitCue === 'held' && a.pitText === STRINGS['touch.pit.held'] && !a.route, a);
+    // final lap with the box occupied: queue, no deferral
+    await setup(page, { lap: LAPS, into: 60 });
+    await read(page, () => { const g = window.__game, T = g.T, r = g.race, o = r.cars[3]; Object.assign(o, { mode: 'pitlane', u: (13 - 1) * T.L + T.PEN_S + T.L, v: 0 }); o.d = T.pitD(o.u); o.hiU = o.u; o.sgOwed = 3; o.sgDue = 13; o.sgDeferred = true; });
+    await read(page, () => { const p = window.__game.race.player; p.sgOwed = 0; p.sgDue = 0; p.sgDeferred = false; });
+    await award(page);
+    await frames(page, 3);
+    a = await st(page);
+    c.ok('Touch final lap, box occupied: Defer not offered, Pit compulsory, status says queue', !a.defer && a.block === 'final' && a.pitCue === 'compulsory' && a.status2.includes(STRINGS['hud.boxBusyFinal']), a);
+    await page.screenshot({ path: path.join(run.out, 'service-final-640x360.png') });
+  }
+  c.ok('Touch part: no page or console errors', t.errors.length === 0, t.errors.slice(0, 5));
+  return t;
+}
+
 // ------------------------------------------------------------ responsive layouts
 const LAYOUTS = [['phone portrait, small', 360, 640], ['phone portrait', 390, 844], ['phone landscape, small', 640, 360], ['phone landscape', 844, 390], ['tablet portrait', 768, 1024]];
 const CONTROLS = ['t-throttle', 't-brake', 't-lane', 't-pit', 't-pause'];
 const held2 = (page) => read(page, () => { const i = window.__game.input; return { throttle: i.held('throttle'), brake: i.held('brake') }; });
 
 /** Worst case for the HUD: a stop-and-go owed on the pit route, low fuel, a time penalty and a long message at once. Layout only: the race is not played on from here. */
-const crowdHud = (page) => read(page, () => { const g = window.__game, p = g.race.player; p.fuel = 0.05; p.sgOwed = 5; p.sgChances = 2; p.timePen = 10; p.pitReq = true; p.pitPenaltyOnly = true; p.laneOverride = true; p.finished = false; document.getElementById('h-toast').textContent = 'Second contact with Green Viper. One more and you serve a stop-and-go penalty'; document.getElementById('h-toast').className = 'toast show warn'; });
+const crowdHud = (page) => read(page, () => { const g = window.__game, p = g.race.player; p.fuel = 0.05; p.sgOwed = 5; p.sgDue = g.race.apprLap(p); p.fuelDue = p.sgDue + 1; p.svcBreach = 'fuel'; p.timePen = 10; p.pitReq = true; p.pitPenaltyOnly = true; p.laneOverride = true; p.finished = false; document.getElementById('h-toast').textContent = 'Second contact with Green Viper. One more and you serve a stop-and-go penalty'; document.getElementById('h-toast').className = 'toast show warn'; });
 
 /** Geometry of the racing HUD: what is on screen, what touches what, and how much of the track is left. */
 function measureHud(ids) {
@@ -1274,7 +1420,7 @@ async function responsive(run, c) {
       if (w === 360) await shot(page, 'race-tray-360x640');
       await f.tap('#b-more');
     }
-    await read(page, () => { const p = window.__game.race.player; p.fuel = 1; p.sgOwed = 0; p.timePen = 0; p.pitReq = false; p.pitPenaltyOnly = false; p.laneOverride = false; document.getElementById('h-toast').className = 'toast'; });
+    await read(page, () => { const p = window.__game.race.player; p.fuel = 1; p.sgOwed = 0; p.sgDue = 0; p.fuelDue = 0; p.svcBreach = null; p.timePen = 0; p.pitReq = false; p.pitPenaltyOnly = false; p.laneOverride = false; document.getElementById('h-toast').className = 'toast'; });
   }
 
   // tray actions with a finger already down
@@ -1517,7 +1663,7 @@ async function reverse(run, c) {
     const r = g.race, p = r.player;
     r.cars.forEach((o2, i) => { if (i) { o2.u = p.u + T.L / 2 + i * 8; o2.laneSide = 1; o2.d = T.LANE_HALF; o2.mode = 'race'; o2.change = null; } });
     r.squeezeQ.length = 0;
-    Object.assign(p, { u: o.s, v: 0, change: null, laneSide: -1, mode: o.pit ? 'pitlane' : 'race', d: o.pit ? T.pitD(o.s) : -T.LANE_HALF, throttle: 0, revMark: null, serviced: false, fuel: o.fuel ?? 1, sgOwed: o.sgOwed ?? 0, sgChances: o.sgOwed ? 2 : 0, sgServed: 0, sgServing: false });
+    Object.assign(p, { u: o.s, v: 0, change: null, laneSide: -1, mode: o.pit ? 'pitlane' : 'race', d: o.pit ? T.pitD(o.s) : -T.LANE_HALF, throttle: 0, revMark: null, serviced: false, fuel: o.fuel ?? 1, sgOwed: o.sgOwed ?? 0, sgDue: o.sgOwed ? 99 : 0, sgServed: 0, sgServing: false });
     if (o.sgOwed) { p.pitReq = true; p.pitPenaltyOnly = true; }
   }, x);
   const P = (page) => read(page, () => { const g = window.__game, r = g.race, p = r.player, T = g.T; return { s: T.wrapS(p.u), v: p.v, revOn: p.revOn, latch: p.revLatch, mode: p.mode, sgOwed: p.sgOwed, sgServing: p.sgServing, timePen: p.timePen, bay: p.bay, pitStops: p.pitStops, screen: g.screen, chips: document.getElementById('h-chips').textContent, brakeCue: document.getElementById('t-brake').dataset.cue, brakeText: document.getElementById('t-brake-cue').textContent }; });
@@ -1619,8 +1765,8 @@ async function perf(run) {
 }
 
 // ------------------------------------------------------------ cli
-const SCENARIOS = { tracks, race, controlled, routing, practice, championship, touch, responsive, touchrace, reverse };
-const USAGE = 'usage: browser-check.mjs [tracks|race|controlled|routing|practice|championship|touch|responsive|touchrace|reverse ...] | perf | compare <a.json> <b.json>\n'
+const SCENARIOS = { tracks, race, controlled, routing, practice, championship, touch, responsive, touchrace, reverse, service };
+const USAGE = 'usage: browser-check.mjs [tracks|race|controlled|routing|practice|championship|touch|responsive|touchrace|reverse|service ...] | perf | compare <a.json> <b.json>\n'
   + 'options: --dist <dir> --url <url> --commit <sha> --machine <name> --label <name> --viewport WxH --dpr N --preset low|balanced|high\n'
   + '         --seconds N --headed --channel <chrome|msedge> --out <dir> --max-minutes N';
 

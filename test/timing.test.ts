@@ -406,7 +406,7 @@ describe('bookkeeping and input on every step', () => {
     const r = fresh(); park(r);
     const c = r.cars[0]; c.isPlayer = true;
     place(c, T.PEN_S, -1, 0);
-    c.mode = 'pitlane'; c.d = T.pitD(T.PEN_S); c.sgOwed = PEN.stopSeconds; c.sgChances = 1;
+    c.mode = 'pitlane'; c.d = T.pitD(T.PEN_S); c.sgOwed = PEN.stopSeconds; c.sgDue = 2;
     const s = new Session(r);
     let wall = 0;
     for (let i = 0; i <= 80 && !s.count('served'); i++) { wall = i / 10; s.frame(i * 100); }

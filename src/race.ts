@@ -20,10 +20,24 @@ export const PEN = {
   cutInWindow: 1.0,    // seconds after completing a lane change in which the changer is blamed for contact from behind
   chainWindow: 0.5,    // seconds after being hit from behind in which a car is not blamed for being pushed into the next one
   stopSeconds: 3,      // stationary time for one stop-and-go
-  opportunities: 2,    // reachable pit entrances in which to serve it
   minEntryDist: 6,     // an entrance closer than this (in the outside lane) is already unreachable
-  unservedDetour: 7,   // result-time penalty = this + the outstanding stop (exceeds the time a pit detour costs)
 };
+
+/**
+ * Service obligations (see docs/penalties.md). A stop-and-go is due by the end of the lap of its first reachable pit entrance;
+ * a deferred fuel stop by the end of the next lap. Each obligation may be put back one lap, once, and never past the final lap.
+ * A deadline still unmet at its lap's timing-line crossing latches a breach, and the car is disqualified when it finishes.
+ */
+/** stationary service in a bay before the car may leave: the same time a deferred fuel stop needs to count */
+export const SERVICE_READY = 0.5;
+/** simulated seconds the field is run on for after the race ends, so every car gets a real result rather than an estimate */
+export const RUN_OUT_MAX = 240;
+export type CarStatus = 'running' | 'finished' | 'dq' | 'dnf';
+export type DqReason = 'deadline' | 'stopGo' | 'fuel';
+/** why Defer is not available now, or null when it is */
+export type DeferBlock = 'phase' | 'none' | 'pit' | 'held' | 'used' | 'final';
+/** where an obligation stands against the lap being raced */
+export type DueState = 'none' | 'next' | 'due' | 'overdue' | 'late';
 
 /**
  * Player reverse gear, for backing into an overshot pit bay, penalty box or pit entrance (see docs/reverse.md).
@@ -84,9 +98,32 @@ export interface Car {
   idx: number; name: string; color: number; isPlayer: boolean;
   u: number; v: number; laneSide: number;
   change: { from: number; to: number; s0: number; s1: number } | null;
-  laneReq: boolean; pitReq: boolean;
-  /** pitReq exists only because of a stop-and-go: serving or converting it ends the request (false keeps a chosen fuel stop) */
+  laneReq: boolean;
+  /** lane routing and pit entry: the car will route outside and enter at the next entrance. A routing state, never a debt */
+  pitReq: boolean;
+  /** pitReq exists only because of a stop-and-go (no fuel reason): serving it ends the request */
   pitPenaltyOnly: boolean;
+  /** optional fuel stop the player asked for with Pit. Never a debt by itself: cancelling or skipping it costs nothing */
+  fuelReq: boolean;
+  /** committed (deferred) fuel stop, due by the end of this lap; 0 when none is owed */
+  fuelDue: number;
+  /** stop-and-go due by the end of this lap while sgOwed > 0; 0 when none is owed */
+  sgDue: number;
+  /** the stop-and-go owed now has used its one deferral */
+  sgDeferred: boolean;
+  /** approach whose routing a deferral released (-1 none); routing re-arms once the car is past it */
+  routeHold: number;
+  /** approach at which a manual lane override was last used (-1 none) */
+  overAppr: number;
+  /** furthest distance ever reached: approaches are counted from it, so reversing or a re-slot never brings one back */
+  hiU: number;
+  /** latched missed service deadline: nothing clears it, and the car is disqualified at the flag */
+  svcBreach: 'stopGo' | 'fuel' | null;
+  /** the bay service in progress came from a tow, which is recovery, not a pit visit */
+  towSvc: boolean;
+  /** terminal result: finished means classified; dq and dnf are never classified */
+  status: CarStatus;
+  dqReason: DqReason | null;
   /** one-switch manual choice of the inside lane while pit routing is active */
   laneOverride: boolean;
   mode: Mode; d: number; yawOff: number;
@@ -108,7 +145,7 @@ export interface Car {
   serviced: boolean;
   persona: Persona;
   // rear-end offences: warnings, outstanding stop-and-go, service progress and result-time penalty
-  offences: number; sgOwed: number; sgServed: number; sgServing: boolean; sgChances: number; sgSkipNext: boolean; timePen: number;
+  offences: number; sgOwed: number; sgServed: number; sgServing: boolean; timePen: number;
   /** immunity timers: fresh respawn/pit exit/start, recently hit from behind, recently changed lane */
   graceT: number; pushedT: number; cutT: number;
   // AI defending state
@@ -133,10 +170,11 @@ export type RaceEvent =
   | { type: 'switch'; car: Car }
   | { type: 'lap'; car: Car; time: number; best: boolean; valid: boolean; lapsDone: number }
   | { type: 'finish'; car: Car; pos: number }
+  | { type: 'dq'; car: Car; reason: DqReason }
+  | { type: 'breach'; car: Car; what: 'stopGo' | 'fuel' }
   | { type: 'tow'; car: Car }
   | { type: 'offence'; car: Car; other: Car; n: number; cause: 'rear' | 'cut'; stop: boolean }
   | { type: 'served'; car: Car }
-  | { type: 'timePen'; car: Car; secs: number; reason: 'missed' | 'unserved' }
   | { type: 'go' }
   | { type: 'light'; n: number };
 
@@ -155,6 +193,8 @@ export const DRIVERS: { name: string; color: number; persona: PersonaId }[] = [
   { name: 'Blue Arrow', color: 0x2a6df0, persona: 'consistent' },
   { name: 'Green Viper', color: 0x22b04b, persona: 'tactical' },
 ];
+
+const STATUS_RANK: Record<CarStatus, number> = { finished: 0, running: 1, dnf: 2, dq: 3 };
 
 function rnd(a: number, b: number): number { return a + Math.random() * (b - a); }
 
@@ -188,6 +228,8 @@ export class Race {
       const c: Car = {
         idx: g.di, name: D.name, color: g.di === 0 && opts.playerColor !== undefined ? opts.playerColor : D.color, isPlayer: g.di === 0,
         u: T.FINISH_S + g.prog, v: 0, laneSide: g.side, change: null, laneReq: false, pitReq: false, pitPenaltyOnly: false, laneOverride: false,
+        fuelReq: false, fuelDue: 0, sgDue: 0, sgDeferred: false, routeHold: -1, overAppr: -1, hiU: T.FINISH_S + g.prog,
+        svcBreach: null, towSvc: false, status: 'running', dqReason: null,
         mode: 'grid', d: g.side * T.LANE_HALF, yawOff: 0, throttle: 0, brake: 0,
         fuel: 1, slip: 0, latRatio: 0, wobble: 0, off: null, recoverT: 0, towT: 0,
         bay: g.di, bayT: 0, serviceT: 0, penalty: 0, fuelAtBay: 0,
@@ -196,7 +238,7 @@ export class Race {
         squeezeHold: false, yielding: false, waitingClear: false,
         skill: P.skill, lapse: 0, mistakeT: rnd(P.mistakeEvery[0], P.mistakeEvery[1]), pitPlan: false, refuelTarget: 1, changeCooldown: 0,
         lowFuelWarned: false, serviced: false, persona: P,
-        offences: 0, sgOwed: 0, sgServed: 0, sgServing: false, sgChances: 0, sgSkipNext: false, timePen: 0,
+        offences: 0, sgOwed: 0, sgServed: 0, sgServing: false, timePen: 0,
         graceT: 0, pushedT: 0, cutT: 0,
         threatIdx: -1, reactT: 0, defendOk: false, defendCooldown: 0, defendPending: false, defendSw: -1,
         x: 0, y: 0, h: 0, z: 0, roll: 0, pitch: 0, bumpT: 0,
@@ -232,30 +274,107 @@ export class Race {
   requestPit(): void {
     const c = this.player;
     if (c.finished || (c.mode !== 'race' && c.mode !== 'grid')) return;
+    if (c.routeHold >= 0 && c.routeHold === this.apprLap(c)) {
+      // Pit after a deferral: stop on this approach after all. Deadlines and the used deferral are unchanged
+      c.routeHold = -1; this.syncRoute(c);
+      this.pmsg(c, 'msg.pitUndefer', 'info');
+      return;
+    }
+    if (c.fuelDue > 0) {
+      // a committed fuel stop cannot be toggled away
+      this.syncRoute(c);
+      this.pmsg(c, 'msg.pitDue', 'warn');
+      return;
+    }
     if (c.sgOwed > 0) {
-      // the stop-and-go cannot be cancelled: P only adds or drops a fuel stop that outlives it
-      this.armPenaltyRoute(c);
-      c.pitPenaltyOnly = !c.pitPenaltyOnly;
+      // the stop-and-go cannot be cancelled: P only adds or drops an optional fuel stop that outlives it
+      c.fuelReq = !c.fuelReq;
+      this.syncRoute(c);
       this.pmsg(c, 'msg.pitRequired', 'warn');
-      if (!c.pitPenaltyOnly) this.pmsg(c, 'msg.pitFuelToo', 'info');
+      if (c.fuelReq) this.pmsg(c, 'msg.pitFuelToo', 'info');
       return;
     }
     if (c.pitReq) { this.clearPitIntent(c); this.pmsg(c, 'msg.pitCancelled', 'warn'); return; }
-    c.pitReq = true; c.laneReq = false;
+    c.pitReq = true; c.fuelReq = true; c.laneReq = false;
     const outside = c.change ? c.change.to < 0 : c.laneSide < 0;
     this.pmsg(c, outside ? 'msg.pitRequested' : 'msg.pitNeedLane', outside ? 'info' : 'warn');
+  }
+
+  /**
+   * Defer to next lap (N, or the touch Defer button). Allowed once per obligation while the approach is still avoidable,
+   * never on the final lap. An optional fuel request becomes a committed fuel stop due next lap; a stop-and-go due on this
+   * approach moves to the next lap's. Routing is released for this approach only and re-arms beyond it.
+   */
+  requestDefer(): void {
+    const c = this.player;
+    if (c.finished) return;
+    const why = this.deferBlock(c);
+    if (why) {
+      const msg: Record<DeferBlock, string> = { phase: '', none: 'msg.deferNone', pit: 'msg.deferPit', held: 'msg.deferHeld', used: 'msg.deferUsed', final: 'msg.deferFinal' };
+      if (msg[why]) this.pmsg(c, msg[why], 'warn');
+      return;
+    }
+    const k = this.apprLap(c);
+    if (c.fuelReq) { c.fuelReq = false; c.fuelDue = k + 1; }
+    if (c.sgOwed > 0 && c.sgDue <= k) { c.sgDue = k + 1; c.sgDeferred = true; }
+    c.routeHold = k;
+    this.syncRoute(c);
+    this.pmsg(c, 'msg.deferred', 'warn');
+  }
+
+  /** Why Defer cannot be used now, or null. Read by the HUD and touch pad as well, so they only offer it when it works. */
+  deferBlock(c: Car): DeferBlock | null {
+    if (this.practice || this.phase !== 'racing' || c.finished || !c.isPlayer) return 'phase';
+    const k = this.apprLap(c);
+    const sgNow = c.sgOwed > 0 && c.sgDue <= k;
+    const fuelNow = c.fuelDue > 0 && c.fuelDue <= k;
+    if (!c.fuelReq && c.sgOwed <= 0 && c.fuelDue <= 0) return 'none';
+    if (c.mode === 'off' || c.mode === 'tow') return 'phase';   // nothing to choose until the car is back on the road
+    if (c.mode !== 'race') return 'pit';
+    if (c.routeHold === k) return 'held';
+    if (fuelNow || (sgNow && (c.sgDeferred || c.sgDue < k))) return 'used';
+    if (k + 1 > LAPS) return 'final';
+    return null;
+  }
+
+  /**
+   * The pit approach the car is heading for, numbered by lap: the entrance on lap n is approach n. Counted from the furthest
+   * distance ever reached, so reversing over the entrance, a re-slot behind it or a pause never brings an approach back.
+   */
+  apprLap(c: Car): number { return Math.floor((c.hiU - T.PIT_IN0) / T.L) + 1; }
+
+  /** Where an obligation due by the end of lap `due` stands against the lap being raced. */
+  dueState(c: Car, due: number): DueState {
+    if (due <= 0) return 'none';
+    if (due > LAPS) return 'late';
+    const lap = Math.max(1, c.crossed);
+    return due > lap ? 'next' : due === lap ? 'due' : 'overdue';
+  }
+
+  /** Another car is standing in (or rolling through) the stop-and-go box. */
+  boxBusy(c: Car): boolean {
+    return this.cars.some((o) => o !== c && o.mode === 'pitlane' && Math.abs(T.gapS(this.s(o), T.PEN_S)) < T.PEN_HALF);
   }
 
   /** Pit routing applies: only the player is assisted, the AI makes its own lane decisions. */
   pitAssist(c: Car): boolean { return c.isPlayer && c.pitReq && !c.finished; }
 
-  /** A stop-and-go routes like a pit request; a fuel stop already armed keeps its own reason. */
-  armPenaltyRoute(c: Car): void {
-    if (c.pitReq || c.finished) return;
-    c.pitReq = true; c.pitPenaltyOnly = true; c.laneReq = false;
+  /**
+   * Player routing from the visit reasons: any owed stop or fuel request routes to the next entrance, except the approach
+   * a deferral released. Never clears a debt; an optional request the car still holds keeps routing on.
+   */
+  syncRoute(c: Car): void {
+    if (!c.isPlayer) return;
+    if (c.finished) { c.pitReq = false; c.fuelReq = false; c.pitPenaltyOnly = false; c.laneOverride = false; return; }
+    const k = this.apprLap(c);
+    if (c.routeHold >= 0 && c.routeHold < k) c.routeHold = -1;
+    if (c.routeHold === k) { c.pitReq = false; c.laneOverride = false; }
+    else if ((c.sgOwed > 0 || c.fuelDue > 0 || c.fuelReq) && !c.pitReq) { c.pitReq = true; c.laneReq = false; }
+    c.pitPenaltyOnly = c.pitReq && c.sgOwed > 0 && !c.fuelReq && c.fuelDue <= 0;
   }
 
-  clearPitIntent(c: Car): void { c.pitReq = false; c.pitPenaltyOnly = false; c.laneOverride = false; }
+  /** Routing state only: debts (stop-and-go, committed fuel stop) are untouched. */
+  clearPitIntent(c: Car): void { c.pitReq = false; c.pitPenaltyOnly = false; c.fuelReq = false; c.laneOverride = false; }
 
   /** What pit routing will do at the next switch; null when no routing applies on the road. Drives the switch logic, HUD and arrows. */
   nextRoute(c: Car): { to: number; stay: boolean; override: boolean } | null {
@@ -265,13 +384,26 @@ export class Race {
     return { to, stay: to === side, override: c.laneOverride };
   }
 
+  /** Classified finishers by time, then cars still running by distance, then DNF, then DQ. `finished` alone never classifies. */
   order(): Car[] {
     return [...this.cars].sort((a, b) => {
-      if (a.finished && b.finished) return a.finishTime + a.timePen - (b.finishTime + b.timePen);
-      if (a.finished) return -1;
-      if (b.finished) return 1;
+      const r = STATUS_RANK[a.status] - STATUS_RANK[b.status];
+      if (r) return r;
+      if (a.status === 'finished') return a.finishTime + a.timePen - (b.finishTime + b.timePen);
       return b.u - a.u;
     });
+  }
+
+  /**
+   * Once the player is done, run the rest of the field on to the flag (no rendering) so every car gets a real result.
+   * Anything still running after RUN_OUT_MAX is a DNF. Only finish and DQ events are kept from the run.
+   */
+  runOut(maxSec = RUN_OUT_MAX): void {
+    const keep = this.events.length;
+    const idle: Input = { up: false, down: false };
+    for (let t = 0; t < maxSec && this.cars.some((c) => c.status === 'running'); t += 1 / 120) this.step(1 / 120, idle);
+    for (const c of this.cars) if (c.status === 'running') { c.status = 'dnf'; c.finished = true; }
+    this.events = [...this.events.slice(0, keep), ...this.events.slice(keep).filter((e) => e.type === 'finish' || e.type === 'dq')];
   }
 
   nextSwitch(c: Car): T.Switch {
@@ -303,7 +435,7 @@ export class Race {
     this.collide();
     for (const c of this.cars) this.pose(c);
     if (this.player.finished && this.playerDoneT < 0) this.playerDoneT = this.t;
-    if (this.playerDoneT >= 0 && this.t - this.playerDoneT > 3.2 && this.phase !== 'done') this.phase = 'done';
+    if (this.playerDoneT >= 0 && this.t - this.playerDoneT > 3.2 && this.phase !== 'done') { this.phase = 'done'; this.runOut(); }
   }
 
   // ---------------------------------------------------------------- car step
@@ -388,13 +520,13 @@ export class Race {
     if (c.fuel > LOW_FUEL + 0.05) c.lowFuelWarned = false;
 
     if (c.mode === 'race') {
-      // an owed stop-and-go keeps routing on, including after a pit exit or tow that did not serve it
-      if (c.isPlayer && c.sgOwed > 0) this.armPenaltyRoute(c);
+      // an owed stop keeps routing on, including after a pit exit or tow that did not serve it; a deferral releases one approach
+      if (c.isPlayer) this.syncRoute(c);
       // lane switches
       for (const sw of T.SWITCHES) {
         if (!fresh(sw.s0)) continue;
         const route = this.nextRoute(c);
-        if (route) { c.laneReq = !route.stay && !c.change; c.laneOverride = false; }
+        if (route) { c.laneReq = !route.stay && !c.change; if (route.override) c.overAppr = this.apprLap(c); c.laneOverride = false; }
         if (c.laneReq && !c.change) {
           c.laneReq = false;
           const to = c.laneSide > 0 ? -1 : 1;
@@ -418,7 +550,7 @@ export class Race {
         if (p >= len && p < len + 20) { c.laneSide = c.change.to; c.change = null; c.cutT = PEN.cutInWindow; }
         else c.laneSide = c.change.from + (c.change.to - c.change.from) * T.smooth(p / len);
       }
-      // pit entry (each entrance passed with a stop-and-go outstanding uses up one opportunity)
+      // pit entry: a physical forward crossing. Entering clears the routing and an optional request, never a debt
       if (crossed(T.PIT_IN0)) {
         let entered = false;
         if (c.pitReq) {
@@ -431,13 +563,11 @@ export class Race {
             this.pmsg(c, 'msg.pitMissed', 'bad');
           }
         }
-        // an approach driven again after backing up is the same opportunity: it is not counted twice
-        if (c.sgOwed > 0 && !c.finished && fresh(T.PIT_IN0)) {
-          if (c.sgSkipNext) c.sgSkipNext = false;
-          else {
-            c.sgChances--;
-            if (!entered) { if (c.sgChances <= 0) this.convertUnserved(c, 'missed'); else this.pmsg(c, 'msg.penChances', 'bad', { n: c.sgChances }); }
-          }
+        // an optional fuel request driven past on a manual override is a deferral: it is now owed by the end of the next lap.
+        // Judged once per approach, so backing up and passing again changes nothing
+        if (!entered && c.isPlayer && c.fuelReq && !c.finished && !this.practice && fresh(T.PIT_IN0)) {
+          const k = Math.round((u0 + T.gapS(s0, T.PIT_IN0) - T.PIT_IN0) / T.L);
+          if (c.overAppr === k && k + 1 <= LAPS) { c.fuelReq = false; c.fuelDue = k + 1; this.syncRoute(c); this.pmsg(c, 'msg.fuelOverride', 'bad'); }
         }
       }
       // squeeze priority queue
@@ -449,7 +579,7 @@ export class Race {
       this.servePenalty(c, s, dt);
       if (crossed(T.PIT_OUT1)) {
         c.mode = 'race'; c.laneSide = -1; c.d = -T.LANE_HALF; c.serviced = false; c.graceT = PEN.grace;
-        if (c.sgOwed > 0 && !c.finished) { if (c.sgChances <= 0) this.convertUnserved(c, 'missed'); else this.pmsg(c, 'msg.penChances', 'bad', { n: c.sgChances }); }
+        if (c.sgOwed > 0 && !c.finished) this.pmsg(c, 'msg.penStillOwed', 'bad');
       }
       // a bay is only captured nearly stopped: never while reversing past it
       else if (Math.abs(c.v) < 0.7 && !c.revOn && c.isPlayer && !c.serviced && !c.sgServing) this.tryBay(c, s);
@@ -495,6 +625,7 @@ export class Race {
         if (c.sectors === (1 << i) - 1) c.sectors |= 1 << i; else c.lapValid = false;
       }
     }
+    if (c.u > c.hiU) c.hiU = c.u;
     this.laps(c, dt, ds, s0);
     if (c.revMark !== null && c.u >= c.revMark) c.revMark = null;
   }
@@ -570,12 +701,12 @@ export class Race {
         const best = valid && (c.bestLap === 0 || lt < c.bestLap);
         if (best) c.bestLap = lt;
         this.emit({ type: 'lap', car: c, time: lt, best, valid, lapsDone: c.lapsDone });
-        if (c.lapsDone >= LAPS && !this.practice) {
-          c.finished = true; c.finishTime = tCross; c.laneReq = false; this.clearPitIntent(c); c.pitPlan = false;
-          if (c.sgOwed > 0) this.convertUnserved(c, 'unserved');
-          const pos = this.cars.filter((o) => o.finished && o.finishTime + o.timePen <= c.finishTime + c.timePen).length;
-          this.emit({ type: 'finish', car: c, pos });
-        } else if (c.isPlayer && c.lapsDone === LAPS - 1 && !this.practice) this.pmsg(c, 'msg.finalLap', 'good');
+        // service earlier in this step (box, bay) is already applied; deadlines are judged before the finish is classified
+        const prior = c.svcBreach;
+        const flag = c.lapsDone >= LAPS && !this.practice;
+        this.serviceDeadline(c, flag);
+        if (flag) this.finishCar(c, tCross, prior);
+        else if (c.isPlayer && c.lapsDone === LAPS - 1 && !this.practice) this.pmsg(c, 'msg.finalLap', 'good');
       }
       c.lapStartT = tCross; c.lapValid = true; c.sectors = 0;
     }
@@ -638,7 +769,7 @@ export class Race {
   }
 
   enterBay(c: Car, j: number): void {
-    c.mode = 'bayIn'; c.bay = j; c.bayT = 0; c.v = 0; c.serviceT = 0; c.fuelAtBay = c.fuel;
+    c.mode = 'bayIn'; c.bay = j; c.bayT = 0; c.v = 0; c.serviceT = 0; c.fuelAtBay = c.fuel; c.towSvc = false;
     c.pitStops++;
     if (!c.isPlayer) c.refuelTarget = Math.min(1, Math.max(0.3, this.fuelToFinish(c, this.s(c)) + rnd(0.06, 0.2)));
   }
@@ -658,8 +789,10 @@ export class Race {
       c.serviceT += dt;
       c.penalty = Math.max(0, c.penalty - dt);
       if (c.serviceT > 0.4) c.fuel = Math.min(1, c.fuel + REFUEL_RATE * dt);
+      // a committed fuel stop counts once the car has stood in its bay for the departure-ready time (a full tank is fine; a tow is not a visit)
+      if (c.fuelDue > 0 && !c.towSvc && c.serviceT > SERVICE_READY) { c.fuelDue = 0; this.pmsg(c, 'msg.fuelDone', 'good'); }
       let wantGo: boolean;
-      if (c.isPlayer && !c.finished) wantGo = input.up && c.serviceT > 0.5;
+      if (c.isPlayer && !c.finished) wantGo = input.up && c.serviceT > SERVICE_READY;
       else wantGo = c.fuel >= c.refuelTarget || c.fuel >= 1;
       c.waitingClear = false;
       if (wantGo && c.penalty <= 0) {
@@ -728,7 +861,8 @@ export class Race {
     const s = this.s(c);
     const dist = T.ahead(s, T.BAYS[j]);
     c.u += dist;
-    c.bay = j; c.mode = 'service'; c.serviceT = 0; c.d = T.BAY_D; c.laneSide = -1; c.yawOff = 0; c.revMark = null;
+    c.bay = j; c.mode = 'service'; c.serviceT = 0; c.d = T.BAY_D; c.laneSide = -1; c.yawOff = 0; c.revMark = null; c.towSvc = true;
+    if (c.u > c.hiU) c.hiU = c.u;
     c.penalty = 8 + dist / 11; c.pitStops++;
     c.refuelTarget = Math.max(c.refuelTarget, 0.75);
     if (c.isPlayer) this.pmsg(c, 'msg.towPenalty', 'bad', { n: Math.round(c.penalty) });
@@ -869,7 +1003,7 @@ export class Race {
       c.sgServing = true;
       c.sgServed += dt;
       if (c.sgServed >= c.sgOwed) {
-        c.sgOwed = 0; c.sgServed = 0; c.sgServing = false; c.sgChances = 0;
+        c.sgOwed = 0; c.sgServed = 0; c.sgServing = false; c.sgDue = 0; c.sgDeferred = false;
         this.endPenaltyRoute(c);
         this.emit({ type: 'served', car: c });
         this.pmsg(c, 'msg.penServed', 'good');
@@ -883,6 +1017,15 @@ export class Race {
   /** The stop-and-go is settled: a request that existed only for it ends, a chosen fuel stop carries on. */
   endPenaltyRoute(c: Car): void { if (c.pitPenaltyOnly) this.clearPitIntent(c); }
 
+  /**
+   * The first approach this car can still be served at: the entrance physically ahead of it (or the one after, if that is
+   * out of reach), never earlier than its current approach, so reversing back over an entrance gains no lap.
+   */
+  firstReachableAppr(c: Car): number {
+    const next = Math.round((c.u + T.ahead(this.s(c), T.PIT_IN0) - T.PIT_IN0) / T.L);
+    return Math.max(this.apprLap(c), this.reachablePitEntry(c) ? next : next + 1);
+  }
+
   /** can this car still make the upcoming pit entrance (outside lane, or a switch to it, with room to spare)? */
   reachablePitEntry(c: Car): boolean {
     const s = this.s(c);
@@ -892,13 +1035,46 @@ export class Race {
     return T.SWITCHES.some((sw) => { const a = T.ahead(s, sw.s0); return a > 1.5 && a + T.SWITCH_LEN + 3 < dist; });
   }
 
-  convertUnserved(c: Car, reason: 'missed' | 'unserved'): void {
-    const secs = PEN.unservedDetour + c.sgOwed;
-    c.timePen += secs;
-    c.sgOwed = 0; c.sgServed = 0; c.sgServing = false; c.sgChances = 0; c.sgSkipNext = false;
-    this.endPenaltyRoute(c);
-    this.emit({ type: 'timePen', car: c, secs, reason });
-    this.pmsg(c, reason === 'missed' ? 'msg.penMissed' : 'msg.penUnserved', 'bad', { n: secs });
+  /**
+   * The timing-line crossing that ends a lap: an obligation due by the end of that lap and still owed either uses its one
+   * deferral (a stop-and-go only, and only if another lap remains) or latches the missed-deadline breach. The breach is
+   * shown at once and kept for good; later service can settle the stop but never the breach.
+   */
+  serviceDeadline(c: Car, flag: boolean): void {
+    if (this.practice) return;
+    const ended = c.crossed - 1;
+    if (c.sgOwed > 0 && c.sgDue > 0 && c.sgDue <= ended) {
+      if (!c.sgDeferred && c.crossed <= LAPS) {
+        c.sgDeferred = true; c.sgDue = c.crossed;
+        this.pmsg(c, c.crossed === LAPS ? 'msg.sgLastLapFinal' : 'msg.sgLastLap', 'bad');
+      } else this.breach(c, 'stopGo', flag);
+    }
+    if (c.fuelDue > 0 && c.fuelDue <= ended) this.breach(c, 'fuel', flag);
+  }
+
+  breach(c: Car, what: 'stopGo' | 'fuel', flag: boolean): void {
+    if (c.svcBreach) return;
+    c.svcBreach = what;
+    this.emit({ type: 'breach', car: c, what });
+    if (!flag) this.pmsg(c, what === 'stopGo' ? 'msg.breachSg' : 'msg.breachFuel', 'bad');
+  }
+
+  /**
+   * The car's final forward timing-line crossing: a latched breach, an unserved stop-and-go or an unserved committed fuel stop
+   * disqualifies it, once. Otherwise it is classified on finish time plus any time penalties it already carries.
+   */
+  finishCar(c: Car, tCross: number, prior: 'stopGo' | 'fuel' | null): void {
+    c.finished = true; c.finishTime = tCross; c.laneReq = false; this.clearPitIntent(c); c.pitPlan = false; c.routeHold = -1;
+    const reason: DqReason | null = prior ? 'deadline' : c.sgOwed > 0 ? 'stopGo' : c.fuelDue > 0 ? 'fuel' : c.svcBreach ? 'deadline' : null;
+    if (reason) {
+      c.status = 'dq'; c.dqReason = reason;
+      this.emit({ type: 'dq', car: c, reason });
+      this.pmsg(c, `msg.dq.${reason}`, 'bad');
+      return;
+    }
+    c.status = 'finished';
+    const pos = this.cars.filter((o) => o.status === 'finished' && o.finishTime + o.timePen <= c.finishTime + c.timePen).length;
+    this.emit({ type: 'finish', car: c, pos });
   }
 
   /** one attributed offence: warning, final warning, then stop-and-go (plus more stop time while one is outstanding) */
@@ -906,8 +1082,16 @@ export class Race {
     c.offences++;
     const stop = c.offences >= 3;
     if (stop) {
-      if (c.sgOwed <= 0) { c.sgChances = PEN.opportunities; c.sgSkipNext = !this.reachablePitEntry(c); if (c.isPlayer) this.armPenaltyRoute(c); }
+      // a fresh stop-and-go is due on the first entrance the car can still make; more stop time keeps the existing deadline
+      const first = c.sgOwed <= 0;
+      if (first) { c.sgDue = this.firstReachableAppr(c); c.sgDeferred = false; c.sgServed = 0; }
       c.sgOwed += PEN.stopSeconds;
+      if (c.isPlayer) {
+        if (first) c.routeHold = -1;
+        this.syncRoute(c);
+        // awarded after the last entrance it could be served at: still owed, and the consequence is shown now
+        if (first && c.sgDue > LAPS && !c.finished && !this.practice) this.pmsg(c, 'msg.sgLate', 'bad');
+      }
     }
     this.emit({ type: 'offence', car: c, other, n: c.offences, cause, stop });
   }
@@ -980,15 +1164,18 @@ export class Race {
     c.roll = T.rollAt(s); c.pitch = Math.atan(T.slopeZ(s));
   }
 
-  results(): { car: Car; time: number; est: boolean }[] {
+  /**
+   * Result rows in order. Only `finished` rows are classified and carry a time. A DQ or DNF never gets one. A car still running
+   * (only mid-race; the run-out settles everyone before the results screen) shows an estimate marked `est`, never a classification.
+   */
+  results(): { car: Car; time: number; est: boolean; status: CarStatus }[] {
     return this.order().map((c) => {
-      if (c.finished) return { car: c, time: c.finishTime + c.timePen, est: false };
+      if (c.status === 'finished') return { car: c, time: c.finishTime + c.timePen, est: false, status: c.status };
+      if (c.status !== 'running') return { car: c, time: NaN, est: false, status: c.status };
       const prog = Math.max(1, c.u - T.FINISH_S);
       const remain = LAPS * T.L - prog;
       const avg = prog / Math.max(1, this.raceTime);
-      // a still-running car's estimate carries its time penalties, including an outstanding stop converted once
-      const pen = c.timePen + (c.sgOwed > 0 ? PEN.unservedDetour + c.sgOwed : 0);
-      return { car: c, time: this.raceTime + remain / Math.max(4, avg) + pen, est: true };
-    }).sort((a, b) => a.time - b.time);
+      return { car: c, time: this.raceTime + remain / Math.max(4, avg) + c.timePen, est: true, status: c.status };
+    });
   }
 }

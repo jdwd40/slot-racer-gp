@@ -4,7 +4,7 @@ import * as T from '../src/track';
 import { Car, PEN, Race } from '../src/race';
 import { routeChipId } from '../src/hud';
 import { t } from '../src/i18n';
-import { fresh, place, stepEvents, msgs, seedRandom, NONE, UP } from './helpers';
+import { fresh, place, stepEvents, msgs, seedRandom, crossLine, NONE, UP } from './helpers';
 
 beforeEach(() => seedRandom(5));
 afterEach(() => vi.restoreAllMocks());
@@ -351,33 +351,27 @@ describe('stop-and-go routing', () => {
     crossSwitch(r, 0, OUTSIDE);
     expect(P.change).toBeNull();
   });
-  it('a manual override neither cancels the penalty nor forgives the entrance it costs', () => {
+  it('a manual override neither cancels the penalty nor moves its deadline', () => {
     const { r, P, rival } = solo();
     place(P, 60, INSIDE, 10);
     award(r, P, rival);
-    const chances = P.sgChances;
-    expect(chances).toBe(PEN.opportunities);
-    P.sgSkipNext = false;
+    const due = P.sgDue;
     r.requestLane();
     crossSwitch(r, 0, INSIDE);
     expect(P.change).toBeNull(); expect(P.sgOwed).toBe(PEN.stopSeconds); expect(P.pitReq).toBe(true);
-    const ev = cross(r, T.PIT_IN0, INSIDE);
-    expect(P.sgChances).toBe(chances - 1); expect(msgs(ev)).toContain('msg.penChances');
-    expect(P.sgOwed).toBe(PEN.stopSeconds); expect(P.timePen).toBe(0);
+    cross(r, T.PIT_IN0, INSIDE);
+    r.requestLane(); r.requestLane(); r.requestLane();
+    expect([P.sgDue, P.sgDeferred, P.sgOwed, P.timePen, P.svcBreach]).toEqual([due, false, PEN.stopSeconds, 0, null]);
   });
-  it('uses the same opportunity accounting as an unrouted car, sgSkipNext included', () => {
+  it('an entrance out of reach at the award is not the due one', () => {
     const { r, P, rival } = solo();
     place(P, T.PIT_IN0 - 3, INSIDE, 15);
     award(r, P, rival);
-    expect(P.sgSkipNext).toBe(true);
-    cross(r, T.PIT_IN0, INSIDE);
-    expect(P.sgSkipNext).toBe(false); expect(P.sgChances).toBe(PEN.opportunities);
-    cross(r, T.PIT_IN0, INSIDE);
-    expect(P.sgChances).toBe(PEN.opportunities - 1);
+    expect(P.sgDue).toBe(r.apprLap(P) + 1);
   });
   it('ends penalty-only routing when served, with no extra pit visit', () => {
     const { r, P, rival } = solo();
-    award(r, P, rival); P.sgSkipNext = false;
+    award(r, P, rival);
     enterPit(r);
     expect(P.mode).toBe('pitlane'); expect(P.pitReq).toBe(false);
     const ev = serve(r);
@@ -396,13 +390,15 @@ describe('stop-and-go routing', () => {
   });
   it('resumes on pit exit while the stop is still owed', () => {
     const { r, P, rival } = solo();
-    award(r, P, rival); P.sgSkipNext = false;
+    award(r, P, rival);
     r.requestLane(); // override is dropped by the pit visit
+    const due = P.sgDue;
     enterPit(r);
     expect(P.mode).toBe('pitlane');
-    expect(P.sgChances).toBe(PEN.opportunities - 1);
+    expect(P.sgOwed).toBe(PEN.stopSeconds); // entering is not serving
     const ev = exitPit(r);
-    expect(P.mode).toBe('race'); expect(P.sgOwed).toBe(PEN.stopSeconds); expect(msgs(ev)).toContain('msg.penChances');
+    expect(P.mode).toBe('race'); expect(P.sgOwed).toBe(PEN.stopSeconds); expect(msgs(ev)).toContain('msg.penStillOwed');
+    expect(P.sgDue).toBe(due);
     expect(P.pitReq).toBe(true); expect(P.pitPenaltyOnly).toBe(true); expect(P.laneOverride).toBe(false);
     crossSwitch(r, 0, INSIDE);
     expect(P.change).toMatchObject({ to: OUTSIDE });
@@ -417,19 +413,15 @@ describe('stop-and-go routing', () => {
     exitPit(r);
     expect(P.mode).toBe('race'); expect(P.pitReq).toBe(true);
   });
-  it('ends penalty-only routing on conversion to a time penalty, and leaves no stale pit visit', () => {
+  it('a missed deadline is never converted to a time penalty, and routing stays on so the stop can still be settled', () => {
     const { r, P, rival } = solo();
     award(r, P, rival);
-    P.sgSkipNext = false; P.sgChances = 1;
+    P.sgDue = 3; P.sgDeferred = true;
     r.requestLane();
-    const ev = cross(r, T.PIT_IN0, INSIDE);
-    expect(ev.find((e) => e.type === 'timePen')).toMatchObject({ reason: 'missed', secs: PEN.unservedDetour + PEN.stopSeconds });
-    expect(P.timePen).toBe(PEN.unservedDetour + PEN.stopSeconds);
-    expect(P.pitReq).toBe(false); expect(P.pitPenaltyOnly).toBe(false); expect(P.laneOverride).toBe(false);
-    crossSwitch(r, 0, INSIDE);
-    expect(P.change).toBeNull();
-    enterPit(r);
-    expect(P.mode).toBe('race');
+    const ev = crossLine(r, P, 3, INSIDE);
+    expect(P.svcBreach).toBe('stopGo'); expect(msgs(ev)).toContain('msg.breachSg');
+    expect(P.timePen).toBe(0); expect(P.sgOwed).toBe(PEN.stopSeconds);
+    expect(P.pitReq).toBe(true); expect(P.pitPenaltyOnly).toBe(true);
   });
   it('an offence on the cool-down lap arms nothing', () => {
     const { r, P, rival } = solo();
@@ -442,13 +434,13 @@ describe('stop-and-go routing', () => {
     const ev = cross(r, T.PIT_IN0, OUTSIDE);
     expect(P.pitReq).toBe(false); expect(P.mode).toBe('race'); expect(msgs(ev)).not.toContain('msg.pitMissed');
   });
-  it('a stale request cannot survive a finish that converts the stop', () => {
+  it('a stale request cannot survive a finish that disqualifies', () => {
     const { r, P, rival } = solo();
     award(r, P, rival);
     P.crossed = 13; P.lapsDone = 12; P.sectors = 7;
     place(P, T.FINISH_S + 13 * T.L - 0.2, OUTSIDE, 10);
     stepEvents(r, 3, UP);
-    expect(P.finished).toBe(true); expect(P.sgOwed).toBe(0);
+    expect(P.finished).toBe(true); expect(P.status).toBe('dq'); expect(P.sgOwed).toBe(PEN.stopSeconds);
     expect(P.pitReq).toBe(false); expect(P.pitPenaltyOnly).toBe(false);
     stepEvents(r, 3, UP);
     expect(P.pitReq).toBe(false);
@@ -456,62 +448,58 @@ describe('stop-and-go routing', () => {
 });
 
 describe('voluntary request overlapping a stop-and-go', () => {
-  it('keeps the fuel stop when the penalty converts', () => {
+  it('keeps the optional fuel stop when the penalty is served, and routing carries on for it', () => {
     const { r, P, rival } = solo();
     r.requestPit();
     award(r, P, rival);
-    expect(P.pitPenaltyOnly).toBe(false);
-    P.sgSkipNext = false; P.sgChances = 1;
-    cross(r, T.PIT_IN0, INSIDE);
-    expect(P.sgOwed).toBe(0); expect(P.timePen).toBeGreaterThan(0);
-    expect(P.pitReq).toBe(true);
-    crossSwitch(r, 0, INSIDE);
-    expect(P.change).toMatchObject({ to: OUTSIDE });
-    settle(r);
-    enterPit(r);
-    expect(P.mode).toBe('pitlane'); expect(P.pitReq).toBe(false);
+    expect(P.pitPenaltyOnly).toBe(false); expect(P.fuelReq).toBe(true);
+    serve(r);
+    expect(P.sgOwed).toBe(0);
+    // serve() puts the car in the box by script, with no pit entry: the optional request was never consumed and carries on alone
+    place(P, 60, INSIDE, 10);
+    stepEvents(r, 1, UP);
+    expect(P.fuelReq).toBe(true); expect(P.pitReq).toBe(true); expect(P.pitPenaltyOnly).toBe(false);
+    expect(r.nextRoute(P)).toMatchObject({ to: OUTSIDE });
   });
   it('one visit settles both, and the penalty alone resumes if it stays owed', () => {
     const { r, P, rival } = solo();
     r.requestPit();
-    award(r, P, rival); P.sgSkipNext = false;
+    award(r, P, rival);
     enterPit(r);
     expect(P.mode).toBe('pitlane'); expect(P.pitReq).toBe(false);
     exitPit(r);
     expect(P.sgOwed).toBeGreaterThan(0);
     expect(P.pitReq).toBe(true); expect(P.pitPenaltyOnly).toBe(true);
-    P.sgChances = 1;
-    cross(r, T.PIT_IN0, INSIDE);
+    enterPit(r);
+    serve(r);
     expect(P.sgOwed).toBe(0); expect(P.pitReq).toBe(false);
   });
   it('P adds a fuel stop to an owed penalty and P again drops it, never cancelling the penalty route', () => {
     const { r, P, rival } = solo();
     award(r, P, rival);
     r.requestPit();
-    expect(P.pitReq).toBe(true); expect(P.pitPenaltyOnly).toBe(false);
+    expect(P.pitReq).toBe(true); expect(P.pitPenaltyOnly).toBe(false); expect(P.fuelReq).toBe(true);
     expect(msgs(r.events)).toEqual(['msg.pitRequired', 'msg.pitFuelToo']);
     r.events.length = 0;
     r.requestPit();
-    expect(P.pitReq).toBe(true); expect(P.pitPenaltyOnly).toBe(true);
+    expect(P.pitReq).toBe(true); expect(P.pitPenaltyOnly).toBe(true); expect(P.fuelReq).toBe(false);
     expect(msgs(r.events)).toEqual(['msg.pitRequired']);
-    r.requestPit();
-    r.convertUnserved(P, 'missed');
-    expect(P.pitReq).toBe(true); expect(P.pitPenaltyOnly).toBe(false);
+    expect(P.sgOwed).toBe(PEN.stopSeconds);
   });
-  it('cancelling the fuel stop after the penalty resolves ends routing normally', () => {
+  it('cancelling the fuel stop after the penalty is served ends routing normally', () => {
     const { r, P, rival } = solo();
     r.requestPit();
     award(r, P, rival);
-    r.convertUnserved(P, 'missed');
+    P.sgOwed = 0; P.sgDue = 0;
     r.events.length = 0;
     r.requestPit();
     expect(P.pitReq).toBe(false); expect(msgs(r.events)).toContain('msg.pitCancelled');
   });
-  it('an override survives the penalty resolving while the fuel stop keeps routing active', () => {
+  it('an override survives while the fuel stop keeps routing active', () => {
     const { r, P, rival } = solo();
     r.requestPit(); r.requestLane();
     award(r, P, rival);
-    r.convertUnserved(P, 'missed');
+    P.sgOwed = 0; P.sgDue = 0;
     expect(P.laneOverride).toBe(true);
     crossSwitch(r, 0, INSIDE);
     expect(P.change).toBeNull();
