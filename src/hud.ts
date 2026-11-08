@@ -201,7 +201,14 @@ export class Hud {
     if (p.sgOwed > 0 && !p.finished) chips.push(`<span class="chip red ${p.svcBreach ? '' : 'blink'}">■ ${t('hud.sgChip')}${dueChip(p.sgDue)}</span>`);
     if (p.fuelDue > 0 && !p.finished) chips.push(`<span class="chip org">⛽ ${t('hud.fuelChip')}${dueChip(p.fuelDue)}</span>`);
     if (p.fuelReq && !p.finished) chips.push(`<span class="chip cyan">⛽ ${t('hud.fuelReq')}</span>`);
-    if (held) chips.push(`<span class="chip yel">⏭ ${t('hud.held')}</span>`);
+    // automatic stop-and-go: what the car is doing for the driver (the simulation decides; the HUD only reads it)
+    const sgp = p.finished || practice ? null : p.sgPhase;
+    if (sgp) {
+      const n = Math.max(0, p.sgOwed - p.sgServed).toFixed(1);
+      const cls = sgp === 'armed' ? 'red' : sgp === 'deferred' ? 'yel' : sgp === 'queued' ? 'org' : 'cyan';
+      chips.push(`<span class="chip ${cls} sgp" data-sg="${sgp}">${sgp === 'deferred' ? '⏭' : sgp === 'armed' ? '■' : 'A'} ${t(`hud.sgA.${sgp}`, { n })}</span>`);
+    }
+    if (held && sgp !== 'deferred') chips.push(`<span class="chip yel">⏭ ${t('hud.held')}</span>`);
     const canDefer = race.deferBlock(p) === null;
     if (canDefer) chips.push(`<span class="chip yel kbd-only"><kbd>N</kbd> ${t('hud.deferKey')}</span>`);
     if (p.timePen > 0) chips.push(`<span class="chip red">⏱ ${t('hud.timePen', { n: p.timePen })}</span>`);
@@ -211,7 +218,7 @@ export class Hud {
     if (p.squeezeHold) chips.push(`<span class="chip org">▼ ${t('hud.yield')}</span>`);
     // shared pit queue: what the simulation is holding the car for (the HUD keeps no queue of its own)
     const wait = p.finished ? null : p.pitWait;
-    if (wait) chips.push(`<span class="chip org">⏸ ${t(QUEUE_CHIP[wait])}</span>`);
+    if (wait && !(wait === 'queued' && sgp === 'queued')) chips.push(`<span class="chip org">⏸ ${t(QUEUE_CHIP[wait])}</span>`);
     const rev = reversing(p);
     if (rev) chips.push(`<span class="chip rev">R ${t('hud.reverse')}</span>`);
     this.set('h-chips', chips.join(''), true);
@@ -220,7 +227,7 @@ export class Hud {
     const dEl = this.el['t-defer'];
     if (dEl.hidden === canDefer) dEl.hidden = !canDefer;
     this.root.classList.toggle('defer', canDefer);
-    this.cue('brake', rev ? 'reverse' : p.pitHold && !p.finished ? 'held' : 'idle');
+    this.cue('brake', rev ? 'reverse' : p.finished ? 'idle' : p.sgCtl ? 'auto' : p.pitHold ? 'held' : 'idle');
 
     // status line. fuelVisit: this bay visit is settling (or has settled) a committed fuel stop
     const inBay = p.mode === 'bayIn' || p.mode === 'service' || p.mode === 'bayOut';
@@ -228,11 +235,14 @@ export class Hud {
     let st = '';
     if (p.sgServing) {
       st = `<b class="red">${t('hud.sgServing', { n: Math.max(0, p.sgOwed - p.sgServed).toFixed(1) })}</b>`;
+    } else if (sgp === 'leaving') {
+      st = wait === 'exit' ? `<b class="org">${t('hud.qExitLine')}</b>` : `<b class="cyan">${t('hud.sgL.leaving')}</b>`;
     } else if (p.sgOwed > 0 && !p.finished) {
-      if (p.mode === 'pitlane') st = wait === 'queued' || wait === 'bay' ? `<b class="org">${t(wait === 'bay' ? 'hud.qBayLine' : 'hud.qQueuedLine')}</b>` : `<b class="red">${t('hud.sgBox')}</b>`;
+      if (p.mode === 'pitlane') st = wait === 'bay' ? `<b class="org">${t('hud.qBayLine')}</b>` : wait === 'queued' || sgp === 'queued' ? `<b class="org">${t('hud.sgL.queued')}</b>` : `<b class="red">${t('hud.sgBox')}</b>`;
       else {
-        st = `<b class="red">${t('hud.sgOwed')}</b> · ${t('hud.sgDetail', { n: Math.round(p.sgOwed), due: dueText(p.sgDue) }).replace(/ · $/, '')}`;
-        if (!held && race.boxBusy(p)) st += ` · <small>${t(race.deferBlock(p) === null ? 'hud.boxBusy' : 'hud.boxBusyFinal')}</small>`;
+        const lead = sgp === 'entry' ? 'hud.sgL.entry' : sgp === 'queued' ? 'hud.sgL.queued' : sgp === 'deferred' ? 'hud.sgL.deferred' : 'hud.sgOwed';
+        st = `<b class="${sgp === 'deferred' ? 'yel' : 'red'}">${t(lead)}</b> · ${t('hud.sgDetail', { n: Math.round(p.sgOwed), due: dueText(p.sgDue) }).replace(/ · $/, '')}`;
+        if (!held && sgp !== 'entry' && race.boxBusy(p)) st += ` · <small>${t(race.deferBlock(p) === null ? 'hud.boxBusy' : 'hud.boxBusyFinal')}</small>`;
       }
     } else if (wait && wait !== 'exit' && p.mode !== 'service') {
       st = `<b class="org">${t(wait === 'bay' ? 'hud.qBayLine' : 'hud.qQueuedLine')}</b>`;

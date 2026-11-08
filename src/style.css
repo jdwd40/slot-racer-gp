@@ -56,7 +56,7 @@ button:focus-visible { outline: 2px solid #fff; outline-offset: 2px; }
 .toast.good { border-left-color: #22c55e; } .toast.warn { border-left-color: #f59e0b; } .toast.bad { border-left-color: #ef4444; color: #fecaca; }
 .status { position: absolute; bottom: calc(var(--eB) + 108px); left: 50%; transform: translateX(-50%); padding: 8px 16px; border-radius: 10px; background: rgba(10,14,20,0.8); font-size: 15px; opacity: 0; transition: opacity 0.2s; white-space: nowrap; }
 .status .red, .red { color: #f87171; }
-.status .org { color: #fdba74; } .status .grn { color: #4ade80; }
+.status .org { color: #fdba74; } .status .grn { color: #4ade80; } .status .cyan { color: #67e8f9; } .status .yel { color: #fde047; }
 .chip kbd { padding: 0 4px; font-size: 10px; box-shadow: none; }
 .touch .kbd-only { display: none; }
 .results td.dq { color: #f87171; font-weight: 800; }

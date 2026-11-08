@@ -744,6 +744,7 @@ export class Race {
       // too fast for this entrance: no takeover and no entry, so the debt policy decides (never a snap or an instant stop)
       if (c.v * c.v > T.PIT_SPEED ** 2 + 2 * AUTO.late * dEntry) return;
       c.sgCommit = k; c.sgVc = Math.max(T.PIT_SPEED, c.v);
+      this.pmsg(c, 'msg.sgAuto', 'info');
     }
     c.sgCtl = true; c.sgPhase = c.pitHold ? 'queued' : 'entry';
   }
@@ -1195,6 +1196,7 @@ export class Race {
         if (c.isPlayer) c.sgLeave = !c.pitFuel;
         this.emit({ type: 'served', car: c });
         this.pmsg(c, 'msg.penServed', 'good');
+        if (c.isPlayer && !c.finished) this.pmsg(c, c.sgLeave ? 'msg.sgLeaving' : 'msg.penFuelNext', 'info');
       }
     } else if (c.sgServing && Math.abs(c.v) > 0.3) {
       c.sgServing = false; c.sgServed = 0;
