@@ -65,7 +65,8 @@ export const AUTO = {
   plan: 18,            // braking the entry profile plans with (m/s²) so the car reaches the pit limit at the entrance
   late: 24,            // braking an approach may need at most and still be taken over; beyond it the entrance is too late
   box: 6,              // braking the box stop plans with (m/s²)
-  stopTol: 0.12,       // within this of the stop point the car is brought to rest
+  stopTol: 0.05,       // within this of the stop point the car is brought to rest
+  entryLead: 0.5,      // the entry profile reaches the pit limit this far before the entrance
   entryTol: 0.5,       // a stop-and-go car not under automatic control is refused entry this far above the pit limit
 };
 /** where the car is stopped: the centre of the penalty box */
@@ -766,8 +767,17 @@ export class Race {
     const dStop = road ? dEntry + SG_STOP - T.PIT_IN0 : T.gapS(s, SG_STOP);
     if (c.sgServing || (!road && dStop <= AUTO.stopTol)) return 0;
     let v = road ? Math.max(T.PIT_SPEED, c.sgVc) : T.PIT_SPEED;
-    if (road) v = Math.min(v, Math.sqrt(T.PIT_SPEED ** 2 + 2 * AUTO.plan * dEntry), this.sgFollow(c, s));
+    if (road) v = Math.min(v, Math.sqrt(T.PIT_SPEED ** 2 + 2 * AUTO.plan * Math.max(0, dEntry - AUTO.entryLead)), this.sgFollow(c, s), this.sgCorner(c, s));
     return Math.min(v, Math.sqrt(2 * AUTO.box * Math.max(0, dStop)), c.pitCap);
+  }
+
+  /** The player's planned cornering speed here and just ahead, on every lane the car may use: a takeover mid-corner never holds a speed the slot cannot. */
+  sgCorner(c: Car, s: number): number {
+    const n = this.profiles['-1'].length;
+    const i0 = Math.floor(T.wrapS(s) / T.PROFILE_STEP) % n;
+    const i1 = Math.floor(T.wrapS(s + c.v * c.persona.look) / T.PROFILE_STEP) % n;
+    const sides = c.change || c.laneSide > 0 ? ['-1', '1'] : ['-1'];
+    return Math.min(...sides.map((k) => Math.min(this.profiles[k][i0], this.profiles[k][i1])));
   }
 
   /** A stopping gap behind any car ahead on the car's lane or the outside lane it is heading for (road only). */
