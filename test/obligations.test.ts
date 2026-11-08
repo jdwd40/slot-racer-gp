@@ -166,6 +166,14 @@ describe('deferring', () => {
     expect(r.deferBlock(P)).toBe('none');
     r.requestPit(); P.mode = 'pitlane';
     expect(r.deferBlock(P)).toBe('pit');
+    // de-slotted or towed: nothing to choose yet, and no misleading message
+    for (const m of ['off', 'tow'] as const) {
+      P.mode = m; r.events.length = 0;
+      expect(r.deferBlock(P)).toBe('phase');
+      r.requestDefer();
+      expect(msgs(r.events)).toEqual([]);
+      expect([P.fuelReq, P.fuelDue]).toEqual([true, 0]);
+    }
   });
 });
 
