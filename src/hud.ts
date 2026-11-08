@@ -1,5 +1,5 @@
 import * as T from './track';
-import { Race, LAPS, LOW_FUEL, Car } from './race';
+import { Race, LAPS, LOW_FUEL, Car, SERVICE_READY } from './race';
 import { t } from './i18n';
 import { fmtMs } from './records';
 import { laneCue, pitCue } from './input';
@@ -28,6 +28,7 @@ export class Hud {
   miniPit: { x: number; y: number }[] = [];
   mScale = 1; mOx = 0; mOy = 0; mW = 230; mH = 200;
   toastT = 0;
+  fuelVisit = false;
 
   constructor(parent: HTMLElement) {
     this.root = document.createElement('div');
@@ -75,6 +76,7 @@ export class Hud {
         <button id="t-brake" class="tbtn hold" tabindex="-1" data-hold="brake"><b data-t="touch.brake"></b><small id="t-brake-cue"></small></button>
         <button id="t-lane" class="tbtn" tabindex="-1" data-tap="lane"><b data-t="touch.lane"></b><small id="t-lane-cue"></small></button>
         <button id="t-pit" class="tbtn" tabindex="-1" data-tap="pit"><b data-t="touch.pit"></b><small id="t-pit-cue"></small></button>
+        <button id="t-defer" class="tbtn" tabindex="-1" data-tap="defer" hidden><b data-t="touch.defer"></b><small data-t="touch.defer.idle"></small></button>
         <button id="t-throttle" class="tbtn hold" tabindex="-1" data-hold="throttle"><b data-t="touch.throttle"></b><small data-t="touch.hold"></small></button>
       </div>
     `;
@@ -170,7 +172,7 @@ export class Hud {
       this.set('h-bestlbl', t('hud.best'));
       this.el['h-stand'].style.display = '';
     }
-    const stand = order.map((c, i) => `<div class="${c.isPlayer ? 'me' : ''}"><b>${i + 1}</b><i style="background:${hex(c.color)}"></i>${c.isPlayer ? t('hud.you') : c.name}${flags(c)}${c.mode === 'service' || c.mode === 'bayIn' ? ' ⛽' : ''}${c.finished ? ' 🏁' : ''}</div>`).join('');
+    const stand = order.map((c, i) => `<div class="${c.isPlayer ? 'me' : ''}"><b>${i + 1}</b><i style="background:${hex(c.color)}"></i>${c.isPlayer ? t('hud.you') : c.name}${flags(c)}${c.mode === 'service' || c.mode === 'bayIn' ? ' ⛽' : ''}${c.status === 'finished' ? ' 🏁' : ''}</div>`).join('');
     this.set('h-stand', stand, true);
     if (!practice) {
       const cur = race.phase === 'countdown' ? 0 : p.finished ? p.finishTime : race.raceTime;
@@ -189,38 +191,57 @@ export class Hud {
     const chips: string[] = [];
     if (low && !p.finished) chips.push(`<span class="chip red blink">⚠ ${t('hud.lowFuel')}</span>`);
     if (practice && p.crossed >= 1 && !p.lapValid) chips.push(`<span class="chip org">✕ ${t('hud.lapInvalid')}</span>`);
-    if (p.sgOwed > 0) chips.push(`<span class="chip red blink">■ ${t('hud.sgChip')}</span>`);
+    // service: each reason on its own chip, so requested, deferred, due, overdue and the breach never blur together
+    const live = !practice && !p.finished;
+    const held = live && p.routeHold >= 0 && p.routeHold === race.apprLap(p);
+    if (live && p.svcBreach) chips.push(`<span class="chip red blink">✕ ${t('hud.breach')}</span>`);
+    if (p.sgOwed > 0 && !p.finished) chips.push(`<span class="chip red ${p.svcBreach ? '' : 'blink'}">■ ${t('hud.sgChip')} · ${t(`hud.dueChip.${race.dueState(p, p.sgDue)}`)}</span>`);
+    if (p.fuelDue > 0 && !p.finished) chips.push(`<span class="chip org">⛽ ${t('hud.fuelChip')} · ${t(`hud.dueChip.${race.dueState(p, p.fuelDue)}`)}</span>`);
+    if (p.fuelReq && !p.finished) chips.push(`<span class="chip cyan">⛽ ${t('hud.fuelReq')}</span>`);
+    if (held) chips.push(`<span class="chip yel">⏭ ${t('hud.held')}</span>`);
+    const canDefer = race.deferBlock(p) === null;
+    if (canDefer) chips.push(`<span class="chip yel kbd-only"><kbd>N</kbd> ${t('hud.deferKey')}</span>`);
     if (p.timePen > 0) chips.push(`<span class="chip red">⏱ ${t('hud.timePen', { n: p.timePen })}</span>`);
     if (p.laneReq) chips.push(`<span class="chip yel">⇄ ${t('hud.laneArmed')}</span>`);
     const route = race.nextRoute(p);
     if (route) chips.push(`<span class="chip ${route.override ? 'yel' : 'cyan'}">${route.override ? '⇄' : 'P'} ${t(routeChipId(route))}</span>`);
-    if (route && p.sgOwed > 0 && !p.pitPenaltyOnly) chips.push(`<span class="chip cyan">${t('hud.pitFuelToo')}</span>`);
     if (p.squeezeHold) chips.push(`<span class="chip org">▼ ${t('hud.yield')}</span>`);
     if (p.yielding) chips.push(`<span class="chip org">▼ ${t('hud.pitYield')}</span>`);
     const rev = reversing(p);
     if (rev) chips.push(`<span class="chip rev">R ${t('hud.reverse')}</span>`);
     this.set('h-chips', chips.join(''), true);
     this.cue('lane', laneCue(p, route));
-    this.cue('pit', pitCue(p));
+    this.cue('pit', p.finished ? 'idle' : pitCue(p, held));
+    const dEl = this.el['t-defer'];
+    if (dEl.hidden === canDefer) dEl.hidden = !canDefer;
+    this.root.classList.toggle('defer', canDefer);
     this.cue('brake', rev ? 'reverse' : 'idle');
 
-    // status line
+    // status line. fuelVisit: this bay visit is settling (or has settled) a committed fuel stop
+    const inBay = p.mode === 'bayIn' || p.mode === 'service' || p.mode === 'bayOut';
+    if (!inBay || p.towSvc) this.fuelVisit = false; else if (p.fuelDue > 0) this.fuelVisit = true;
     let st = '';
     if (p.sgServing) {
       st = `<b class="red">${t('hud.sgServing', { n: Math.max(0, p.sgOwed - p.sgServed).toFixed(1) })}</b>`;
     } else if (p.sgOwed > 0 && !p.finished) {
       if (p.mode === 'pitlane') st = `<b class="red">${t('hud.sgBox')}</b>`;
       else {
-        const detail = p.sgChances <= 1 ? t('hud.sgDetail1', { n: Math.round(p.sgOwed) }) : t('hud.sgDetail', { n: Math.round(p.sgOwed), k: p.sgChances });
-        st = `<b class="red">${t('hud.sgOwed')}</b> · ${detail}${p.sgSkipNext ? ` · <small>${t('hud.sgSkip')}</small>` : ''}`;
+        st = `<b class="red">${t('hud.sgOwed')}</b> · ${t('hud.sgDetail', { n: Math.round(p.sgOwed), due: t(`hud.due.${race.dueState(p, p.sgDue)}`) })}`;
+        if (!held && race.boxBusy(p)) st += ` · <small>${t(race.deferBlock(p) === null ? 'hud.boxBusy' : 'hud.boxBusyFinal')}</small>`;
       }
     } else if (p.mode === 'service') {
       st = `<b>${t('hud.refuel', { n: Math.round(p.fuel * 100) })}</b>`;
+      if (p.fuelDue > 0 && !p.towSvc) st += ` · <span class="org">${t('hud.fuelServing', { n: Math.max(0, SERVICE_READY - p.serviceT + 0.05).toFixed(1) })}</span>`;
+      else if (this.fuelVisit) st += ` · <span class="grn">${t('hud.fuelServed')}</span>`;
       if (p.penalty > 0) st += ` · <span class="red">${t('hud.penalty', { n: Math.ceil(p.penalty) })}</span>`;
       else if (p.waitingClear) st += ` · ${t('hud.waitClear')}`;
       else if (!p.finished) st += ` · ${t('hud.refuelHint')}`;
+    } else if (p.fuelDue > 0 && !p.finished && !held) {
+      st = `<b class="org">${t('hud.fuelDueOwed')}</b> · ${t(`hud.due.${race.dueState(p, p.fuelDue)}`)}`;
     } else if (p.mode === 'pitlane' && T.gapS(race.s(p), T.BAYS[3] + T.BAY_HALF) > 0 && !p.finished) {
       st = t('hud.stopBay');
+    } else if (live && p.svcBreach) {
+      st = `<b class="red">${t('hud.breachLine')}</b>`;
     }
     this.set('h-status', st, true);
     this.el['h-status'].style.opacity = st ? '1' : '0';
@@ -305,7 +326,9 @@ export function flags(c: Car): string {
   let h = '';
   const w = Math.min(2, c.offences);
   if (w > 0) h += `<span class="flag ${w === 2 ? 'final' : ''}" title="${w === 2 ? t('pen.flashFinal') : ''}">${'⚑'.repeat(w)}</span>`;
-  if (c.sgOwed > 0) h += `<span class="flag sg">SG</span>`;
+  if (c.sgOwed > 0 && c.status === 'running') h += `<span class="flag sg">SG</span>`;
   if (c.timePen > 0) h += `<span class="flag tp">+${c.timePen}s</span>`;
+  if (c.status === 'dq') h += `<span class="flag sg" title="${t(`res.dqReason.${c.dqReason}`)}">${t('hud.flagDq')}</span>`;
+  else if (c.status === 'dnf') h += `<span class="flag tp">${t('res.dnf')}</span>`;
   return h;
 }

@@ -56,6 +56,10 @@ button:focus-visible { outline: 2px solid #fff; outline-offset: 2px; }
 .toast.good { border-left-color: #22c55e; } .toast.warn { border-left-color: #f59e0b; } .toast.bad { border-left-color: #ef4444; color: #fecaca; }
 .status { position: absolute; bottom: calc(var(--eB) + 108px); left: 50%; transform: translateX(-50%); padding: 8px 16px; border-radius: 10px; background: rgba(10,14,20,0.8); font-size: 15px; opacity: 0; transition: opacity 0.2s; white-space: nowrap; }
 .status .red, .red { color: #f87171; }
+.status .org { color: #fdba74; } .status .grn { color: #4ade80; }
+.chip kbd { padding: 0 4px; font-size: 10px; box-shadow: none; }
+.touch .kbd-only { display: none; }
+.results td.dq { color: #f87171; font-weight: 800; }
 .lights { position: absolute; top: 110px; left: 50%; transform: translateX(-50%); display: flex; gap: 12px; padding: 12px 16px; background: rgba(8,8,10,0.85); border-radius: 14px; transition: opacity 0.3s; }
 .lights i { width: 36px; height: 36px; border-radius: 50%; background: #3a0d0d; box-shadow: inset 0 0 8px #000; }
 .lights i.on { background: radial-gradient(circle at 40% 35%, #ff9b9b, #ff1a1a 50%, #a00); box-shadow: 0 0 22px #ff2a2a; }
@@ -178,12 +182,16 @@ small { color: #9ca3af; font-weight: 500; }
 #t-lane, #t-pit { left: calc(var(--eL) + var(--hold) + var(--gap)); width: var(--tap-w); height: var(--tap-h); }
 #t-lane { bottom: var(--eB); }
 #t-pit { bottom: calc(var(--eB) + var(--tap-h) + var(--gap)); }
+/* Defer appears above Pit only while a pit visit can be put back a lap */
+#t-defer { left: calc(var(--eL) + var(--hold) + var(--gap)); width: var(--tap-w); height: var(--tap-h); bottom: calc(var(--eB) + (var(--tap-h) + var(--gap)) * 2); border: 4px dashed #fb923c; }
+#t-defer[hidden] { display: none; }
 /* pressed: shrinks and gains a heavy outline. Armed, routed, override and compulsory: each has its own border shape as well as its word */
 .tbtn.down, .touch .btn.touch-only.down { transform: scale(0.92); outline: 4px solid #fff; outline-offset: 1px; background: rgba(255,255,255,0.28); }
 .tbtn[data-cue='armed'] { border: 4px solid #ffd23f; }
 .tbtn[data-cue='routed'] { border: 4px double #22d3ee; }
 .tbtn[data-cue='override'] { border: 4px dashed #ffd23f; }
 .tbtn[data-cue='compulsory'] { border: 6px double #f87171; }
+.tbtn[data-cue='held'] { border: 4px dashed #fb923c; }
 .tbtn[data-cue='reverse'] { border: 4px solid #f4f4f5; }
 /* the view and zoom row is wide in touch mode, so the times sit beside the standings instead of centred */
 @media (max-width: 1100px) and (min-height: 501px) { .touch .tc { left: 190px; transform: none; } }
@@ -239,6 +247,7 @@ small { color: #9ca3af; font-weight: 500; }
 @media (orientation: portrait) and (max-width: 600px) {
   .touch { --gap: 10px; --hold: clamp(92px, 29vw, 130px); --thr: clamp(104px, 33vw, 150px); --tap-w: clamp(56px, 22vw, 96px); --tap-h: 52px; }
   .touch .dock { left: var(--eL); right: var(--eR); bottom: calc(var(--eB) + max(var(--thr), var(--tap-h) * 2 + var(--gap)) + var(--gap)); }
+  .touch #hud.defer .dock { bottom: calc(var(--eB) + max(var(--thr), var(--tap-h) * 3 + var(--gap) * 2) + var(--gap)); }
   .touch .dock .bl { max-width: none; }
   .toast, .touch .toast { top: calc(var(--eT) + 64px + var(--mini-h)); }
   .lights { top: calc(var(--eT) + 136px + var(--mini-h)); }

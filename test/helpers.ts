@@ -42,8 +42,9 @@ export function fresh(track = 'circuit-1', opts: { practice?: boolean } = {}): R
   return r;
 }
 
+/** Put a car somewhere by script. Its furthest-reached mark moves with it, so approaches count from the new place. */
 export function place(c: Car, u: number, side: number, v: number): void {
-  c.u = u; c.laneSide = side; c.d = side * T.LANE_HALF; c.v = v; c.change = null; c.mode = 'race'; c.throttle = 0;
+  c.u = u; c.hiU = u; c.laneSide = side; c.d = side * T.LANE_HALF; c.v = v; c.change = null; c.mode = 'race'; c.throttle = 0;
 }
 
 /** Park every car far apart, step twice so per-pair contact state clears, drop the events. */
@@ -65,3 +66,11 @@ export const offences = (ev: RaceEvent[]): Extract<RaceEvent, { type: 'offence' 
 
 export const msgs = (ev: RaceEvent[]): string[] =>
   ev.filter((e): e is Extract<RaceEvent, { type: 'msg' }> => e.type === 'msg').map((e) => e.text);
+
+/** Drive a car across the timing line that ends lap `lap` (so `crossed` becomes lap + 1) and return what happened. */
+export function crossLine(r: Race, c: Car, lap: number, side = -1, input: Input = NONE): RaceEvent[] {
+  c.crossed = lap; c.lapsDone = lap - 1; c.sectors = 7; c.revMark = null;
+  place(c, T.FINISH_S + lap * T.L - 0.3, side, 10);
+  const ev = stepEvents(r, 4, input);
+  return ev;
+}

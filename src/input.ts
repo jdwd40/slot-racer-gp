@@ -3,11 +3,11 @@
 // See docs/touch.md for the design and its evidence.
 
 export type HoldAction = 'throttle' | 'brake';
-export type TapAction = 'lane' | 'pit' | 'view' | 'pause';
+export type TapAction = 'lane' | 'pit' | 'defer' | 'view' | 'pause';
 export type TouchMode = 'auto' | 'on' | 'off';
 
 export const KEY_HOLDS: Readonly<Record<string, HoldAction>> = { KeyW: 'throttle', ArrowUp: 'throttle', KeyS: 'brake', ArrowDown: 'brake' };
-export const KEY_TAPS: Readonly<Record<string, TapAction>> = { Space: 'lane', KeyP: 'pit' };
+export const KEY_TAPS: Readonly<Record<string, TapAction>> = { Space: 'lane', KeyP: 'pit', KeyN: 'defer' };
 
 /** Which sources hold which action. Every key and every pointer is its own source, so one letting go never releases another. */
 export class DrivingInput {
@@ -120,7 +120,7 @@ export class ControlsAnchor {
 
 // ------------------------------------------------------------ what the pad shows
 export type LaneCue = 'idle' | 'armed' | 'routed' | 'override';
-export type PitCue = 'idle' | 'armed' | 'compulsory';
+export type PitCue = 'idle' | 'armed' | 'compulsory' | 'held';
 
 /** Lane button state, read from the race: `route` is Race.nextRoute for the player. */
 export function laneCue(p: { laneReq: boolean }, route: { override: boolean } | null): LaneCue {
@@ -128,9 +128,14 @@ export function laneCue(p: { laneReq: boolean }, route: { override: boolean } | 
   return p.laneReq ? 'armed' : 'idle';
 }
 
-export function pitCue(p: { pitReq: boolean; pitPenaltyOnly: boolean }): PitCue {
-  if (!p.pitReq) return 'idle';
-  return p.pitPenaltyOnly ? 'compulsory' : 'armed';
+/**
+ * Pit button state from the visit reasons, not the routing: an owed stop-and-go or committed fuel stop is compulsory,
+ * an optional fuel request is armed, and a deferral that released this approach shows as held.
+ */
+export function pitCue(p: { pitReq: boolean; sgOwed: number; fuelDue: number; fuelReq: boolean }, held = false): PitCue {
+  if (held) return 'held';
+  if (p.sgOwed > 0 || p.fuelDue > 0) return 'compulsory';
+  return p.pitReq || p.fuelReq ? 'armed' : 'idle';
 }
 
 // ------------------------------------------------------------ preference

@@ -5,7 +5,7 @@ import * as T from '../src/track';
 import { Car, Input, LAPS, PEN, Race, REV, REV_CAP, REV_PIT_MIN, VMAX } from '../src/race';
 import { DrivingInput, PadButton, TouchPad } from '../src/input';
 import { reversing } from '../src/hud';
-import { DT, NONE, UP, fresh, msgs, place, seedRandom, stepEvents } from './helpers';
+import { DT, NONE, UP, crossLine, fresh, msgs, place, seedRandom, stepEvents } from './helpers';
 import type { RaceEvent } from '../src/race';
 
 beforeEach(() => seedRandom(11));
@@ -205,7 +205,7 @@ describe('where reverse is refused', () => {
 describe('protecting stop-and-go service', () => {
   it('Brake held through the whole stop keeps the car still, and no reverse follows on the same press', () => {
     const { r, P } = solo();
-    inPit(P, T.PEN_S); P.sgOwed = 3; P.sgChances = 2;
+    inPit(P, T.PEN_S); P.sgOwed = 3; P.sgDue = 2;
     const u = P.u;
     const ev = run(r, BRAKE, PEN.stopSeconds + 2);
     expect(ev.some((e) => e.type === 'served')).toBe(true);
@@ -223,7 +223,7 @@ describe('protecting stop-and-go service', () => {
 
   it('an overshot box: stop beyond it, back up into it, and the stop is served in full', () => {
     const { r, P } = solo();
-    inPit(P, T.PEN_S + T.PEN_HALF + 0.5); P.sgOwed = 3; P.sgChances = 2;
+    inPit(P, T.PEN_S + T.PEN_HALF + 0.5); P.sgOwed = 3; P.sgDue = 2;
     engage(r, P);
     let served = false;
     const ev = run(r, BRAKE, PEN.stopSeconds + 3, (e) => { if (e.some((x) => x.type === 'served')) served = true; });
@@ -237,7 +237,7 @@ describe('protecting stop-and-go service', () => {
 
   it('backing up into the box, released there, also serves; moving off early resets as before', () => {
     const { r, P } = solo();
-    inPit(P, T.PEN_S + T.PEN_HALF + 0.5); P.sgOwed = 3; P.sgChances = 2;
+    inPit(P, T.PEN_S + T.PEN_HALF + 0.5); P.sgOwed = 3; P.sgDue = 2;
     engage(r, P);
     until(r, BRAKE, () => Math.abs(T.gapS(r.s(P), T.PEN_S)) >= T.PEN_HALF + 0.1);
     run(r, NONE, 1.5);
@@ -250,7 +250,7 @@ describe('protecting stop-and-go service', () => {
 
   it('a reversing car is not stationary: no service while it rolls backwards through the box', () => {
     const { r, P } = solo();
-    inPit(P, T.PEN_S, -2); P.sgOwed = 3; P.sgChances = 2;
+    inPit(P, T.PEN_S, -2); P.sgOwed = 3; P.sgDue = 2;
     stepEvents(r, 1, NONE);
     expect(P.sgServing).toBe(false);
     expect(P.sgServed).toBe(0);
@@ -329,47 +329,54 @@ describe('recovering a missed pit entrance', () => {
     expect(P.pitReq).toBe(false);
   });
 
-  it('repeated back-and-forth at the entrance uses one stop-and-go opportunity, keeps the deadline and adds no penalty', () => {
+  it('repeated back-and-forth at the entrance keeps the deadline and the unused deferral, and adds no penalty', () => {
     const { r, P } = solo();
-    // inside lane: every pass misses
-    place(P, T.PIT_IN0 - 2, 1, 5);
-    P.sgOwed = 3; P.sgChances = 2; P.pitReq = true; P.pitPenaltyOnly = true;
+    // inside lane on lap 3: every pass misses
+    P.crossed = 3; P.lapsDone = 2;
+    place(P, 3 * T.L + T.PIT_IN0 - 2, 1, 5);
+    P.sgOwed = 3; P.sgDue = 3; P.pitReq = true; P.pitPenaltyOnly = true;
     run(r, UP, 0.8);
     expect(T.gapS(T.PIT_IN0, r.s(P))).toBeGreaterThan(0);
-    expect(P.sgChances).toBe(1);
+    const appr = r.apprLap(P);
+    expect(appr).toBe(4);
     for (let k = 0; k < 3; k++) {
       run(r, BRAKE, 1); engage(r, P);
       until(r, BRAKE, () => r.s(P) > T.PIT_IN0 - 1.5);
+      expect(r.apprLap(P)).toBe(appr); // backing up never brings the approach back
       run(r, NONE, 0.6);
       const ev = run(r, UP, 1);
       expect(T.gapS(T.PIT_IN0, r.s(P))).toBeGreaterThan(0);
-      expect(ev.some((e) => e.type === 'timePen')).toBe(false);
+      expect(ev.some((e) => e.type === 'breach' || e.type === 'dq')).toBe(false);
     }
-    expect([P.sgChances, P.sgOwed, P.timePen, P.pitReq, P.lapsDone]).toEqual([1, 3, 0, true, 0]);
-    // the next real approach is the last opportunity, exactly as before
+    expect([P.sgDue, P.sgDeferred, P.sgOwed, P.timePen, P.pitReq, P.lapsDone, P.svcBreach]).toEqual([3, false, 3, 0, true, 2, null]);
+    // the line ending the due lap uses the one deferral, exactly once
     P.revMark = null;
-    place(P, T.L + T.PIT_IN0 - 2, 1, 8);
-    const ev = run(r, UP, 1);
-    expect(ev.filter((e) => e.type === 'timePen')).toHaveLength(1);
-    expect(P.timePen).toBe(PEN.unservedDetour + 3);
+    const ev = crossLine(r, P, 3, 1);
+    expect([P.sgDue, P.sgDeferred, P.svcBreach]).toEqual([4, true, null]);
+    expect(msgs(ev).filter((m) => m === 'msg.sgLastLap')).toHaveLength(1);
   });
 
-  it('a spent opportunity is not restored by backing up and entering', () => {
+  it('a latched breach is not undone by backing up, entering and serving', () => {
     const { r, P } = solo();
-    place(P, T.PIT_IN0 + 1, -1, 0);
-    P.sgOwed = 3; P.sgChances = 1; P.pitReq = true; P.pitPenaltyOnly = true;
+    P.crossed = 3; P.lapsDone = 2;
+    place(P, 3 * T.L + T.PIT_IN0 + 1, -1, 0);
+    P.sgOwed = 3; P.sgDue = 2; P.sgDeferred = true; P.svcBreach = 'stopGo';
     P.change = { from: 1, to: -1, s0: T.PIT_IN0 - 4, s1: T.PIT_IN0 + 3 }; // a late change made it miss
-    P.u = T.PIT_IN0 - 0.5; P.v = 4;
+    P.u = 3 * T.L + T.PIT_IN0 - 0.5; P.v = 4;
     run(r, UP, 0.5);
-    expect(P.timePen).toBe(PEN.unservedDetour + 3); // converted at the miss, on the last opportunity
-    until(r, UP, () => P.change !== null);
+    expect(P.mode).toBe('race');
+    until(r, UP, () => P.change === null);
     run(r, BRAKE, 1.5); engage(r, P);
     until(r, BRAKE, () => r.s(P) > T.PIT_IN0 - 1.5);
     run(r, NONE, 0.6);
-    r.requestPit();
+    expect(P.pitReq).toBe(true); // an owed stop keeps routing on: no Pit press is needed
     run(r, UP, 1.5);
     expect(P.mode).toBe('pitlane');
-    expect([P.sgOwed, P.sgChances, P.timePen]).toEqual([0, 0, PEN.unservedDetour + 3]);
+    // stop in the box: the stop is settled, the breach is not
+    P.u += T.gapS(r.s(P), T.PEN_S); P.d = T.pitD(P.u); P.v = 0;
+    run(r, NONE, 3.5);
+    expect(P.sgOwed).toBe(0);
+    expect([P.svcBreach, P.timePen]).toEqual(['stopGo', 0]);
   });
 });
 
@@ -572,7 +579,7 @@ class Btn extends EventTarget implements PadButton {
 
 describe('keyboard and touch Brake', () => {
   function rig() {
-    const input = new DrivingInput({ lane: () => {}, pit: () => {}, view: () => {}, pause: () => {} });
+    const input = new DrivingInput({ lane: () => {}, pit: () => {}, defer: () => {}, view: () => {}, pause: () => {} });
     const brake = new Btn({ hold: 'brake' }), throttle = new Btn({ hold: 'throttle' });
     const pad = new TouchPad([brake, throttle], input, () => {});
     const { r, P } = solo();

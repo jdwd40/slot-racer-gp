@@ -80,7 +80,11 @@ export function clearGhost(track: string, car: string, initials: string): void {
 // ---------------------------------------------------------------- championship
 export const CHAMP_TRACKS = ['circuit-1', 'circuit-2', 'circuit-4', 'circuit-5'];
 export const CHAMP_POINTS = [10, 6, 4, 2];
-export interface RoundResult { track: string; /** finishing order: driver indices (0 = player), DNFs flagged */ order: { idx: number; dnf: boolean; time: number }[]; }
+/**
+ * Finishing order: driver indices (0 = player). Classified finishers come first; DNF and DQ entries score nothing.
+ * `dq` was added later: saves from before it simply have no disqualifications, so they load and score exactly as they did.
+ */
+export interface RoundResult { track: string; order: { idx: number; dnf: boolean; dq?: boolean; time: number }[]; }
 export interface Championship { v: number; car: string; initials: string; rounds: RoundResult[]; startedAt: number; }
 const CHAMP_KEY = 'srgp.champ';
 
@@ -98,6 +102,12 @@ export function saveChamp(c: Championship): void { set(CHAMP_KEY, c); }
 export function clearChamp(): void { del(CHAMP_KEY); }
 export function champDone(c: Championship): boolean { return c.rounds.length >= CHAMP_TRACKS.length; }
 
+/** Points for the entry at position `pos` of a round: nothing for a DNF or DQ. */
+export function roundPoints(r: RoundResult, pos: number): number {
+  const o = r.order[pos];
+  return !o || o.dnf || o.dq ? 0 : CHAMP_POINTS[pos] ?? 0;
+}
+
 export interface Standing { idx: number; points: number; wins: number; seconds: number; lastPos: number; }
 /** Cumulative standings with tie-breaks: points, wins, second places, final-round position. */
 export function standings(c: Championship, drivers: number): Standing[] {
@@ -106,8 +116,8 @@ export function standings(c: Championship, drivers: number): Standing[] {
   c.rounds.forEach((r, ri) => {
     r.order.forEach((o, pos) => {
       const s = st[o.idx]; if (!s) return;
-      if (!o.dnf) { s.points += CHAMP_POINTS[pos] ?? 0; if (pos === 0) s.wins++; if (pos === 1) s.seconds++; }
-      if (ri === c.rounds.length - 1) s.lastPos = o.dnf ? 99 : pos + 1;
+      if (!o.dnf && !o.dq) { s.points += roundPoints(r, pos); if (pos === 0) s.wins++; if (pos === 1) s.seconds++; }
+      if (ri === c.rounds.length - 1) s.lastPos = o.dnf || o.dq ? 99 : pos + 1;
     });
   });
   return st.sort((a, b) => b.points - a.points || b.wins - a.wins || b.seconds - a.seconds || a.lastPos - b.lastPos);
