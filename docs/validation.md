@@ -25,7 +25,7 @@ Functional runs default to 480×270 at Low so SwiftShader can run them. Perf cap
 | Scenario | How it runs | Covers |
 | --- | --- | --- |
 | `race` | Real frames and real keys, no scripted state | Clubman Park, Sunburst, 13 laps: countdown, throttle, brake, lane request, camera, pause and resume, pit request, entry, service and exit, finish, results, restart, clock policy |
-| `controlled` | Scripted set-up with `__game.advance`, then real frames and keys | De-slot and recovery, warning, stop-and-go served and unserved, blur, hidden tab, 1.5 s stall, resize, restart |
+| `controlled` | Scripted set-up with `__game.advance`, then real frames and keys | De-slot and recovery, warning, stop-and-go served, and unserved (disqualified at the flag), blur, hidden tab, 1.5 s stall, resize, restart |
 | `routing` | Scripted placement, then real frames and keys | Pit and stop-and-go outside routing: Space override, HUD chips and arrows, fuel stop, serve, and pit entry from the inside lane on every circuit |
 | `practice` | Real keys, fixture saves | Valid lap, PB, ghost save and replay, invalid lap, reload |
 | `championship` | Fixture saves, race skipped by script | Continue, round stored once, reload, damaged saves |
@@ -34,6 +34,7 @@ Functional runs default to 480×270 at Low so SwiftShader can run them. Perf cap
 | `responsive` | Chromium mobile emulation at DPR 2, 1440×900 desktop, some scripted state | HUD and menus at 360×640, 390×844, 640×360, 844×390 and 768×1024, desktop geometry, rotation and browser bars with input held, overlays, keyboard, safe areas, Practice and Championship by touch, frame and press timing. See [responsive layouts](responsive.md) |
 | `touchrace` | Real frames, emulated touch only, 844×390 | Clubman Park, 13 laps on the pad: fuel stop, finish, results, Race Again |
 | `reverse` | Scripted placement, then real keys and emulated touch | Hold-Brake reverse: HUD cue, overshot box and bay, blur and resume, touch Brake and pointer cancel. See [reverse](reverse.md) |
+| `service` | Scripted placement, then real keys and emulated touch at 360×640 and 640×360 | Service obligations: request, N and touch Defer, route release and re-arm, refused toggles, latched breach, DQ on the results screen and in a championship round, Defer layout, final lap with the box occupied. See [service obligations](penalties.md) |
 
 `__game.advance` and scripted state are functional coverage only and are never used for timing or smoothness.
 

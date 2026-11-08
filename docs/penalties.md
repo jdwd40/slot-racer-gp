@@ -101,3 +101,36 @@ Championship saves stay at `v: 1`. `dq` is an optional field: older saves have n
 | DQ | `DQ` flash, `DQ` flag in the standings and results, reason on the results screen |
 
 In portrait, the meters and messages move up by one button height while Defer is shown, so nothing lands on a control.
+
+## Evidence
+
+**The build host has no GPU.** Browser runs used SwiftShader (ANGLE, Vulkan, software), and touch was Chromium emulation through CDP. **They are diagnostics only and say nothing about behaviour or smoothness on a real phone, tablet or GPU.** No physical device was tested.
+
+| Check | Result |
+| --- | --- |
+| `npm run typecheck`, `npm test`, `npm run build` | Pass, 305 tests in 12 files. `test/obligations.test.ts` adds 28, and the penalty, routing, reverse, input, records and tracks tests were rewritten for the new rules |
+| AI determinism | 10 seeded all-AI races (5 circuits × 2 seeds, up to 200 s) against baseline `525b55b`. Nine are identical (position, speed, fuel, laps, stops, offences, stop owed, best lap). The tenth (circuit-4, seed 2) reached the flag inside 200 s. It matches up to the end of the race, and its finish times are identical. The only difference is that a car the baseline left with an estimated time now gets a real finish (189.93 s) from the run-out |
+| `service` browser scenario (new) | 16 of 16, run twice (on `99b63f3` and `254ba32`). Covers keyboard N and touch Defer, refused toggles, route release and re-arm, breach shown at once, DQ on the results screen and in a championship round, Defer layout at 360×640 and 640×360, and the final lap with the box occupied |
+| `tracks`, `race`, `controlled` | 6, 23 and 17 passed on `99b63f3`. The one `controlled` n/a, real window blur and tab switch, was already there. `controlled` now checks that an unserved stop disqualifies at the flag |
+| `routing`, `practice`, `championship`, `reverse` | 16, 10, 9 and 9 passed on `254ba32` |
+| `touch`, `responsive`, `touchrace` | 53, 71 and 7 passed on `254ba32`. `responsive`'s crowded HUD now includes both service chips and the breach chip |
+
+Browser setup: headless Chromium 156.0.8078.4, Linux 7.0.0-42-generic x64, Node 26.7.0, 480×270 at Low unless a scenario sets its own size. All runs are bounded by `--max-minutes`.
+
+`test/obligations.test.ts` covers:
+
+- **Optional requests:** never requested, missed without an override, cancelled, still armed at the flag.
+- **Deferring:** the first deferral and its re-arm, a second N, P bringing the route back, P refused, the lane override as a deferral, the final lap, practice, the pit lane, and de-slot or tow.
+- **The box:** occupied before and on the final lap, a used deferral, added stop time, continuous service, a late award and recovering it by reversing.
+- **Fuel service:** drive-through, entering the bay, departure-ready time with a full tank, a tow, combined service, service after the breach.
+- **The final crossing:** service before the line, a deadline on the final lap, same-step ordering, practice.
+- **Robustness:** reversing, re-slots, pause and a fresh race.
+- **Settlement:** a DQ reaching results with no wait, the run-out, DNF, and championship scoring.
+
+Save compatibility is tested in `test/records.test.ts`.
+
+### Known limits
+
+- Scripted placement (`__game.advance` and direct state) sets up the browser situations, so they are functional coverage, not play-testing. No full race was played to a DQ in real frames.
+- The run-out simulates up to 240 s in one frame when the race ends. That is a single pause while the results screen opens. It was not measured on a real device.
+- The touch Defer cue is short (`⏭ next lap`). Its consequence is in the toast on tapping, the touch hint and the HUD chip.
