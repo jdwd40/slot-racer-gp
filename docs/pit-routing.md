@@ -11,7 +11,7 @@ While a pit request or stop-and-go is active, the player's car takes the outside
 | Inside | One-switch override | Stay inside |
 | Outside | One-switch override | Change to inside |
 
-- `Race.requestLane()` (Space) toggles the override while routing is active, and is the normal lane request otherwise. `Race.requestPit()` (P) arms or cancels an optional fuel stop. `Race.requestDefer()` (N) puts the visit back one lap: see [service obligations](penalties.md). Touch controls call these same actions: see [touch controls](touch.md).
+- `Race.requestLane(id)` (Space) toggles the override while routing is active, and is the normal lane request otherwise. `Race.requestPit(id)` (P) arms or cancels an optional fuel stop. `Race.requestDefer(id)` (N) puts the visit back one lap: see [service obligations](penalties.md). Touch controls call these same actions: see [touch controls](touch.md). Each takes the driver ID and only ever changes that driver's car; see [multiplayer race core](multiplayer-core.md).
 - `Race.nextRoute()` is the single decision. The switch logic, HUD chip and arrows all read it.
 - The override is used up at the next switch, even if the move is blocked or a committed change is still running. The approach it was used on is recorded (`overAppr`).
 - A blocked automatic move retries at the next switch. Committed changes are never reversed.

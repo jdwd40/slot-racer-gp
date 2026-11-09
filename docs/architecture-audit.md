@@ -78,8 +78,8 @@ Persistence is `localStorage` only, through `src/records.ts`, under `srgp.*` key
 
 | # | Finding | Severity | Status |
 |---|---|---|---|
-| A1 | **Active track is module-level mutable state.** `T.setTrack()` reassigns exported `let`s (`SEGS`, `L`, `SWITCHES`, …) and `Race` reads them live through about 90 `T.*` references. Only one track can exist per JavaScript realm. | High (multiplayer), Low (single-player) | Confirmed |
-| A2 | **Single human car hard-wired.** `isPlayer` is `idx === 0`; `Race.player` is `cars[0]`; `requestLane()`/`requestPit()` take no car argument; `update()` accepts one `Input`. | High (multiplayer) | Confirmed |
+| A1 | **Active track is module-level mutable state.** `T.setTrack()` reassigns exported `let`s (`SEGS`, `L`, `SWITCHES`, …) and `Race` reads them live through about 90 `T.*` references. Only one track can exist per JavaScript realm. | High (multiplayer), Low (single-player) | Confirmed. Resolved in #21: each `Race` holds an immutable `Track` context ([multiplayer-core.md](multiplayer-core.md)) |
+| A2 | **Single human car hard-wired.** `isPlayer` is `idx === 0`; `Race.player` is `cars[0]`; `requestLane()`/`requestPit()` take no car argument; `update()` accepts one `Input`. | High (multiplayer) | Confirmed. Resolved in #21: driver-ID roster, per-driver inputs and actions ([multiplayer-core.md](multiplayer-core.md)) |
 | A3 | **Race rules live in the presentation layer.** `recordChampRound()` in `src/main.ts:279` decides DNF and stores points; valid-lap submission to boards and ghost saving happen in `handle()`/`onPlayerCross()`. A server would have to re-implement these. | Medium | Confirmed |
 | A4 | **Driver names and colours duplicated.** `driverName()`/`driverColor()` in `src/main.ts:275-276` hard-code the rivals that `DRIVERS` in `race.ts` already defines. | Low | Confirmed |
 | A5 | **Four-car assumptions.** `collide()` keys contact state as `min*4+max` (`src/race.ts:794`); the grid layout and `[7, 11, 3, 24]` race numbers are literal four-entry tables. | Low now, Medium for multiplayer | Confirmed |
