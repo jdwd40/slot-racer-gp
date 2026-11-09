@@ -348,7 +348,6 @@
     { "id": "net.host", "text": "Host" },
     { "id": "net.left", "text": "Left" },
     { "id": "net.disconnected", "text": "Reconnecting" },
-    { "id": "net.hosting", "text": "Host" },
     { "id": "net.ready", "text": "Ready" },
     { "id": "net.notReady", "text": "Not ready" },
     { "id": "net.asked", "text": "(asked for {c})" },

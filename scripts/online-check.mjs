@@ -71,13 +71,16 @@ const VIEWS = {
 };
 
 /** A throwaway browser context on the low preset, with the shared in-page driver and a key or touch "Keys". */
-async function openPage(run, url, view = 'laptop', { touch = false, name = view } = {}) {
+async function openPage(run, url, view = 'laptop', { touch = false, name = view, fpsCap = 0 } = {}) {
   const context = await run.browser.newContext({ ...VIEWS[view] });
   const page = await context.newPage();
   page.setDefaultTimeout(60000);
   const errors = [];
   page.on('pageerror', (e) => errors.push(`pageerror: ${e.message}`));
   page.on('console', (m) => { if (m.type() === 'error' && !/WebSocket|ERR_CONNECTION|Failed to load resource|net::/.test(m.text())) errors.push(`console: ${m.text()}`); });
+  // Several pages share four cores of software rendering. A cap on drawn frames (harness only, before the game loads) leaves
+  // each page's main thread free for its socket and input: the online client never simulates, so only drawing slows down.
+  if (fpsCap) await page.addInitScript((ms) => { const raf = window.requestAnimationFrame.bind(window); let last = 0; window.requestAnimationFrame = (cb) => raf(function step(ts) { if (ts - last < ms) { raf(step); return; } last = ts; cb(ts); }); }, Math.round(1000 / fpsCap));
   await page.addInitScript(instrument, { seed: null });
   await page.addInitScript(() => {
     // Brake press timing, armed by the check: to the first server state that shows it (network + server), and to the first drawn frame
@@ -141,6 +144,8 @@ async function joinRoom(s, name, code) {
 
 /** Drive several browsers at once, each with its own keys or fingers, until each reaches `until`. */
 const PACE = 0.72;
+/** frames per second drawn by each page in the multi-page races (harness cap, see openPage) */
+const CAP = 4;
 async function driveAll(list, until, budgetMs, opts = {}) {
   return Promise.all(list.map((s) => driveUntil(s, until, { budgetMs, opts: { pace: PACE, ...opts } }).catch((e) => ({ error: String(e.message ?? e) }))).concat());
 }
@@ -196,10 +201,10 @@ async function gate(run, c) {
 /** Lobby flows and the 4-, 3- and 2-player races, all through the UI on the time-scaled server. */
 async function lobby(run, c) {
   const url = run.fastUrl;
-  const host = await openPage(run, url, 'small', { name: 'host' });
-  const phone = await openPage(run, url, 'phoneLo', { touch: true, name: 'phone' });
-  const tablet = await openPage(run, url, 'tabletLo', { touch: true, name: 'tablet' });
-  const desk = await openPage(run, url, 'small', { name: 'desk' });
+  const host = await openPage(run, url, 'small', { name: 'host', fpsCap: CAP });
+  const phone = await openPage(run, url, 'phoneLo', { touch: true, name: 'phone', fpsCap: CAP });
+  const tablet = await openPage(run, url, 'tabletLo', { touch: true, name: 'tablet', fpsCap: CAP });
+  const desk = await openPage(run, url, 'small', { name: 'desk', fpsCap: CAP });
   const all = [host, phone, tablet, desk];
   const code = await createRoom(host, 'Host Ana');
   c.ok('Create room: a 6-character code is shown as text in the lobby', /^[A-Z2-9]{6}$/.test(code) && (await host.page.locator('#l-code').textContent()) === code, code);
@@ -213,7 +218,7 @@ async function lobby(run, c) {
   await snapshotOf(phone.page, 'lobby-phone-portrait.png'); await snapshotOf(tablet.page, 'lobby-tablet.png'); await snapshotOf(host.page, 'lobby-laptop.png');
   for (const s of [phone, tablet, host]) c.ok(`Lobby layout (${s.view}): card fits the width, no sideways scroll`, (await layoutFacts(s.page)).fitsWidth && !(await layoutFacts(s.page)).docScrollX, await layoutFacts(s.page));
   // fifth human (opened only now: every open page renders, and SwiftShader shares four cores)
-  const fifth = await openPage(run, url, 'phoneLandLo', { touch: true, name: 'fifth' });
+  const fifth = await openPage(run, url, 'phoneLandLo', { touch: true, name: 'fifth', fpsCap: CAP });
   await joinRoom(fifth, 'Fifth', code);
   await waitFor(fifth.page, () => document.getElementById('n-msg')?.textContent.length > 0 && !document.getElementById('n-msg').textContent.includes('Connecting'));
   const full = await read(fifth.page, () => ({ screen: window.__game.screen, msg: document.getElementById('n-msg').textContent, net: window.__game.net }));
@@ -222,7 +227,7 @@ async function lobby(run, c) {
   await fifth.context.close();
   // readiness and permissions
   const start0 = await read(host.page, () => document.getElementById('l-start')?.getAttribute('aria-disabled'));
-  await host.page.click('#l-start');
+  await host.page.click('#l-start', { force: true });   // aria-disabled: still pressable, and the server refuses with a reason
   await waitFor(host.page, () => document.getElementById('l-msg').textContent.includes('ready') || document.getElementById('l-msg').textContent.includes('Not everyone'));
   const notStarted = await read(host.page, () => window.__game.net.room.state);
   c.ok('Start is refused until every driver is ready (the host sees why)', start0 === 'true' && notStarted === 'lobby', { start0, notStarted });
@@ -241,9 +246,11 @@ async function lobby(run, c) {
   await waitFor(host.page, () => window.__game.net.room.participants.filter((p) => p.ready).length === 3);
   await host.page.click('#l-start');
   for (const s of all) await waitFor(s.page, () => window.__game.screen === 'race' && window.__game.net.raceId);
-  const ids = await Promise.all(all.map(async (s) => read(s.page, () => { const g = window.__game, p = g.race.car(g.localId); return { me: g.localId, slot: p.idx, num: p.num, bay: p.bayHome, hudYou: document.querySelector('#h-stand .me')?.textContent ?? '', mine: g.bays.filter((b) => b.mine).length, marker: Math.hypot(g.marker.position.x - p.x, -g.marker.position.z - p.y) }; })));
-  c.ok('Four browsers race: each follows its own driver ID and slot (nonzero slots included), HUD row "YOU", own bay painted', new Set(ids.map((x) => x.me)).size === 4 && new Set(ids.map((x) => x.slot)).size === 4 && ids.filter((x) => x.slot > 0).length === 3 && ids.every((x) => x.hudYou.includes(str('hud.you')) && x.mine === 1), ids);
-  const lateJoin = await openPage(run, url, 'laptop', { name: 'late' });
+  for (const s of all) await waitFor(s.page, () => document.querySelector('#h-stand .me'), undefined, 20000).catch(() => null);
+  await sleep(2000);
+  const ids = await Promise.all(all.map(async (s) => read(s.page, () => { const g = window.__game, p = g.race.car(g.localId); return { me: g.localId, slot: p.idx, num: p.num, bay: p.bayHome, hudYou: document.querySelector('#h-stand .me')?.textContent ?? '', mine: g.bays.filter((b) => b.mine).length, mineNum: g.bays.find((b) => b.mine)?.num, camToCar: +Math.hypot(g.camTarget.x - p.x, -g.camTarget.z - p.y).toFixed(1) }; })));
+  c.ok('Four browsers race: each follows its own driver ID and slot (nonzero slots included): HUD row "YOU", camera on its car, own bay painted with its number', new Set(ids.map((x) => x.me)).size === 4 && new Set(ids.map((x) => x.slot)).size === 4 && ids.filter((x) => x.slot > 0).length === 3 && ids.every((x) => x.hudYou.includes(str('hud.you')) && x.mine === 1 && x.mineNum === x.num && x.camToCar < 10), ids);
+  const lateJoin = await openPage(run, url, 'laptop', { name: 'late', fpsCap: CAP });
   await joinRoom(lateJoin, 'Late', code);
   await waitFor(lateJoin.page, () => document.getElementById('n-msg').textContent.startsWith('That race'));
   c.ok('Join after the start is refused: the starting roster is locked', true);
@@ -308,7 +315,7 @@ async function lobby(run, c) {
   // the winner's finish must not stop the other: tablet drives slower, phone finishes first
   const [fa, fb] = await Promise.all([driveUntil(phone, done, { budgetMs: 6 * 60000, opts: { pace: PACE } }).catch((e) => ({ error: String(e) })), (async () => { await sleep(4000); return driveUntil(tablet, done, { budgetMs: 6 * 60000, opts: { pace: PACE * 0.9 } }).catch((e) => ({ error: String(e) })); })()]);
   const mid = await read(tablet.page, () => window.__game.screen);
-  for (const s of [phone, tablet]) await waitFor(s.page, () => window.__game.screen === 'netres', undefined, 150000);
+  for (const s of [phone, tablet]) await waitFor(s.page, () => window.__game.screen === 'netres', undefined, 150000).catch(async (e) => { throw new Error(`${e.message} ${JSON.stringify({ fa, fb, mid, now: await Promise.all([phone, tablet].map((x) => read(x.page, () => ({ screen: window.__game.screen, net: window.__game.net && { conn: window.__game.net.conn, state: window.__game.net.room?.state }, phase: window.__game.race.phase, cars: window.__game.race.cars.map((c) => c.status) })))) })}`); });
   const res2 = await Promise.all([phone, tablet].map((s) => read(s.page, () => window.__game.net.result)));
   c.ok('2-player race: completed; identical standings on both', !fa.error && !fb.error && res2[0].digest === res2[1].digest && res2[0].classification.length === 2, res2[0].classification.map((x) => `${x.pos}:${x.status}`));
   run.evidence.race2 = res2[0].classification.map((x) => `${x.pos ?? '-'}:${x.status}${x.dnfReason ? '/' + x.dnfReason : ''}`);
@@ -320,8 +327,8 @@ async function lobby(run, c) {
 /** One representative race: queue at the box, automatic stop-and-go, own-bay refuelling with a fresh Throttle, override and Defer, final-lap DQ. */
 async function service(run, c) {
   const url = run.fastUrl;
-  const a = await openPage(run, url, 'small', { name: 'keys' });
-  const b = await openPage(run, url, 'phoneLandLo', { touch: true, name: 'touch' });
+  const a = await openPage(run, url, 'small', { name: 'keys', fpsCap: CAP });
+  const b = await openPage(run, url, 'phoneLandLo', { touch: true, name: 'touch', fpsCap: CAP });
   const code = await createRoom(a, 'Keys', { ai: true });
   await joinRoom(b, 'Touch', code);
   await waitFor(b.page, () => window.__game.screen === 'lobby');
@@ -419,7 +426,7 @@ async function connection(run, c) {
   c.ok('Protocol path, induced latency: confirmation grows by about the added round trip only', pl1.medianMs < pl0.medianMs + 220, pl1);
   P.delayMs = 0; P.jitterMs = 0;
   const a = await openPage(run, url, 'small', { name: 'keys' });
-  const b = await openPage(run, url, 'phoneLo', { touch: true, name: 'phone' });
+  const b = await openPage(run, url, 'phoneLo', { touch: true, name: 'phone', fpsCap: CAP });
   const code = await createRoom(a, 'Keys');
   await joinRoom(b, 'Phone', code);
   await waitFor(b.page, () => window.__game.screen === 'lobby');

@@ -1046,7 +1046,8 @@ function onNetResult(r: ResultView, fresh: boolean): void {
     const mine = r.classification?.find((x) => x.id === localId);
     if (mine?.pos === 1) sfx.fanfare();
   }
-  if (screen !== 'pause') showNetResults(r);
+  // shown even over the race menu: once the server has classified the race there is nothing left to drive
+  showNetResults(r);
 }
 
 function onNetNack(m: Extract<ServerMsg, { t: 'nack' }>): void {
@@ -1073,7 +1074,7 @@ function seatRow(p: PublicRoom['participants'][number], hostId: string | null): 
   if (p.id === hostId) tags.push(`<span class="chip cyan">${t('net.host')}</span>`);
   if (p.left) tags.push(`<span class="chip red">${t('net.left')}</span>`);
   else if (!p.connected) tags.push(`<span class="chip org">${t('net.disconnected')}</span>`);
-  if (!p.left) tags.push(p.ready || p.id === hostId ? `<span class="chip grn">${t(p.id === hostId ? 'net.hosting' : 'net.ready')}</span>` : `<span class="chip dim">${t('net.notReady')}</span>`);
+  if (!p.left && p.id !== hostId) tags.push(p.ready ? `<span class="chip grn">${t('net.ready')}</span>` : `<span class="chip dim">${t('net.notReady')}</span>`);
   const asked = p.liveryRequested ? ` <small>${t('net.asked', { c: t(`net.liv.${p.liveryRequested}`) })}</small>` : '';
   return `<tr class="${p.id === net?.me ? 'me' : ''}" data-pid="${esc(p.id)}"><td class="mono">#${p.num}</td><td>${colorDot(p.color)}<span class="nm">${esc(p.name)}</span>${asked}</td><td>${tags.join(' ')}</td></tr>`;
 }
