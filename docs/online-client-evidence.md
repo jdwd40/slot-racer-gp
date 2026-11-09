@@ -14,7 +14,7 @@ Taken on 9 November 2026 on the build host. Design: [online-client.md](online-cl
 npm run typecheck && npm test && npm run build
 node scripts/online-check.mjs gate layout                 # run 2026-11-09T07-22
 node scripts/online-check.mjs connection service lobby    # run 2026-11-09T07-49 (connection, service)
-node scripts/online-check.mjs lobby                       # runs 2026-11-09T06-57 and LOBBY_FINAL_RUN (lobby)
+node scripts/online-check.mjs lobby                       # runs 2026-11-09T06-57, 07-49 and 08-10 (lobby)
 ```
 
 | Scenario | Last run | Passed | Failed | Notes |
@@ -23,7 +23,7 @@ node scripts/online-check.mjs lobby                       # runs 2026-11-09T06-5
 | layout | 07-22 | 24 | 0 | |
 | connection | 07-49 | 13 | 1 | Every check up to and including the reload Rejoin passed. The expiry step then timed out: when the harness blocked the WebSocket, a reconnect attempt that never opened hung, so the client never gave up. Fixed afterwards (`CONNECT_TIMEOUT_MS`, 8 s per attempt in `src/net/client.ts`). Expiry is covered by the headless test against the real server. **It was not re-run in the browser for lack of time** |
 | service | 07-49 | 8 | 1 | The one failure was the check's own condition: the keyboard driver had completed five automatic stop-and-go cycles (`entry → serving → leaving`), but owed 3 s more at the moment of reading, from real contacts made by the scripted drivers. The condition was changed to "served" and was not re-run |
-| lobby | LOBBY_ROW |
+| lobby | 06-57 | 19 | 2 | The **4-player and 3-player browser races completed** with identical final standings everywhere. The lobby, fifth-player, late-join, rematch, no-local-records and creator-leaves checks passed. Failures: (1) the "HUD row YOU / camera" check ran while a harness bug starved the game's frame loop. The harness was fixed, and the same HUD and seat facts pass in `layout` and `service`. (2) The 2-player race's final wait timed out; a fix followed (results are now shown even over the race menu). **The 07-49 and 08-10 re-runs stopped at setup**: a joining page under four software-rendered pages showed no Online button, because its one health probe did not succeed. A reload-and-retry did not clear it. **Unresolved for lack of time.** The browser 2-player full race was therefore not re-verified. 2-player races are covered by the headless test and by the 2-browser `service` race |
 
 `online-check.mjs` sets up its own environment:
 
@@ -39,7 +39,7 @@ node scripts/online-check.mjs lobby                       # runs 2026-11-09T06-5
 
 | Item | Result | Where |
 | --- | --- | --- |
-| 2-, 3- and 4-player races through the real server | **Browsers:** 4-player (four contexts: 480×270 keyboard ×2, 390×844 touch, 1024×768 touch) and 3-player (touch host) races completed with identical final standings on every page. **Headless:** 2-, 3- and 4-client races with the browser's own `NetSession` + mirror, identical digests | `lobby`; `netsession.test.ts` |
+| 2-, 3- and 4-player races through the real server | **Browsers (run 06-57):** 4-player (four contexts: 480×270 keyboard ×2, 390×844 touch, 1024×768 touch) and 3-player (touch host) races completed with identical final standings on every page. The 2-browser race (`service`, with 2 AI) ran to the server's final standings, ended by retirements. **Headless:** 2-, 3- and 4-client races with the browser's own `NetSession` + mirror, identical digests | `lobby`; `netsession.test.ts` |
 | Distinct simultaneous inputs, nonzero local IDs | Server-side held pedals sampled during the 4-player race: each seat matched its own browser in 193 of 222 samples (the rest were in flight). Seats differed in 177 samples. Slots 0–3 were each followed by its own browser | `lobby` |
 | Lobby: create, join by code (lower case accepted), ready/unready, host-only Start with reason, track change, code shown as text, AI slots listed | Passed | `lobby`, `service` |
 | Unsafe name `<img src=x onerror=…>Zed` | Rendered as text in the lobby on every page; no `img` element, the handler never ran | `lobby` |
@@ -80,6 +80,7 @@ node scripts/online-check.mjs lobby                       # runs 2026-11-09T06-5
 - **Real-GPU smoothness and input feel:** not measurable on this host.
 - **Production endpoint:** not activated. Every server here was local, with test settings: time scale 2 for the lobby races, and a 40 s grace in the connection checks.
 - **Browser-driven final-lap DQ:** checked headlessly (above), with the browser checking only how the server's DQ and DNF are shown.
+- **Re-runs not completed:** the browser expiry step (after the connect-timeout fix), the `service` check with its corrected condition, and the `lobby` scenario after 06-57 (see the run table). These are open items. Re-run `node scripts/online-check.mjs connection service lobby` on a less loaded machine, or one with a GPU.
 
 ## Unit and integration tests
 
