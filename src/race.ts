@@ -797,9 +797,12 @@ export class Race {
     c.sgCtl = true; c.sgPhase = c.pitHold ? 'queued' : 'entry';
   }
 
-  /** The player's fuel visit in the pit lane is still to reach its own bay: the controller drives it there (stop-and-go first). */
+  /**
+   * The player's fuel visit in the pit lane is still to reach its own bay: the controller drives it there (stop-and-go first).
+   * A car already past the bay centre (only by hand) is left to the driver: reversing back and releasing captures the bay as usual.
+   */
   autoBay(c: Car, s: number): boolean {
-    return c.mode === 'pitlane' && c.pitFuel && !c.serviced && !c.sgLeave && c.sgOwed <= 0 && T.gapS(s, T.BAYS[c.bayHome]) > -T.BAY_HALF;
+    return c.mode === 'pitlane' && c.pitFuel && !c.serviced && !c.sgLeave && c.sgOwed <= 0 && T.gapS(s, T.BAYS[c.bayHome]) > -AUTO.bayTol;
   }
 
   /** The bay number shown to the driver: 1 for the first bay down the pit lane. */

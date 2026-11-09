@@ -1673,7 +1673,7 @@ async function reverse(run, c) {
   // ---- keyboard
   const s = await open(run);
   const { page, keys } = s;
-  const T0 = await read(page, () => ({ PEN_S: window.__game.T.PEN_S, PEN_HALF: window.__game.T.PEN_HALF, BAY3: window.__game.T.BAYS[3], BAY_HALF: window.__game.T.BAY_HALF, PIT_IN1: window.__game.T.PIT_IN1 }));
+  const T0 = await read(page, () => ({ PEN_S: window.__game.T.PEN_S, PEN_HALF: window.__game.T.PEN_HALF, BAY0: window.__game.T.BAYS[0], BAY_HALF: window.__game.T.BAY_HALF, PIT_IN1: window.__game.T.PIT_IN1 }));
   await setup(page, { s: T0.PEN_S + T0.PEN_HALF + 0.5, pit: true, sgOwed: 3 });
   // slow software frames can reach the box between two reads, so the chip is watched as it changes
   await read(page, (label) => { const el = document.getElementById('h-chips'); window.__qa.revChip = false; new MutationObserver(() => { if (el.textContent.includes(label)) window.__qa.revChip = true; }).observe(el, { childList: true, subtree: true, characterData: true }); }, STRINGS['hud.reverse']);
@@ -1695,15 +1695,15 @@ async function reverse(run, c) {
   c.ok('Box: Brake still held after service never reverses, through the automatic exit and after the handover', after.mode === 'race' && after.v === 0 && !after.revOn && after.minV >= 0 && after.latch, after);
   await keys.set('ArrowDown', false);
 
-  await setup(page, { s: T0.BAY3 + T0.BAY_HALF + 0.5, pit: true, fuel: 0.3 });
+  await setup(page, { s: T0.BAY0 + T0.BAY_HALF + 0.5, pit: true, fuel: 0.3 });
   await frames(page, 2);
   await keys.set('ArrowDown', true);
   // released on reaching the bay's far edge: a key lands a few slow software frames after the read that chose it
-  await waitFor(page, (b) => { const g = window.__game, p = g.race.player; return g.T.gapS(b, g.T.wrapS(p.u)) < 0.9; }, T0.BAY3, 15000);
+  await waitFor(page, (b) => { const g = window.__game, p = g.race.player; return g.T.gapS(b, g.T.wrapS(p.u)) < 0.9; }, T0.BAY0, 15000);
   await keys.set('ArrowDown', false);
   await waitFor(page, () => ['bayIn', 'service'].includes(window.__game.race.player.mode), null, 10000).catch(() => null);
   const bay = await P(page);
-  c.ok('Bay: back past an overshot bay, release, and the bay is captured for refuelling', ['bayIn', 'service'].includes(bay.mode) && bay.bay === 3 && bay.pitStops === 1, bay);
+  c.ok('Bay: back past its own overshot bay, release, and the bay is captured for refuelling', ['bayIn', 'service'].includes(bay.mode) && bay.bay === 0 && bay.pitStops === 1, bay);
 
   await setup(page, { s: 120 });
   await keys.set('ArrowDown', true);
@@ -2227,7 +2227,7 @@ async function autobay(run, c) {
   await keys.tap('Escape');
 
   // ---- emulated touch, phone and tablet
-  for (const vp of [{ width: 844, height: 390, name: 'phone' }, { width: 1024, height: 768, name: 'tablet' }]) {
+  for (const vp of [{ width: 844, height: 390, name: 'phone' }, { width: 360, height: 640, name: 'portrait phone' }, { width: 1024, height: 768, name: 'tablet' }]) {
     const t = await open(run, { viewport: { width: vp.width, height: vp.height }, device: PHONE });
     await read(t.page, () => window.__game.setTouchMode('on'));
     await pickRaceSetup(t.page);
@@ -2239,13 +2239,15 @@ async function autobay(run, c) {
     await inService(t.page);
     await sleep(900);
     const th = await st(t.page);
+    // the state chip and the status line stay clear of every pad control and inside the viewport
     const overlap = await read(t.page, () => {
-      const chip = document.querySelector('#h-chips .sgp')?.getBoundingClientRect();
-      if (!chip) return null;
-      return [...document.querySelectorAll('#t-pad .tbtn')].filter((b) => !b.hidden).some((b) => { const r = b.getBoundingClientRect(); return !(r.right <= chip.left || r.left >= chip.right || r.bottom <= chip.top || r.top >= chip.bottom); });
+      const els = [document.querySelector('#h-chips .sgp'), document.getElementById('h-status')].map((e) => e?.getBoundingClientRect());
+      if (els.some((e) => !e || !e.width)) return null;
+      const off = els.some((e) => e.left < 0 || e.top < 0 || e.right > innerWidth || e.bottom > innerHeight);
+      return off || [...document.querySelectorAll('#t-pad .tbtn')].filter((b) => !b.hidden).some((b) => { const r = b.getBoundingClientRect(); return els.some((c) => !(r.right <= c.left || r.left >= c.right || r.bottom <= c.top || r.top >= c.bottom)); });
     });
-    await t.page.screenshot({ path: path.join(run.out, `autobay-touch-${vp.name}.png`) });
-    c.ok(`Touch ${vp.name}: finger held on Throttle into its own bay; it does not depart, Throttle reads lift off; the chip covers no control`, th.mode === 'service' && th.bay === th.home && !th.exitReq && th.phase === 'release' && th.thrCue === 'release' && th.thrText === STRINGS['touch.throttle.release'] && overlap === false && !th.inputs.includes('B'), { ...th, overlap });
+    await t.page.screenshot({ path: path.join(run.out, `autobay-touch-${vp.name.replace(' ', '-')}.png`) });
+    c.ok(`Touch ${vp.name}: finger held on Throttle into its own bay; it does not depart, Throttle reads lift off; chip and status are on screen and cover no control`, th.mode === 'service' && th.bay === th.home && !th.exitReq && th.phase === 'release' && th.thrCue === 'release' && th.thrText === STRINGS['touch.throttle.release'] && overlap === false && !th.inputs.includes('B'), { ...th, overlap });
     await f.lift(thr);
     await frames(t.page, 3);
     const tr = await st(t.page);

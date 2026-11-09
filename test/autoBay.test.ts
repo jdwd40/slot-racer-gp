@@ -499,6 +499,29 @@ describe('combined visits and obligations', () => {
   });
 });
 
+describe('past the bay by hand', () => {
+  it('a fuel visit past its bay centre is the driver\'s: Brake-hold reverse works, and releasing at the bay captures it', () => {
+    const { r, P } = setup();
+    inPit(P, T.BAYS[P.bayHome] + T.BAY_HALF + 0.5); P.pitFuel = true; P.fuel = 0.3;
+    run(r, NONE, DT);
+    expect(P.sgCtl).toBe(false); expect(P.mode).toBe('pitlane');
+    while (!P.revOn) run(r, BRAKE, DT);
+    run(r, BRAKE, 5, (r2) => T.gapS(T.BAYS[0], r2.s(P)) < 0.3);
+    const tr = run(r, NONE, 1.5, inService);
+    expect([P.mode, P.bay]).toEqual(['service', P.bayHome]);
+    expect(tr.minV).toBeLessThan(0);                            // it really reversed there
+  });
+
+  it('just short of or at the bay centre, the controller still brings it in', () => {
+    for (const d of [-0.6, 0.1]) {
+      const { r, P } = setup();
+      inPit(P, T.BAYS[P.bayHome] + d); P.pitFuel = true; P.fuel = 0.3;
+      run(r, NONE, 3, inService);
+      expect([P.mode, P.bay]).toEqual(['service', P.bayHome]);
+    }
+  });
+});
+
 describe('frame rate', () => {
   it('stops at the same point at 1/24 to 1/144 s frames', () => {
     const at: number[] = [];
