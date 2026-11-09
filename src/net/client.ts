@@ -17,6 +17,7 @@ export interface SocketLike {
 export type SocketCtor = new (url: string, protocols?: string | string[], opts?: never) => SocketLike;
 
 export const HEARTBEAT_MS = 250;
+export const CONNECT_TIMEOUT_MS = 8000;
 
 export class OnlineClient {
   ws: SocketLike | null = null;
@@ -31,29 +32,50 @@ export class OnlineClient {
   private waiters: { pred: (m: ServerMsg) => boolean; res: (m: ServerMsg) => void; rej: (e: Error) => void; timer: ReturnType<typeof setTimeout> }[] = [];
   private hb: ReturnType<typeof setInterval> | null = null;
   onMessage: ((m: ServerMsg) => void) | null = null;
+  /** the open socket closed (after a completed connect) */
+  onClose: ((e: { code: number; reason: string }) => void) | null = null;
 
   constructor(private url: string, private Ctor: SocketCtor, private opts?: unknown) {}
 
   /** Open the socket and complete the versioned hello. Rejects on a protocol mismatch. */
   async connect(version = PROTOCOL_VERSION): Promise<void> {
     this.closed = null;
+    // never leave the previous socket open behind a new one (a failed reconnect attempt): each holds a server connection slot
+    this.drop();
     const ws = new this.Ctor(this.url, undefined, this.opts as never);
     this.ws = ws;
     await new Promise<void>((res, rej) => {
-      ws.onopen = () => res();
-      ws.onerror = () => rej(new Error('connect failed'));
-      ws.onclose = (e) => rej(new Error(`closed ${e.code}`));
+      // a socket that neither opens nor fails (a dead network path) is given up, so a reconnect loop can try again
+      const timer = setTimeout(() => { rej(new Error('connect timeout')); try { ws.close(); } catch { /* not open */ } }, CONNECT_TIMEOUT_MS);
+      ws.onopen = () => { clearTimeout(timer); res(); };
+      ws.onerror = () => { clearTimeout(timer); rej(new Error('connect failed')); };
+      ws.onclose = (e) => { clearTimeout(timer); rej(new Error(`closed ${e.code}`)); };
     });
-    ws.onmessage = (ev) => this.receive(String(ev.data));
+    // a replaced socket (a reconnect) is ignored from here on: its late close or messages never touch the new connection
+    ws.onmessage = (ev) => { if (this.ws === ws) this.receive(String(ev.data)); };
     ws.onclose = (e) => {
+      if (this.ws !== ws) return;
       this.closed = { code: e.code, reason: e.reason };
       this.stopHeartbeat();
       for (const w of this.waiters.splice(0)) { clearTimeout(w.timer); w.rej(new Error(`closed ${e.code}`)); }
+      this.onClose?.(e);
     };
     ws.onerror = () => undefined;
     this.send({ t: 'hello', v: version, proto: PROTOCOL_NAME });
-    const m = await this.wait((x) => x.t === 'welcome' || (x.t === 'nack' && x.ref === 'hello'));
+    let m: ServerMsg;
+    try { m = await this.wait((x) => x.t === 'welcome' || (x.t === 'nack' && x.ref === 'hello')); } catch (e) { this.drop(); throw e; }
+    // a refused hello is closed by the server, with a code the caller reads from `closed`
     if (m.t !== 'welcome') throw new Error(`hello refused: ${(m as { code: string }).code}`);
+  }
+
+  /** Close the current socket, if any, without reporting it through onClose: the caller has already given up on it. */
+  drop(): void {
+    const ws = this.ws;
+    if (!ws) return;
+    this.ws = null;
+    this.stopHeartbeat();
+    for (const w of this.waiters.splice(0)) { clearTimeout(w.timer); w.rej(new Error('dropped')); }
+    try { ws.close(1000, 'bye'); } catch { /* not open yet */ }
   }
 
   private receive(s: string): void {

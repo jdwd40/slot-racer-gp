@@ -1,6 +1,6 @@
 # Slot Rush GP
 
-A tabletop slot-car racing game: TypeScript, Three.js and Vite. The game runs entirely in the browser; leaderboards, practice ghosts and championship progress are stored in the browser's `localStorage`. An optional authoritative online room server (`server/`, Node + WebSocket + PostgreSQL) hosts private rooms for 2–4 players; it is built and tested here but not yet activated in production, and the deployed client keeps online play off ([online server](docs/online-server.md)).
+A tabletop slot-car racing game: TypeScript, Three.js and Vite. The game runs entirely in the browser; leaderboards, practice ghosts and championship progress are stored in the browser's `localStorage`. An optional authoritative online room server (`server/`, Node + WebSocket + PostgreSQL) hosts private rooms for 2–4 players; the browser has create/join lobbies, connected solo and online races for desktop and touch ([online client](docs/online-client.md)). It is built and tested here but not yet activated in production, and the deployed client keeps online play off ([online server](docs/online-server.md)).
 
 Originally exported from Tesana on 2026-10-26; the Tesana play-service integration has since been removed so the game is self-hosted.
 
@@ -24,6 +24,7 @@ npm test           # vitest run: the regression suite, once, no watch mode
 npm run check:browser  # bounded real-browser checks, about 11 minutes; not part of CI
 npm run test:db    # database tests against a private local PostgreSQL (.local-pg/); CI runs them on PostgreSQL 17
 npm run server:smoke -- http://127.0.0.1:8787   # health and connection check of a running room server
+node scripts/online-check.mjs                   # browser checks of lobbies and online races against the real server code (diagnostics)
 ```
 
 The same checks plus `npm run build` run in GitHub Actions (`.github/workflows/ci.yml`) on pull requests and pushes to `main`. Successful pushes to `main` then deploy that exact checked build artifact to the static VPS site; PRs never deploy. See [deployment and rollback](docs/deployment.md).
@@ -50,6 +51,7 @@ The build output is plain HTML/JS/CSS; serve the `dist/` folder from any static 
 - `docs/pit-queue.md` — shared pit-lane queues, box and bay reservations, bay and pit-exit merges, and their evidence.
 - `docs/auto-stop-go.md` — automatic stop-and-go service and its evidence.
 - `docs/auto-bay.md` — race-long bay ownership, automatic fuel visits to the car's own bay, the fresh-Throttle departure, and their evidence.
+- `docs/online-client.md` — online lobbies and the online race client; `docs/online-client-evidence.md` — its evidence.
 - `docs/online-server.md` — the online room server: rules, protocol, timing policy, accounts, configuration, resource limits, activation and rollback runbook; `docs/online-evidence.md` — its evidence.
 - `docs/validation.md` — repeatable browser checks, results and the remaining hardware validation.
 - `scripts/` — the browser check and its frame-time statistics.

@@ -6,13 +6,18 @@ import { Race, Car, LAPS, RaceEvent, DRIVERS, PERSONAS, PEN, DEF, SOLO_ID, Drive
 import { buildWorld, disposeWorld, arrowGeometry, BayPaint, World } from './world';
 import { Y0 } from './gfx';
 import { makeCar, makePlayerMarker, CarVisual } from './carModel';
-import { Hud, fmt, carLabel, flags } from './hud';
+import { Hud, fmt, carLabel, flags, escHtml } from './hud';
 import { Sfx } from './audio';
 import { t } from './i18n';
 import * as R from './records';
 import { GhostRecorder, GhostPlayer } from './ghost';
 import { FixedStepper, STEP, MAX_GAP, Pose, blendPose } from './timing';
 import { PRESETS, PresetId, pixelRatioFor, savedPreset, savePreset } from './graphics';
+import { NetSession, loadSeat, refusalText, type ResultView, type Seat, type EndReason } from './net/session';
+import { SnapBuffer, applySnapshot, localEvent, mirrorRace } from './net/mirror';
+import { LIVERIES as NET_LIVERIES, LIMITS, type LiveryId, type PublicRoom, type ServerMsg } from './net/protocol';
+import type { RaceSnapshot, WireEvent } from './race';
+import type { SocketCtor } from './net/client';
 import { COARSE_QUERY, ControlsAnchor, DrivingInput, KEY_HOLDS, KEY_TAPS, PadButton, TOUCH_MODES, TouchMode, TouchPad, savedTouchMode, saveTouchMode, touchActive } from './input';
 
 const TRACK_KEY = 'srgp.track';
@@ -66,11 +71,12 @@ let world: World = buildWorld();
 scene.add(world.root);
 
 // ------------------------------------------------------------ cars
-type Mode = 'race' | 'practice' | 'champ';
+/** local race / practice / championship run on this device; 'online' is a server race (connected solo or multiplayer) */
+type Mode = 'race' | 'practice' | 'champ' | 'online';
 let mode: Mode = 'race';
 let carId = R.savedCar();
 /** The local driver: camera, marker, HUD, audio emphasis, personal messages, records and the ghost all follow this ID. */
-const localId: DriverId = SOLO_ID;
+let localId: DriverId = SOLO_ID;
 /**
  * Grid slot of the local driver (diagnostics only, via __game.setLocalSlot). Championships always use slot 0, which their
  * saved results are keyed by. In another slot the local car takes that slot's grid place, number and bay, and the rival
@@ -160,7 +166,11 @@ const overlay = document.createElement('div');
 overlay.className = 'overlay';
 app.appendChild(overlay);
 
-type Screen = 'title' | 'race' | 'pause' | 'results' | 'boards' | 'champ';
+// online play stays off unless this build enables it AND the same-origin service passes its health/protocol check
+// (src/online.ts). Nothing online is offered on the menus before that check has passed.
+let online: OnlineStatus = ONLINE_ENABLED ? { state: 'checking' } : { state: 'off' };
+
+type Screen = 'title' | 'race' | 'pause' | 'results' | 'boards' | 'champ' | 'online' | 'lobby' | 'netwait' | 'netres';
 let screen: Screen = 'title';
 let lbTrack = T.DEF.id;
 let lbKind: R.BoardKind = 'practice';
@@ -315,7 +325,11 @@ function showTitle(): void {
       ${champBtns}
       <button class="cta alt" id="o-boards">${t('title.boards')}</button>
     </div>
+    <p class="modes"><small>${t('net.localNote')}</small></p>
+    ${onlineEntryHtml()}
   </div>`;
+  overlay.querySelector('#o-online')?.addEventListener('click', () => { sfx.init(); showOnline(); });
+  overlay.querySelector('#o-rejoin')?.addEventListener('click', () => { sfx.init(); const st = loadSeat(seatStore()); if (st) void netBegin((n) => n.resume(st)); });
   overlay.querySelectorAll<HTMLElement>('.track').forEach((b) => b.addEventListener('click', () => {
     sfx.init();
     applyTrack(b.dataset.id!);
@@ -339,6 +353,7 @@ function showTitle(): void {
 }
 
 function showPause(): void {
+  if (net) { showNetMenu(); return; }
   enter('pause');
   overlay.className = 'overlay show';
   const title = mode === 'practice' ? t('prac.title') : mode === 'champ' && champ ? t('champ.round', { n: champ.rounds.length + 1, m: R.CHAMP_TRACKS.length }) : t('pause.title');
@@ -357,6 +372,9 @@ function showPause(): void {
 
 function resume(): void { enter('race'); overlay.className = 'overlay'; overlay.innerHTML = ''; stepper.rebase(); }
 
+/** Text from other people (driver names, room codes) is always escaped before it goes into markup. */
+const esc = escHtml;
+
 function colorDot(c: number): string { return `<i style="background:#${c.toString(16).padStart(6, '0')}"></i>`; }
 
 function showResults(): void {
@@ -372,7 +390,7 @@ function showResults(): void {
     if (r.status === 'dnf') return `<td class="mono">${t('res.dnf')}</td>`;
     return `<td class="mono">${i === 0 ? fmt(r.time) : '+' + (r.time - winner).toFixed(1) + 's'}${r.est ? ` <small>(${t('res.est')})</small>` : ''}</td>`;
   };
-  const rows = res.map((r, i) => `<tr class="${isMe(r.car) ? 'me' : ''}"><td>${r.status === 'finished' ? i + 1 : '–'}</td><td>${colorDot(r.car.color)}${carLabel(r.car, localId)}</td>
+  const rows = res.map((r, i) => `<tr class="${isMe(r.car) ? 'me' : ''}"><td>${r.status === 'finished' ? i + 1 : '–'}</td><td>${colorDot(r.car.color)}${esc(carLabel(r.car, localId))}</td>
     ${timeCell(r, i)}
     <td class="mono">${fmt(r.car.bestLap)}</td><td>${r.car.pitStops}</td><td>${flags(r.car) || '–'}${r.status === 'dq' ? ` <small>${t(`res.dqReason.${r.car.dqReason}`)}</small>` : ''}</td></tr>`).join('');
   const place = mine.status === 'dq' ? `${t('res.youDq')} · ${t(`res.dqReason.${mine.dqReason}`)}` : mine.status === 'finished' ? t('res.youPlace', { n: pos }) : t('res.youDnf');
@@ -492,7 +510,7 @@ function startRace(): void { startSession(mode === 'practice' ? 'practice' : mod
 /** timing-line crossing by the player: finish the recording of the lap just done, start the next */
 function onPlayerCross(): void {
   const p = me();
-  if (mode !== 'practice') return;
+  if (mode !== 'practice' || net) return;
   const lap = pendingLap;
   if (recorder.active && lap) {
     if (lap.valid) {
@@ -515,16 +533,17 @@ function onPlayerCross(): void {
 
 // ------------------------------------------------------------ input
 const input = new DrivingInput({
-  lane: () => { if (screen === 'race') race.requestLane(localId); },
-  pit: () => { if (screen === 'race') race.requestPit(localId); },
-  defer: () => { if (screen === 'race') race.requestDefer(localId); },
+  // online, a tap is a numbered action for this browser's own seat; the server decides what it does
+  lane: () => { if (screen === 'race') { if (net) net.action('lane'); else race.requestLane(localId); } },
+  pit: () => { if (screen === 'race') { if (net) net.action('pit'); else race.requestPit(localId); } },
+  defer: () => { if (screen === 'race') { if (net) net.action('defer'); else race.requestDefer(localId); } },
   view: () => toggleView(),
   pause: () => { if (screen === 'race') showPause(); else if (screen === 'pause') resume(); },
 });
 const pad = new TouchPad([...hud.root.querySelectorAll<HTMLButtonElement>('[data-hold], [data-tap]')] as PadButton[], input, () => sfx.init());
 const anchor = new ControlsAnchor(vp);
 /** Let go of every hold, and of the reverse gear and Brake hold they built up: resuming never restores a reverse command. */
-function releaseDriving(): void { pad.reset(); input.clear(); race.clearReverse(); }
+function releaseDriving(): void { pad.reset(); input.clear(); race.clearReverse(); net?.release(); }
 
 let touchMode = savedTouchMode();
 const coarsePointer = window.matchMedia(COARSE_QUERY);
@@ -582,13 +601,16 @@ window.addEventListener('keydown', (e) => {
     return;
   }
   if (screen === 'boards' || screen === 'champ') { if (k === 'Escape') showTitle(); return; }
-  if (k === 'KeyR') { restartSession(); return; }
+  if (screen === 'online') { if (k === 'Escape') { cancelNetBegin(); showTitle(); } return; }
+  if (screen === 'lobby' || screen === 'netres') return;
+  // a shared race cannot be restarted from one browser
+  if (k === 'KeyR') { if (!net) restartSession(); return; }
   if (k === 'KeyG') toggleGhost();
   if (k === 'KeyC') input.tap('view');
   if (k === 'Equal' || k === 'NumpadAdd') zoomBy(0.8);
   if (k === 'Minus' || k === 'NumpadSubtract') zoomBy(1.25);
   if (k === 'KeyM') toggleSound();
-  if (k === 'Escape') { input.tap('pause'); return; }
+  if (k === 'Escape') { if (screen === 'netwait') { closeNetWait(); return; } input.tap('pause'); return; }
   if (screen === 'pause' && k === 'Enter') { resume(); return; }
   if (screen === 'results' && k === 'Enter') { restartSession(); return; }
   if (KEY_TAPS[k]) input.tap(KEY_TAPS[k]);
@@ -737,14 +759,16 @@ function handle(e: RaceEvent): void {
     case 'lap':
       if (e.car !== p) break;
       if (mode === 'practice') { pendingLap = e; break; }
-      if (e.valid && !p.finished) {
+      // online laps never enter this device's leaderboards: network results are kept apart from local records
+      if (e.valid && !p.finished && mode !== 'online' && !net) {
         const rec = R.submitLap('race', T.DEF.id, R.currentInitials(), carId, e.time * 1000);
         if (rec) { freshIds.add(rec.id); const rank = R.board('race', T.DEF.id).findIndex((r) => r.id === rec.id) + 1; hud.toast(t('msg.boardEntry', { n: rank, time: R.fmtMs(e.time * 1000) }), 'good'); break; }
       }
       if (e.best && p.lapsDone > 1 && !p.finished) hud.toast(t('msg.bestLap', { time: fmt(e.time) }), 'good');
       break;
     case 'finish':
-      if (e.car === p) { sfx.fanfare(); hud.goFlash(`P${e.pos}`); }
+      // online, the order at the flag is not the classification (penalties and DQs are settled by the server at the end)
+      if (e.car === p) { sfx.fanfare(); hud.goFlash(mode === 'online' ? '🏁' : `P${e.pos}`); }
       break;
   }
 }
@@ -775,7 +799,7 @@ function syncCars(dt: number, time: number, poses: Pose[]): void {
   bridgeFade += (target - bridgeFade) * Math.min(1, dt * 8);
   for (const m of world.bridgeMats) m.opacity = bridgeFade;
   const p = me();
-  const inSession = screen === 'race' || screen === 'pause' || screen === 'results';
+  const inSession = screen === 'race' || screen === 'pause' || screen === 'results' || screen === 'netwait';
   const wanted = inSession && (camMode === 'full' || curSpan * portraitFit() > 34 || (under && p.mode !== 'off'));
   markerFade += ((wanted ? 1 : 0) - markerFade) * Math.min(1, dt * 8);
   playerMarker.visible = markerFade > 0.02;
@@ -840,7 +864,7 @@ function syncArrows(time: number): void {
 /** motor volume per car from the last audio sync: the local driver's car at full volume, the rest by distance */
 let motorMix: number[] = [];
 function syncAudio(): void {
-  const playing = screen === 'race' || screen === 'results';
+  const playing = screen === 'race' || screen === 'results' || screen === 'netwait';
   motorMix = race.cars.map((c) => (!playing || c.mode === 'off' || c.mode === 'tow' ? 0 : isMe(c) ? 1 : Math.max(0, 1 - Math.sqrt(dist2(c)) / 28) * 0.55));
   if (!sfx.ctx) return;
   race.cars.forEach((c, i) => {
@@ -853,6 +877,404 @@ function syncAudio(): void {
   sfx.tyre(Math.min(1, sq));
   sfx.refuelling(playing && p.mode === 'service' && p.fuel < 1 && p.serviceT > 0.4);
 }
+
+// ------------------------------------------------------------ online (docs/online-client.md)
+/** How far behind the newest server snapshot cars are drawn: two snapshot intervals at the default 20 Hz. */
+const NET_DELAY_MS = 100;
+let net: NetSession | null = null;
+/** the server race the mirror was built for (null in the lobby or offline) */
+let netRaceId: string | null = null;
+const netBuf = new SnapBuffer(NET_DELAY_MS);
+let netNotice = '';
+let netResult: ResultView | null = null;
+/** the local driver's car became terminal and the pending card was dismissed to watch the race */
+let netWatch = false;
+/** the latest server time seen (ms) and its lag, for the diagnostics hook */
+let netTick = -1, netLag = 0;
+const NAME_KEY = 'srgp.netName', NLIV_KEY = 'srgp.netLivery';
+/** the local car choice's nearest online livery, until one is picked here */
+const LOCAL_TO_NET: Record<string, LiveryId> = { sunburst: 'yellow', blaze: 'orange', frost: 'white', violet: 'purple' };
+const netName = (): string => { try { return localStorage.getItem(NAME_KEY) ?? ''; } catch { return ''; } };
+const netLivery = (): LiveryId => { let v: string | null = null; try { v = localStorage.getItem(NLIV_KEY); } catch { /* ignore */ } return NET_LIVERIES.find((l) => l.id === v)?.id ?? LOCAL_TO_NET[carId] ?? 'yellow'; };
+const seatStore = (): Storage | null => { try { return window.sessionStorage; } catch { return null; } };
+const hashCode = (): string => /^#room=([A-Za-z0-9]{6})$/.exec(location.hash)?.[1]?.toUpperCase() ?? '';
+const modeLabel = (m: string): string => t(m === 'multiplayer' ? 'net.modeMulti' : m === 'solo' ? 'net.modeSolo' : 'net.modeOther');
+const hexc = (c: number): string => '#' + c.toString(16).padStart(6, '0');
+
+function onlineEntryHtml(): string {
+  if (online.state === 'available') {
+    const seat = loadSeat(seatStore());
+    return `<div class="row net-entry"><button class="cta" id="o-online">${t('net.online')}</button>${seat ? `<button class="cta alt" id="o-rejoin">${t('net.rejoin', { code: esc(seat.code) })}</button>` : ''}</div><p class="modes"><small>${t('net.onlineNote')}</small></p>`;
+  }
+  if (online.state === 'unavailable') return `<p class="modes net-off"><small>${t('net.unavailable')}</small></p>`;
+  return '';
+}
+
+/** The online menu: create a multiplayer room, join one by code, or start a connected solo race with AI. */
+function showOnline(): void {
+  if (online.state !== 'available') { showTitle(); return; }
+  enter('online');
+  overlay.className = 'overlay show';
+  const liv = netLivery();
+  const livs = NET_LIVERIES.map((l) => `<button class="car ${l.id === liv ? 'sel' : ''}" data-nlivery="${l.id}" aria-label="${l.id}"><i style="background:${hexc(l.color)}"></i>${t(`net.liv.${l.id}`)}</button>`).join('');
+  overlay.innerHTML = `<div class="card online">
+    <h2>${t('net.online')}</h2>
+    <div class="setup">
+      <label class="ini nm"><span class="lbl2">${t('net.name')}</span><input id="n-name" maxlength="${LIMITS.nameMax}" placeholder="${t('net.namePh')}" autocomplete="nickname" enterkeyhint="done" spellcheck="false"></label>
+      <div><span class="lbl2">${t('net.livery')}</span><div class="cars">${livs}</div></div>
+    </div>
+    <p><small>${t('net.trackNote', { track: t(`track.${T.DEF.id}.name`) })}</small></p>
+    <div class="modes-grid">
+      <div class="mode-box"><b>${t('net.modeMulti')}</b><small>${t('net.multiDesc')}</small>
+        <label class="chk"><input type="checkbox" id="n-ai"> ${t('net.aiFill')}</label>
+        <button class="cta" id="n-create">${t('net.create')}</button>
+        <div class="join"><input id="n-code" maxlength="${LIMITS.codeLength}" placeholder="${t('net.codePh')}" autocomplete="off" autocapitalize="characters" spellcheck="false" enterkeyhint="go"><button class="cta alt" id="n-join">${t('net.join')}</button></div>
+      </div>
+      <div class="mode-box"><b>${t('net.modeSolo')}</b><small>${t('net.soloDesc')}</small><button class="cta alt" id="n-solo">${t('net.startSolo')}</button></div>
+    </div>
+    <p id="n-msg" class="net-msg" role="status" aria-live="polite"></p>
+    <div class="row"><button class="cta alt" id="n-back">${t('boards.back')}</button></div>
+  </div>`;
+  const name = overlay.querySelector<HTMLInputElement>('#n-name')!;
+  name.value = netName() || (R.currentInitials() === R.ANON ? '' : R.currentInitials());
+  name.addEventListener('input', () => { try { localStorage.setItem(NAME_KEY, name.value); } catch { /* ignore */ } });
+  const code = overlay.querySelector<HTMLInputElement>('#n-code')!;
+  code.value = hashCode();
+  for (const f of [name, code]) f.addEventListener('keydown', (e) => { e.stopPropagation(); if (e.key === 'Enter') { f.blur(); if (f === code) join(); } });
+  overlay.querySelector('#n-msg')!.textContent = netNotice;
+  overlay.querySelectorAll<HTMLElement>('[data-nlivery]').forEach((b) => b.addEventListener('click', () => {
+    try { localStorage.setItem(NLIV_KEY, b.dataset.nlivery!); } catch { /* ignore */ }
+    overlay.querySelectorAll('[data-nlivery]').forEach((x) => x.classList.toggle('sel', x === b));
+  }));
+  const who = (): string | null => {
+    const n = name.value.trim();
+    if (!n) { say(t('net.err.name')); name.focus(); return null; }
+    return n;
+  };
+  const join = (): void => {
+    const n = who(); if (!n) return;
+    const c = code.value.trim().toUpperCase();
+    if (c.length !== LIMITS.codeLength) { say(t('net.err.code')); code.focus(); return; }
+    void netBegin((s) => s.join(c, n, netLivery()));
+  };
+  overlay.querySelector('#n-create')!.addEventListener('click', () => { const n = who(); if (n) void netBegin((s) => s.create(n, 'multiplayer', { track: T.DEF.id, aiFill: overlay.querySelector<HTMLInputElement>('#n-ai')!.checked }, netLivery())); });
+  overlay.querySelector('#n-join')!.addEventListener('click', join);
+  overlay.querySelector('#n-solo')!.addEventListener('click', () => { const n = who(); if (n) void netBegin((s) => s.create(n, 'solo', { track: T.DEF.id }, netLivery())); });
+  overlay.querySelector('#n-back')!.addEventListener('click', () => { netNotice = ''; showTitle(); });
+}
+/** Give up a create, join or resume that has not been answered yet (Escape on the online menu while connecting). */
+function cancelNetBegin(): void {
+  if (!net || net.conn !== 'connecting') return;
+  const s = net;
+  net = null;
+  mode = 'race';
+  netNotice = '';
+  s.close();
+  syncBanner();
+}
+function say(msg: string): void { netNotice = msg; const el = overlay.querySelector('#n-msg'); if (el) el.textContent = msg; }
+
+/** Open a session and make one request (create, join or resume). A refusal is explained on the online menu. */
+async function netBegin(req: (s: NetSession) => Promise<{ ok: true } | { ok: false; code: string; detail?: string }>): Promise<void> {
+  if (net) return;
+  if (screen !== 'online') showOnline();
+  say(t('net.connecting'));
+  overlay.querySelectorAll<HTMLButtonElement>('.online button').forEach((b) => (b.disabled = true));
+  // a session reports to this page only while it is the page's session: one cancelled while connecting stays silent
+  const own = <A extends unknown[]>(f: (...a: A) => void) => (...a: A): void => { if (net === s) f(...a); };
+  const s: NetSession = new NetSession(online.state === 'available' ? online.wsUrl : '', WebSocket as unknown as SocketCtor, {
+    room: own((r) => onNetRoom(r)),
+    state: own((m, at) => onNetState(m, at)),
+    result: own((r, fresh) => onNetResult(r, fresh)),
+    end: own((why, detail) => onNetEnd(why, detail)),
+    nack: own((m) => onNetNack(m)),
+    // a dropped link lets go of everything here as well as on the server: after a reconnect a key or finger must press again
+    conn: own((c) => { if (c === 'reconnecting') { pad.reset(); input.clear(); } syncBanner(); }),
+  }, seatStore(), undefined, () => performance.now());
+  net = s;
+  mode = 'online';
+  const r = await req(s);
+  if (net !== s) {
+    // cancelled while connecting: a seat that was granted meanwhile is given back at once
+    if (r.ok) s.leave(); else s.close();
+    return;
+  }
+  if (!r.ok) {
+    net = null;
+    mode = 'race';
+    showOnline();
+    say(t(refusalText(r.code)) + (r.detail && r.code === 'not_ready' ? ` (${r.detail})` : ''));
+    return;
+  }
+  netNotice = '';
+  if (location.hash) history.replaceState(null, '', location.pathname + location.search);
+}
+
+function onNetRoom(r: PublicRoom): void {
+  if (r.state === 'lobby') {
+    if (netRaceId) leaveNetRace();
+    if (screen !== 'pause') showLobby();
+  } else if (r.state === 'race') {
+    // the race screen opens with the first snapshot of the new race
+    if (screen === 'lobby') showLobby();
+  } else if (r.state === 'results' && netResult && netResult.raceId === r.raceId) {
+    if (screen === 'netres') showNetResults(netResult);
+  }
+}
+
+/** Back from a race to the room: local view state only. */
+function leaveNetRace(): void {
+  netRaceId = null; netResult = null; netWatch = false; netBuf.reset(); netTick = -1;
+}
+
+function onNetState(m: Extract<ServerMsg, { t: 'state' }>, at: number): void {
+  if (!net || !net.room || !net.me) return;
+  const snap = m.snap as RaceSnapshot;
+  if (netRaceId !== net.room.raceId) {
+    // a new race: a mirror of the server's roster on the server's circuit, viewed from this browser's own seat
+    leaveNetRace();
+    netRaceId = net.room.raceId;
+    localId = net.me;
+    if (T.DEF.id !== snap.track) applyTrack(snap.track);
+    setRace(mirrorRace(snap));
+    netBuf.push(m.tick, at, snap);
+    netTick = m.tick;
+    recorder.stop(); ghost.setData(null); pbMs = 0;
+    camMode = 'follow'; camLead.set(0, 0);
+    const p = me(); camTarget.set(p.x, 0, -p.y);
+    resume();
+  } else {
+    // stale or repeated snapshots are dropped whole: nothing from them is applied twice
+    if (!netBuf.push(m.tick, at, snap)) return;
+    applySnapshot(race, snap);
+    netTick = m.tick;
+  }
+  netLag = m.lagMs;
+  for (const w of m.ev as WireEvent[]) { const e = localEvent(race, w); if (e) handle(e); }
+  const p = me();
+  if (p.status !== 'running' && !netWatch && screen === 'race') showNetWait();
+  else if (screen === 'netwait') renderNetWait();
+}
+
+/** Results are the server's alone. Shown as often as asked; nothing is recorded locally, so a repeat changes nothing. */
+function onNetResult(r: ResultView, fresh: boolean): void {
+  netResult = r;
+  if (fresh && r.outcome === 'completed') {
+    const mine = r.classification?.find((x) => x.id === localId);
+    if (mine?.pos === 1) sfx.fanfare();
+  }
+  // shown even over the race menu: once the server has classified the race there is nothing left to drive
+  showNetResults(r);
+}
+
+function onNetNack(m: Extract<ServerMsg, { t: 'nack' }>): void {
+  if (['start', 'settings', 'rematch', 'ready', 'livery'].includes(m.ref)) {
+    const el = overlay.querySelector('#l-msg');
+    if (el) el.textContent = t(m.code === 'not_ready' ? 'net.err.notReady' : refusalText(m.code)) + (m.detail ? ` (${m.detail})` : '');
+  }
+}
+
+function onNetEnd(why: EndReason, detail?: string): void {
+  void detail;
+  net = null;
+  leaveNetRace();
+  localId = SOLO_ID;
+  mode = 'race';
+  setRace(newRace());
+  netNotice = why === 'left' ? '' : t(`net.end.${why}`);
+  if (why === 'left' || online.state !== 'available') showTitle(); else showOnline();
+}
+
+function seatRow(p: PublicRoom['participants'][number], hostId: string | null): string {
+  const tags: string[] = [];
+  if (p.id === net?.me) tags.push(`<span class="chip yel">${t('hud.you')}</span>`);
+  if (p.id === hostId) tags.push(`<span class="chip cyan">${t('net.host')}</span>`);
+  if (p.left) tags.push(`<span class="chip red">${t('net.left')}</span>`);
+  else if (!p.connected) tags.push(`<span class="chip org">${t('net.disconnected')}</span>`);
+  if (!p.left && p.id !== hostId) tags.push(p.ready ? `<span class="chip grn">${t('net.ready')}</span>` : `<span class="chip dim">${t('net.notReady')}</span>`);
+  const asked = p.liveryRequested ? ` <small>${t('net.asked', { c: t(`net.liv.${p.liveryRequested}`) })}</small>` : '';
+  return `<tr class="${p.id === net?.me ? 'me' : ''}" data-pid="${esc(p.id)}"><td class="mono">#${p.num}</td><td>${colorDot(p.color)}<span class="nm">${esc(p.name)}</span>${asked}</td><td>${tags.join(' ')}</td></tr>`;
+}
+
+/** The room: code to share, track, every driver's identity and state, AI slots, and what this browser may do. */
+function showLobby(): void {
+  const r = net?.room;
+  if (!net || !r) return;
+  const first = screen !== 'lobby';
+  enter('lobby');
+  overlay.className = 'overlay show';
+  const host = net.host;
+  const meP = r.participants.find((p) => p.id === net!.me);
+  const others = r.participants.filter((p) => p.id !== r.hostId && !p.left);
+  const waitingFor = r.participants.length < r.minHumans ? t('net.needMore', { n: r.minHumans }) : r.participants.some((p) => !p.connected) ? t('net.waitConn') : others.some((p) => !p.ready) ? t('net.waitReady') : '';
+  const trackTabs = host ? `<div class="tabs" role="radiogroup">${T.TRACKS.map((d) => `<button class="tab ${d.id === r.settings.track ? 'sel' : ''}" data-ntrack="${d.id}">${t(`track.${d.id}.name`)}</button>`).join('')}</div>` : `<div class="lobby-track">${t(`track.${r.settings.track}.name`)}</div>`;
+  const aiRow = r.mode === 'multiplayer' ? (host ? `<label class="chk"><input type="checkbox" id="l-ai" ${r.settings.aiFill ? 'checked' : ''}> ${t('net.aiFill')}</label>` : `<small>${t(r.settings.aiFill ? 'net.aiOn' : 'net.aiOff')}</small>`) : '';
+  const aiRows = r.ai.map((a) => `<tr class="ai"><td class="mono">#${a.num}</td><td>${colorDot(a.color)}<span class="nm">${esc(a.name)}</span></td><td><span class="chip dim">${t('net.aiSlot')}</span></td></tr>`).join('');
+  const free = r.maxHumans - r.participants.filter((p) => !p.left).length;
+  const livs = NET_LIVERIES.map((l) => `<button class="car sq ${meP?.livery === l.id ? 'sel' : ''}" data-mylivery="${l.id}" aria-label="${t(`net.liv.${l.id}`)}" title="${t(`net.liv.${l.id}`)}"><i style="background:${hexc(l.color)}"></i></button>`).join('');
+  overlay.innerHTML = `<div class="card results lobby">
+    <div class="lbl2">${modeLabel(r.mode)}</div>
+    ${r.mode === 'multiplayer' ? `<h2>${t('net.room')} <span class="code mono" id="l-code"></span></h2>
+    <div class="row"><button class="cta alt small" id="l-copy">${t('net.copy')}</button>${typeof navigator.share === 'function' ? `<button class="cta alt small" id="l-share">${t('net.share')}</button>` : ''}</div>` : `<h2>${t('net.modeSolo')}</h2>`}
+    <div class="lbl2">${t('title.track')}</div>
+    ${trackTabs}
+    ${aiRow}
+    <div class="tscroll"><table><thead><tr><th>${t('net.num')}</th><th>${t('res.driver')}</th><th>${t('net.state')}</th></tr></thead><tbody>${r.participants.map((p) => seatRow(p, r.hostId)).join('')}${aiRows}</tbody></table></div>
+    ${r.mode === 'multiplayer' ? `<p><small>${t('net.seats', { n: Math.max(0, free), m: r.maxHumans })}</small></p>` : ''}
+    <div class="lbl2">${t('net.yourColour')}</div><div class="cars">${livs}</div>
+    <p id="l-msg" class="net-msg" role="status" aria-live="polite">${esc(host ? waitingFor : t('net.hostStarts'))}</p>
+    <div class="row">
+      ${host ? `<button class="cta" id="l-start" ${waitingFor && r.mode === 'multiplayer' ? 'aria-disabled="true"' : ''}>${t('net.start')}</button>` : `<button class="cta" id="l-ready">${t(meP?.ready ? 'net.unready' : 'net.readyBtn')}</button>`}
+      <button class="cta alt" id="l-leave">${t('net.leave')}</button>
+    </div>
+  </div>`;
+  const codeEl = overlay.querySelector('#l-code');
+  if (codeEl) codeEl.textContent = r.code;
+  const shareText = (): string => t('net.shareText', { code: r.code });
+  overlay.querySelector('#l-copy')?.addEventListener('click', () => {
+    const msg = overlay.querySelector('#l-msg')!;
+    navigator.clipboard?.writeText(r.code).then(() => { msg.textContent = t('net.copied'); }, () => { msg.textContent = t('net.copyFail', { code: r.code }); });
+  });
+  overlay.querySelector('#l-share')?.addEventListener('click', () => { void navigator.share({ title: t('title.name'), text: shareText(), url: `${location.origin}${location.pathname}#room=${r.code}` }).catch(() => undefined); });
+  overlay.querySelectorAll<HTMLElement>('[data-ntrack]').forEach((b) => b.addEventListener('click', () => net?.settings({ track: b.dataset.ntrack! })));
+  overlay.querySelector<HTMLInputElement>('#l-ai')?.addEventListener('change', (e) => net?.settings({ aiFill: (e.target as HTMLInputElement).checked }));
+  overlay.querySelectorAll<HTMLElement>('[data-mylivery]').forEach((b) => b.addEventListener('click', () => { try { localStorage.setItem(NLIV_KEY, b.dataset.mylivery!); } catch { /* ignore */ } net?.livery(b.dataset.mylivery as LiveryId); }));
+  overlay.querySelector('#l-start')?.addEventListener('click', () => net?.start());
+  overlay.querySelector('#l-ready')?.addEventListener('click', () => net?.ready(!meP?.ready));
+  overlay.querySelector('#l-leave')!.addEventListener('click', () => net?.leave());
+  if (first) (overlay.querySelector('#l-start, #l-ready') as HTMLElement | null)?.focus({ preventScroll: true });
+}
+
+/** The race menu online: the shared race keeps running behind it, and this browser's controls are released. */
+function showNetMenu(): void {
+  enter('pause');
+  overlay.className = 'overlay show';
+  overlay.innerHTML = `<div class="card">
+    <h2>${t('net.menuTitle')}</h2>
+    <p>${t('net.menuNote')}</p>
+    ${controlsHtml()}
+    ${settingsHtml()}
+    <div class="row"><button class="cta" id="o-resume">${t('pause.resume')}</button><button class="cta alt" id="o-leave">${t('net.leaveRace')}</button></div>
+  </div>`;
+  bindSettings();
+  overlay.querySelector('#o-resume')!.addEventListener('click', () => {
+    if (netResult && netResult.raceId === netRaceId) showNetResults(netResult);
+    else if (me().status !== 'running' && !netWatch) showNetWait();
+    else resume();
+  });
+  overlay.querySelector('#o-leave')!.addEventListener('click', () => net?.leave());
+}
+
+/** Standings rows from the server: positions only for classified finishers, explicit DQ and DNF, nothing estimated. */
+function standingRows(rows: { id: string; name: string; color: number; num: number; pos: number | null; status: string; time: number | null; best: number; pits: number; reason: string; lap?: string }[]): string {
+  return rows.map((x) => {
+    const cell = x.status === 'dq' ? `<td class="mono dq">${t('res.dq')}</td>` : x.status === 'dnf' ? `<td class="mono">${t('res.dnf')}</td>` : x.status === 'running' ? `<td class="mono"><small>${t('net.stillRacing')}${x.lap ? ` · ${x.lap}` : ''}</small></td>` : `<td class="mono">${fmt(x.time ?? NaN)}</td>`;
+    return `<tr class="${x.id === localId ? 'me' : ''}" data-status="${x.status}"><td>${x.pos ?? '–'}</td><td>${colorDot(x.color)}#${x.num} ${esc(x.id === localId ? t('hud.you') : x.name)}</td>${cell}<td class="mono">${fmt(x.best)}</td><td>${x.pits}</td><td>${x.reason}</td></tr>`;
+  }).join('');
+}
+const STAND_HEAD = (): string => `<thead><tr><th>#</th><th>${t('res.driver')}</th><th>${t('res.time')}</th><th>${t('res.best')}</th><th>${t('res.pits')}</th><th>${t('res.pen')}</th></tr></thead>`;
+
+/** what the pending card last showed: unchanged content is left alone, so a selection or a screen reader's place in the table is not reset for nothing */
+let netWaitShown = { head: '', rows: '' };
+/** This driver is done but the race is not: live state with no positions invented for anyone still running. */
+function showNetWait(): void {
+  enter('netwait');
+  netWaitShown = { head: '', rows: '' };
+  overlay.className = 'overlay show see';
+  // the card and its buttons are built once; each snapshot updates only the heading and the standings, so a press or the
+  // keyboard focus on Watch or Leave survives the 20 Hz updates
+  overlay.innerHTML = `<div class="card results netwait">
+    <h2>${t('net.pendingTitle')}</h2>
+    <div class="place" id="w-head"></div>
+    <p><small>${t('net.pendingNote')}</small></p>
+    <div class="tscroll"><table>${STAND_HEAD()}<tbody id="w-rows"></tbody></table></div>
+    <div class="row"><button class="cta" id="w-watch">${t('net.watch')}</button><button class="cta alt" id="w-leave">${t('net.leave')}</button></div>
+  </div>`;
+  overlay.querySelector('#w-watch')!.addEventListener('click', closeNetWait);
+  overlay.querySelector('#w-leave')!.addEventListener('click', () => net?.leave());
+  renderNetWait();
+}
+function closeNetWait(): void { netWatch = true; resume(); }
+function renderNetWait(): void {
+  const headEl = overlay.querySelector('#w-head'), rowsEl = overlay.querySelector('#w-rows');
+  if (!headEl || !rowsEl) return;
+  const p = me();
+  const rows = race.order().map((c) => ({
+    id: c.id, name: c.name, color: c.color, num: c.num, pos: null, status: c.status, time: c.status === 'finished' ? c.finishTime + c.timePen : null,
+    best: c.bestLap, pits: c.pitStops, reason: c.status === 'dq' ? t(`res.dqReason.${c.dqReason}`) : c.status === 'dnf' ? t(`net.dnf.${c.dnfReason}`) : flags(c), lap: `${Math.min(LAPS, c.lapsDone + 1)}/${LAPS}`,
+  }));
+  const head = p.status === 'dq' ? `${t('res.youDq')} · ${t(`res.dqReason.${p.dqReason}`)}` : p.status === 'dnf' ? t('res.youDnf') : t('net.youFinished');
+  const body = standingRows(rows);
+  if (netWaitShown.head !== head) { headEl.innerHTML = head; netWaitShown.head = head; }
+  if (netWaitShown.rows !== body) { rowsEl.innerHTML = body; netWaitShown.rows = body; }
+}
+
+/** The server's final standings, identical for every member of the room. */
+function showNetResults(r: ResultView): void {
+  enter('netres');
+  overlay.className = 'overlay show';
+  const room = net?.room;
+  const host = !!net?.host;
+  const byId = new Map(r.participants.map((x) => [x.id, x]));
+  const liv = (id: string): number => NET_LIVERIES.find((l) => l.id === byId.get(id)?.livery)?.color ?? 0x888888;
+  let body: string, head: string;
+  if (r.classification) {
+    const rows = r.classification.map((x) => ({
+      id: x.id, name: byId.get(x.id)?.name ?? x.id, color: liv(x.id), num: byId.get(x.id)?.num ?? 0, pos: x.pos, status: x.status, time: x.time,
+      best: x.bestLap, pits: x.pitStops, reason: x.status === 'dq' ? `<span class="flag sg">${t('hud.flagDq')}</span> <small>${t(`res.dqReason.${x.dqReason}`)}</small>` : x.status === 'dnf' ? `<small>${t(`net.dnf.${x.dnfReason}`)}</small>` : x.timePen > 0 ? `<span class="flag tp">+${x.timePen}s</span>` : '–',
+    }));
+    const mine = r.classification.find((x) => x.id === localId);
+    head = !mine ? '' : mine.status === 'dq' ? `${t('res.youDq')} · ${t(`res.dqReason.${mine.dqReason}`)}` : mine.status === 'dnf' ? t('res.youDnf') : t('res.youPlace', { n: mine.pos ?? 0 });
+    body = `<div class="tscroll"><table>${STAND_HEAD()}<tbody>${standingRows(rows)}</tbody></table></div>`;
+  } else {
+    head = t('net.noResult');
+    body = `<p>${t(r.outcome === 'aborted' ? 'net.aborted' : 'net.ended', { why: esc(r.abortReason ?? '') })}</p>`;
+  }
+  const canRematch = room?.state === 'results' && room.raceId === r.raceId;
+  overlay.innerHTML = `<div class="card results netres" data-race="${esc(r.raceId)}">
+    <div class="lbl2">${modeLabel(r.mode)} · ${t(`track.${r.track.id}.name`)}</div>
+    <h2>${t('net.finalTitle')}</h2>
+    <div class="place">${head}</div>
+    ${body}
+    <p><small>${t('net.resultNote')}</small></p>
+    <div class="row">${canRematch ? (host ? `<button class="cta" id="r-rematch">${t('net.rematch')}</button>` : `<span class="net-msg">${t('net.waitRematch')}</span>`) : ''}<button class="cta alt" id="r-leave">${t('net.leave')}</button></div>
+  </div>`;
+  overlay.querySelector('#r-rematch')?.addEventListener('click', () => net?.rematch());
+  overlay.querySelector('#r-leave')!.addEventListener('click', () => { if (net) net.leave(); else showTitle(); });
+}
+
+/** Connection state, always visible while online: connecting, reconnecting (with how long the seat is held), retired. */
+const banner = document.createElement('div');
+banner.id = 'net-banner';
+banner.setAttribute('role', 'status');
+app.appendChild(banner);
+let bannerKey = '';
+/** This browser's held pedals for its own seat: sent the moment they change (and checked every frame), never another seat's. */
+function sendHeld(): void {
+  if (!net || !netRaceId) return;
+  const driving = screen === 'race';
+  net.setHeld(driving && input.held('throttle'), driving && input.held('brake'));
+}
+input.onChange = sendHeld;
+
+function syncBanner(): void {
+  let key = '', text = '';
+  if (net && net.conn === 'reconnecting') { key = 'rec'; text = t('net.reconnecting', { n: net.room?.graceS ?? 20 }); }
+  else if (net && net.conn === 'connecting') { key = 'con'; text = t('net.connecting'); }
+  else if (net && netRaceId && (screen === 'race' || screen === 'netwait')) {
+    const p = me();
+    if (p.status === 'dnf' && p.dnfReason === 'retired') { key = 'ret'; text = t('net.retired'); }
+    else if (netLag > 500) { key = 'lag'; text = t('net.lagging'); }
+  }
+  if (key === bannerKey) return;
+  bannerKey = key;
+  banner.textContent = text;
+  banner.className = key ? `show ${key}` : '';
+}
+
+// mobile backgrounding and page teardown: controls were already released (suspend); the socket may be dropped by the browser,
+// in which case the session resumes the same seat on return
+window.addEventListener('pagehide', () => { net?.release(); });
 
 // ------------------------------------------------------------ loop
 /** one simulation step: physics, events, timing-line bookkeeping and ghost recording */
@@ -870,7 +1292,7 @@ function tick(dt: number): void {
 let last = performance.now();
 let time = 0;
 showTitle();
-const simulating = (): boolean => screen === 'race' || screen === 'results';
+const simulating = (): boolean => !net && (screen === 'race' || screen === 'results');
 function frame(now: number): void {
   requestAnimationFrame(frame);
   // checked here, not on resize: browser bars and moving to another display do not always send that event, and the canvas is redrawn in this same frame
@@ -882,29 +1304,37 @@ function frame(now: number): void {
   // dt paces presentation only (camera, wheels, toasts) and keeps running on menus; race time comes from the stepper
   const dt = Math.min(MAX_GAP, Math.max(0, (now - last) / 1000));
   last = now; time += dt;
-  stepper.frame(now, simulating, tick);
-  const alpha = stepper.alpha;
-  const poses = race.cars.map((c, i) => blendPose(prevPoses[i], c, alpha));
+  let poses: Pose[];
+  let alpha = 1;
+  if (net && netRaceId) {
+    // online: never simulated here. This browser's pedals go to the server (sendHeld); cars are drawn from buffered snapshots
+    sendHeld();
+    const at = netBuf.sample(performance.now());
+    poses = race.cars.map((c) => at?.get(c.id) ?? poseOf(c));
+  } else {
+    stepper.frame(now, simulating, tick);
+    alpha = stepper.alpha;
+    poses = race.cars.map((c, i) => blendPose(prevPoses[i], c, alpha));
+  }
   updateCamera(dt, poses[Math.max(0, race.cars.indexOf(me()))]);
   syncCars(dt, time, poses);
   // the blended cars trail the live state by up to a step; the ghost must trail with them to line up
   ghost.update(race.raceTime - (1 - alpha) * STEP, screen === 'race' ? dt : 0);
   syncArrows(time);
   syncAudio();
-  hud.root.style.display = screen === 'race' || screen === 'pause' || screen === 'results' ? '' : 'none';
-  hud.update(race, dt, time, { mode, me: localId, pbMs, round: mode === 'champ' && champ ? `${champ.rounds.length + (champRoundSaved ? 0 : 1)}/${R.CHAMP_TRACKS.length}` : '' });
+  hud.root.style.display = screen === 'race' || screen === 'pause' || screen === 'results' || screen === 'netwait' ? '' : 'none';
+  syncBanner();
+  hud.update(race, dt, time, { mode: mode === 'online' ? 'race' : mode, me: localId, pbMs, round: mode === 'champ' && champ ? `${champ.rounds.length + (champRoundSaved ? 0 : 1)}/${R.CHAMP_TRACKS.length}` : '' });
   renderer.render(scene, camera);
 }
 requestAnimationFrame(frame);
 
-// debug/test hooks
-// online play stays off unless this build enables it AND the same-origin service passes its health/protocol check
-// (src/online.ts). The lobby UI is a later task; the status is exposed for diagnostics only.
-let online: OnlineStatus = ONLINE_ENABLED ? { state: 'checking' } : { state: 'off' };
 // probed once the page has loaded, so scene building on a slow device cannot eat the probe's time budget
 if (ONLINE_ENABLED) {
-  const probe = (): void => { void probeOnline(true, fetch.bind(window), location.origin, 10000).then((s) => { online = s; }); };
+  const probe = (): void => { void probeOnline(true, fetch.bind(window), location.origin, 10000).then((st) => { online = st; if (screen === 'title') showTitle(); }); };
   if (document.readyState === 'complete') setTimeout(probe, 0); else window.addEventListener('load', () => setTimeout(probe, 0), { once: true });
 }
 
-(window as unknown as { __game: unknown }).__game = { get online() { return online; }, get race() { return race; }, T, R, PEN, DEF, PERSONAS, startRace, applyTrack, startSession, showTitle, showBoards, get mode() { return mode; }, get preset() { return preset; }, get touchMode() { return touchMode; }, setTouchMode, input, get audio() { return sfx.ctx?.state ?? null; }, get muted() { return sfx.muted; }, suspendAudio: () => sfx.ctx?.suspend(), get champ() { return champ; }, get bays() { return bayPaint; }, get ghost() { return ghost; }, get recorder() { return recorder; }, get pbMs() { return pbMs; }, get screen() { return screen; }, get view() { return camMode; }, get aspect() { return camera.aspect; }, get mini() { return { w: hud.mW, h: hud.mH }; }, stepper, advance: (sec: number) => { for (let t = 0; t < sec && simulating(); t += STEP) tick(STEP); }, setView: (m: 'follow' | 'full') => { camMode = m; }, zoom: (span: number) => { camMode = 'follow'; followSpan = span; curSpan = span; }, snapCam: () => { const p = me(); camLead.set(0, 0); camTarget.set(p.x, 0, -p.y); }, get marker() { return playerMarker; }, get localId() { return localId; }, get localSlot() { return localSlot; }, setLocalSlot: (n: number) => { localSlot = Math.max(0, Math.min(DRIVERS.length - 1, Math.floor(n))); }, get camTarget() { return { x: camTarget.x, z: camTarget.z }; }, get motorMix() { return motorMix; }, arrows: { lane: laneArrow, pit: pitArrow }, info: () => ({ calls: renderer.info.render.calls, tris: renderer.info.render.triangles, objects: world.root.children.length, frames: renderer.info.render.frame, geometries: renderer.info.memory.geometries, textures: renderer.info.memory.textures }) };
+// debug/test hooks
+
+(window as unknown as { __game: unknown }).__game = { get online() { return online; }, get net() { return net && { conn: net.conn, me: net.me, room: net.room, result: net.result, reconnects: net.reconnects, tick: netTick, lagMs: netLag, buf: netBuf.stats, raceId: netRaceId, held: net.client.held, ctlSeq: net.client.ctlSeq, actSeq: net.client.actSeq }; }, netDrop: () => net?.client.ws?.close(4000, 'qa drop'), get race() { return race; }, T, R, PEN, DEF, PERSONAS, startRace, applyTrack, startSession, showTitle, showBoards, get mode() { return mode; }, get preset() { return preset; }, get touchMode() { return touchMode; }, setTouchMode, input, get audio() { return sfx.ctx?.state ?? null; }, get muted() { return sfx.muted; }, suspendAudio: () => sfx.ctx?.suspend(), get champ() { return champ; }, get bays() { return bayPaint; }, get ghost() { return ghost; }, get recorder() { return recorder; }, get pbMs() { return pbMs; }, get screen() { return screen; }, get view() { return camMode; }, get aspect() { return camera.aspect; }, get mini() { return { w: hud.mW, h: hud.mH }; }, stepper, advance: (sec: number) => { for (let t = 0; t < sec && simulating(); t += STEP) tick(STEP); }, setView: (m: 'follow' | 'full') => { camMode = m; }, zoom: (span: number) => { camMode = 'follow'; followSpan = span; curSpan = span; }, snapCam: () => { const p = me(); camLead.set(0, 0); camTarget.set(p.x, 0, -p.y); }, get marker() { return playerMarker; }, get localId() { return localId; }, get localSlot() { return localSlot; }, setLocalSlot: (n: number) => { localSlot = Math.max(0, Math.min(DRIVERS.length - 1, Math.floor(n))); }, get camTarget() { return { x: camTarget.x, z: camTarget.z }; }, get motorMix() { return motorMix; }, arrows: { lane: laneArrow, pit: pitArrow }, info: () => ({ calls: renderer.info.render.calls, tris: renderer.info.render.triangles, objects: world.root.children.length, frames: renderer.info.render.frame, geometries: renderer.info.memory.geometries, textures: renderer.info.memory.textures }) };

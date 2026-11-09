@@ -174,7 +174,7 @@ export class Hud {
       this.set('h-bestlbl', t('hud.best'));
       this.el['h-stand'].style.display = '';
     }
-    const stand = order.map((c, i) => `<div class="${c === p ? 'me' : ''}"><b>${i + 1}</b><i style="background:${hex(c.color)}"></i>${carLabel(c, p.id)}${flags(c)}${c.mode === 'service' || c.mode === 'bayIn' ? ' ⛽' : ''}${c.status === 'finished' ? ' 🏁' : ''}</div>`).join('');
+    const stand = order.map((c, i) => `<div class="${c === p ? 'me' : ''}"><b>${i + 1}</b><i style="background:${hex(c.color)}"></i>${escHtml(carLabel(c, p.id))}${flags(c)}${c.mode === 'service' || c.mode === 'bayIn' ? ' ⛽' : ''}${c.status === 'finished' ? ' 🏁' : ''}</div>`).join('');
     this.set('h-stand', stand, true);
     if (!practice) {
       const cur = race.phase === 'countdown' ? 0 : p.finished ? p.finishTime : race.raceTime;
@@ -353,6 +353,9 @@ export class Hud {
 
 /** The player is in reverse gear, or still rolling backwards after leaving it. */
 export function reversing(c: { revOn: boolean; v: number }): boolean { return c.revOn || c.v < -0.05; }
+
+/** Names can come from other players: escape before they go into markup. */
+export function escHtml(s: string): string { return s.replace(/[&<>"'`]/g, (ch) => `&#${ch.charCodeAt(0)};`); }
 
 /** "You" for the local driver's car, the driver's name for everyone else (other humans included). */
 export function carLabel(c: Car, me: DriverId): string { return c.id === me ? t('hud.you') : c.name; }

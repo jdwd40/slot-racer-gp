@@ -1,6 +1,6 @@
 # Online room server (#22)
 
-An authoritative server for private rooms of up to four human drivers, plus server-hosted solo, championship-round and practice sessions. The server owns one race simulation per room. Clients send held controls and numbered actions and receive the race state. The browser lobby and race screens are a later task. Accounts exist (username and password, no email). Awards and cloud statistics are not implemented.
+An authoritative server for private rooms of up to four human drivers, plus server-hosted solo, championship-round and practice sessions. The server owns one race simulation per room. Clients send held controls and numbered actions and receive the race state. The browser lobby and online race screens are described in [online-client.md](online-client.md). Accounts exist (username and password, no email). Awards and cloud statistics are not implemented.
 
 **Status.** Everything is built and verified locally ([evidence](online-evidence.md)). Production multiplayer is **not active**. Nothing was installed on any host. The deployed static client keeps online play off. The owner activates it with the [runbook](#production-activation-runbook-owner) below. It stays unavailable until the real endpoint passes the health and connection checks.
 
@@ -17,7 +17,7 @@ An authoritative server for private rooms of up to four human drivers, plus serv
 - **The race core gained two things.** These are additive, and the browser game's behaviour is unchanged:
   - `RaceOpts.runOn: 'live'`: once every human is terminal, the AI field keeps stepping normally. There is no 240 s synchronous run-out (which measured 330 ms of blocked event loop). The server runs this run-on at 8 steps per tick.
   - `Race.retire(id)`: DNF `retired`, or DQ `deadline` if a service breach is latched, so leaving never escapes a DQ.
-- **Shared protocol and client.** `src/net/protocol.ts` holds the message types, limits and validator. `src/net/client.ts` is a client that takes either the browser `WebSocket` or the `ws` package. The headless test clients and the smoke check use it, and so will the browser lobby.
+- **Shared protocol and client.** `src/net/protocol.ts` holds the message types, limits and validator. `src/net/client.ts` is a client that takes either the browser `WebSocket` or the `ws` package. The headless test clients, the smoke check and the browser's online session (`src/net/session.ts`) use it.
 
 ## Rooms, seats and races
 
@@ -304,7 +304,7 @@ These steps run as an administrator on the site host (`ssh app-vps`). None of th
 
 10. **Public gate.** Run `node scripts/server-smoke.mjs https://slotrush.jdwd40.com --origin https://slotrush.jdwd40.com --expect server-dist/protocol.json` from any machine with the release. It must pass over real TLS through Nginx.
 
-11. **Client.** Only after step 10 passes, enable online play in the deployed client. Set `VITE_ONLINE: '1'` on the `npm run build` step in `.github/workflows/ci.yml`; that is a public build flag, not a secret. Then push to `main`. That build still enables online play only while the health check passes. The browser lobby is the follow-up task, so until it lands this flag has no visible effect.
+11. **Client.** Only after step 10 passes, enable online play in the deployed client. Set `VITE_ONLINE: '1'` on the `npm run build` step in `.github/workflows/ci.yml`; that is a public build flag, not a secret. Then push to `main`. That build still offers online play only while the health check passes; until then the title shows local play only. Then run the post-activation checks in [online-client.md](online-client.md#after-activation-owner).
 
 12. **Account recovery:** `sudo -u slotrush-server sh -c 'set -a; . /etc/slotrush-server/env; set +a; cd /srv/slotrush-server/current; node server-dist/admin.mjs reset-password <username>'`. Type the new password on stdin, or send empty input (`< /dev/null`) to generate one, which is printed once.
 
