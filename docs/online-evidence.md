@@ -76,9 +76,9 @@ Chromium 156 headless, SwiftShader, 480×270, Low preset, `scripts/browser-check
 | `practice` | Default | 10/10 pass | PB lap, ghost saved, loaded and replayed. Fixture saves preserved |
 | `championship` | Default | 9/9 pass | Rounds stored once from the final result. Fixture championship continued |
 | `localslot` | Default | 11/11 pass | Local driver in slot 2 |
-| `race` | Default | See below | Full 13-lap race on real keys |
+| `race` | Default | 23/23 pass (318 s) | Full 13-lap race on real keys: countdown, camera, pause, lane, pit visits, results, play again. An earlier run was cut off after 7 passing checks by the build host's 10-minute background-job limit. It was re-run at commit `7d8545f`, together with `online` on that build (3 pass, 1 n/a) |
 
-RACE_RESULT_PLACEHOLDER
+The first five rows ran at commit `08a3d87`. Later commits changed only the online probe's start time, which is dead code in the default build, plus server-side code and docs.
 
 Not run: `controlled`, `routing`, `touch`, `responsive`, `touchrace`, `reverse`, `service`, `queue` and `autosg`/`autobay`. This change does not touch input, HUD, layout or service rules. The race-core suite (unchanged, all passing) and the new server tests cover the shared-track and run-on changes. The build host's time limit also applies.
 
