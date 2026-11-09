@@ -59,6 +59,8 @@ export class AccountClient {
   /** a request in flight (the UI disables its buttons and shows progress) */
   busy = false;
   onChange: ((a: AuthState) => void) | null = null;
+  /** the last cross-tab refresh could not reach the account service; the identity shown is the last one confirmed */
+  refreshFailed = false;
   /** the identity this tab last held ('' guest, an account id), kept through `loading`: this tab's seat belongs to it */
   private owner: string | null = null;
   /** callers waiting for the request in flight to finish (a cross-tab change that arrived meanwhile) */
@@ -162,7 +164,13 @@ export class AccountClient {
     if (!opts.keep || (this.auth.state !== 'signed-in' && this.auth.state !== 'guest')) this.set({ state: 'loading' });
     const r = await this.call('/api/auth/me');
     if (seq !== this.gen) return this.auth; // a newer refresh or authentication change happened: it wins
-    if (!r || r.status !== 200) { this.set({ state: 'unavailable' }); return this.auth; }
+    if (!r || r.status !== 200) {
+      // a refresh of a known identity that failed: nothing says that identity ended, so keep it (and its account-scoped
+      // state) and report only that the check could not be made
+      if (opts.keep && (this.auth.state === 'signed-in' || this.auth.state === 'guest')) { this.refreshFailed = true; this.onChange?.(this.auth); return this.auth; }
+      this.set({ state: 'unavailable' }); return this.auth;
+    }
+    this.refreshFailed = false;
     const v = AccountClient.view(r.data);
     this.set(v ? { state: 'signed-in', account: v } : { state: 'guest', expired: r.data.session === 'expired' });
     return this.auth;
@@ -192,16 +200,16 @@ export class AccountClient {
   /**
    * Sign out here. Only the server can revoke the session (the cookie is HttpOnly), so this browser becomes a guest only
    * once the server confirms it did; otherwise the session would still be live and a reload would sign straight back in.
-   * Account-scoped client state is forgotten either way, even if the server is unreachable.
+   * Account-scoped client state (pending submissions, this tab's seat) belongs to a session that is still live until the
+   * server confirms, so it is removed only then, or when the server says the session had already ended.
    */
   async logout(): Promise<{ ok: true } | { ok: false; error: AuthError }> {
     this.busy = true;
     this.onChange?.(this.auth);
     let r: { status: number; data: Json } | null = null;
-    try { r = await this.call('/api/auth/logout', {}); } finally {
-      clearAccountState(this.local, this.session);
-    }
-    if (r && r.status === 200 && r.data.ok === true) { this.apply({ state: 'guest', expired: false }); this.idle(); return { ok: true }; }
+    try { r = await this.call('/api/auth/logout', {}); } catch { r = null; }
+    if (r && r.status === 200 && r.data.ok === true) { clearAccountState(this.local, this.session); this.apply({ state: 'guest', expired: false }); this.idle(); return { ok: true }; }
+    if (r && r.status === 401) clearAccountState(this.local, this.session);   // the session had already ended
     // still signed in as far as the server is concerned: say so, and let the driver try again
     this.idle();
     this.onChange?.(this.auth);

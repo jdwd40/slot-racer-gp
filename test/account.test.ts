@@ -183,8 +183,8 @@ describe('AccountClient', () => {
     srv.setDown(false);
     expect(c.auth).toEqual(signedIn);
     expect(c.busy).toBe(false);
-    expect(local.getItem(accountKey(id, 'pending'))).toBe(null);   // private client state is still forgotten
-    expect(session.getItem('srgp.seat')).toBe(null);
+    expect(local.getItem(accountKey(id, 'pending'))).toBe('[1]');   // the session is still live, so its state is kept
+    expect(session.getItem('srgp.seat')).toBe('{}');
     expect(srv.sessions.size).toBe(1);
     expect((await new AccountClient(srv.fetchFn, 'https://slotrush.example', new MemStore(), new MemStore()).restore()).state).toBe('signed-in');   // a reload would sign back in
     // the server answers but could not revoke the session (store error, proxy error page)
@@ -192,9 +192,13 @@ describe('AccountClient', () => {
       srv.override('/api/auth/logout', () => fail);
       expect((await c.logout()).ok).toBe(false);
       expect(c.auth).toEqual(signedIn);
+      expect(local.getItem(accountKey(id, 'pending'))).toBe('[1]');
+      expect(session.getItem('srgp.seat')).toBe('{}');
     }
     srv.override('/api/auth/logout', null);
     expect(await c.logout()).toEqual({ ok: true });
+    expect(local.getItem(accountKey(id, 'pending'))).toBe(null);   // confirmed: now forgotten
+    expect(session.getItem('srgp.seat')).toBe(null);
     expect(c.auth).toEqual({ state: 'guest', expired: false });
     expect(srv.sessions.size).toBe(0);
     keepsSaves();
@@ -344,6 +348,31 @@ describe('AccountClient', () => {
 
     // with nothing newer in between, a restore's answer still applies
     expect(await c.restore()).toMatchObject({ state: 'signed-in', account: { displayName: 'Alice Two' } });
+  });
+
+  it('a cross-tab refresh that cannot reach the server keeps the known identity and its state', async () => {
+    const srv = fakeServer();
+    const local = new MemStore(), session = new MemStore();
+    const c = new AccountClient(srv.fetchFn, 'https://slotrush.example', local, session);
+    await c.register('kim_1', 'kim password 1');
+    const signedIn = c.auth, id = c.account!.id;
+    local.setItem(accountKey(id, 'pending'), '[2]');
+    session.setItem('srgp.seat', '{}');
+    for (const fail of [() => srv.setDown(true), () => srv.override('/api/auth/me', () => ({ status: 503, body: { error: 'unavailable' } }))]) {
+      fail();
+      expect(await c.syncFromOtherTab(OWNER_KEY)).toEqual(signedIn);
+      expect(c.refreshFailed).toBe(true);
+      expect(c.expected).toBe(id);
+      expect(local.getItem(accountKey(id, 'pending'))).toBe('[2]');
+      expect(session.getItem('srgp.seat')).toBe('{}');
+      srv.setDown(false); srv.override('/api/auth/me', null);
+    }
+    expect(await c.syncFromOtherTab(OWNER_KEY)).toEqual(signedIn);
+    expect(c.refreshFailed).toBe(false);
+    // a page-load restore (not a refresh of a known identity) still reports the service as unavailable
+    srv.setDown(true);
+    expect(await c.restore()).toEqual({ state: 'unavailable' });
+    srv.setDown(false);
   });
 
   it('clearAccountState removes only account-scoped keys', () => {

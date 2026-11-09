@@ -102,7 +102,9 @@ every room entry, so a sign-out, expiry or reset elsewhere also ends a socket's 
 - **Sign-out is confirmed by the server.** Only the server can revoke the `HttpOnly` session, so the browser becomes a
   guest only after `POST /api/auth/logout` answers `200 {ok:true}`. If the request fails (offline, a store error, a proxy
   error page), the account screen says the device is **still signed in** and offers Sign out again; account-scoped
-  client state has already been removed either way.
+  client state is kept until the server confirms (or reports the session already ended), because the session still owns it.
+- **A failed cross-tab refresh keeps the identity.** If another tab changes the sign-in and this tab's `/me` check
+  cannot reach the server, the tab keeps the last confirmed identity and its state rather than dropping to unavailable.
 
 ## Abuse and failure handling
 
