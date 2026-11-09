@@ -383,6 +383,51 @@ describe('deferral and overrides', () => {
   });
 });
 
+describe('overrides with no switch left', () => {
+  it('Lane during Auto entry with no switch before the entrance is refused: control stays and the stop is served on the final lap', () => {
+    const { r, P, rival } = setup();
+    approach(r, P, 30, -1, 14, LAPS); P.crossed = LAPS; P.lapsDone = LAPS - 1;
+    award(r, P, rival);
+    run(r, UP, 0.1);
+    expect(P.sgCtl).toBe(true);
+    expect(r.switchBeforeEntry(P)).toBe(false);
+    r.requestLane();
+    expect(msgs(r.events)).toContain('msg.sgNoSwitchFinal');
+    expect(P.laneOverride).toBe(false);
+    r.events.length = 0;
+    const tr = run(r, driver(UP), 40, () => P.finished);
+    expect(tr.msgs).not.toContain('msg.sgTooLate');
+    expect(served(tr)).toEqual([P.idx]);
+    expect(P.status).toBe('finished');
+  });
+
+  it('with a deferral left the refusal says so, and nothing about the debt changes', () => {
+    const { r, P, rival } = setup();
+    approach(r, P, 30, -1, 14);
+    award(r, P, rival);
+    run(r, UP, 0.1);
+    const before = [P.sgOwed, P.sgDue, P.sgDeferred];
+    r.requestLane();
+    expect(msgs(r.events)).toContain('msg.sgNoSwitch');
+    expect(P.laneOverride).toBe(false);
+    expect([P.sgOwed, P.sgDue, P.sgDeferred]).toEqual(before);
+    run(r, UP, 0.05);
+    expect(P.sgCtl).toBe(true);
+  });
+
+  it('an override armed before the stop-and-go, with no switch left to use it, does not release automatic entry', () => {
+    const { r, P, rival } = setup();
+    approach(r, P, 30, -1, 14);
+    award(r, P, rival);
+    P.laneOverride = true;                      // say armed earlier for a fuel stop, before the last switch
+    const tr = run(r, UP, 20, doneAndOut);
+    expect(P.laneOverride).toBe(false);
+    expect(tr.phases).toContain('entry');
+    expect(tr.msgs).not.toContain('msg.sgTooLate');
+    expect(P.sgOwed).toBe(0);
+  });
+});
+
 describe('out of fuel in the pit lane', () => {
   it('running dry after a penalty-only stop hands back control, so the car is captured by the bay it stops beside and refuelled', () => {
     const { r, P } = setup();

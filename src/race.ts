@@ -319,6 +319,11 @@ export class Race {
         this.pmsg(c, this.deferBlock(c) === null ? 'msg.queueNoSwitch' : 'msg.queueNoSwitchFinal', 'warn');
         return;
       }
+      // the same with a stop-and-go owed: an override no switch can use would only release automatic entry and miss the stop
+      if (c.sgOwed > 0 && !c.laneOverride && !this.switchBeforeEntry(c)) {
+        this.pmsg(c, this.deferBlock(c) === null ? 'msg.sgNoSwitch' : 'msg.sgNoSwitchFinal', 'warn');
+        return;
+      }
       c.laneOverride = !c.laneOverride;
       this.pmsg(c, c.laneOverride ? 'msg.routeInside' : 'msg.routeOutside', 'info');
       return;
@@ -745,6 +750,8 @@ export class Race {
     if (c.routeHold === k) { c.sgPhase = 'deferred'; c.sgCommit = -1; return; }
     c.sgPhase = 'armed';
     const dEntry = T.ahead(s, T.PIT_IN0);
+    // an override armed earlier (say for a fuel stop) that no switch before the entrance can use any more changes nothing: drop it
+    if (c.laneOverride && !this.switchBeforeEntry(c) && (c.change ? c.change.to < 0 : c.laneSide < 0)) c.laneOverride = false;
     if (!this.pitAssist(c) || c.laneOverride || dEntry >= AUTO.window || !this.sgPath(c, s, dEntry)) { c.sgCommit = -1; return; }
     if (c.sgCommit !== k) {
       // too fast for this entrance: no takeover and no entry, so the debt policy decides (never a snap or an instant stop)
