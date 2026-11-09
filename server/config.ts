@@ -69,6 +69,7 @@ export function loadConfig(env: Env = process.env): Config {
   const databaseUrl = env.DATABASE_URL?.trim() || null;
   const sessionSecret = env.SLOTRUSH_SESSION_SECRET?.trim() || null;
   if (databaseUrl && (!sessionSecret || sessionSecret.length < 32)) throw new Error('SLOTRUSH_SESSION_SECRET (at least 32 characters) is required with DATABASE_URL');
+  if ((sessionSecret ?? '').includes('CHANGE_ME') || (databaseUrl ?? '').includes('CHANGE_ME')) throw new Error('replace the CHANGE_ME placeholders from the env example (SLOTRUSH_SESSION_SECRET, DATABASE_URL)');
   const logLevel = (env.SLOTRUSH_LOG_LEVEL ?? 'info') as Level;
   if (!['debug', 'info', 'warn', 'error'].includes(logLevel)) throw new Error('SLOTRUSH_LOG_LEVEL must be debug, info, warn or error');
   const host = env.SLOTRUSH_HOST ?? '127.0.0.1';
