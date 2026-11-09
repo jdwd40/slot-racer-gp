@@ -271,7 +271,11 @@ describe.skipIf(!URL)('PostgreSQL: driver profiles, ownership, session lifecycle
     expect(gp).toMatchObject({ name: 'Guest Gil', guest: true });
     // the public room never carries a username, an account id, a session or a token
     const pub = JSON.stringify(gj.room);
-    for (const s of ['zoe_seat', z.id, 'srsid', 'token', 'password']) expect(pub).not.toContain(s);
+    for (const s of ['zoe_seat', 'srsid', 'token', 'password', 'accountId']) expect(pub).not.toContain(s);
+    // the account id is a short number: compared as whole values (a random room UUID may contain its digits)
+    const values: string[] = [];
+    JSON.parse(pub, (_k, v: unknown) => { values.push(String(v)); return v; });
+    expect(values).not.toContain(z.id);
     // the same account cannot take a second seat in the room
     const dupe = await socket(z.cookie);
     expect(await dupe.request({ t: 'join', code: j.room.code, name: 'Zoe again' })).toMatchObject({ t: 'nack', code: 'already_joined' });

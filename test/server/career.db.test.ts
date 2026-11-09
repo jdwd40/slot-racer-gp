@@ -288,8 +288,10 @@ describe.skipIf(!URL)('PostgreSQL: career points, award ledger, personal bests',
     const back = await socket(accts[2].cookie);
     const cred = cs[2].credential()!;
     expect(await back.request({ t: 'resume', room: cred.room, participant: cred.participant, token: cred.token })).toMatchObject({ t: 'joined' });
-    const replay = await back.wait((m) => m.t === 'awards');
-    expect(JSON.stringify((replay as Extract<ServerMsg, { t: 'awards' }>).awards)).toBe(JSON.stringify(final));
+    // the replay follows the private reply in the same burst, so it may already have been received
+    for (let i = 0; i < 100 && !awardsOf(back).length; i++) await new Promise((res) => setTimeout(res, 20));
+    expect(JSON.stringify(awardsOf(back).at(-1))).toBe(JSON.stringify(final));
+    expect(back.received.filter((m) => m.t === 'result')).toHaveLength(1);
     expect(await ledger(env.raceId)).toEqual(led);
     // a second browser signs in to the same name, points, history and bests; a rename keeps all of it
     const winner = accts[ids.findIndex((id) => byPart.get(id)!.pos === 1)];

@@ -137,7 +137,7 @@ No account awards are computed.
 
 ## Accounts and sessions
 
-- `POST /api/auth/register` (`{ username, password, displayName? }`) and `/api/auth/login` (`{ username, password }`). `POST /api/auth/logout`. `GET /api/auth/me`. `GET`/`POST /api/profile` (`{ displayName }`). Driver profiles, name rules, session-expiry answers, rate limits, client-side clean-up and backup/restore: [accounts.md](accounts.md) (#24).
+- `POST /api/auth/register` (`{ username, password, displayName? }`) and `/api/auth/login` (`{ username, password }`). `POST /api/auth/logout`. `GET /api/auth/me`. `GET`/`POST /api/profile` (`{ displayName }`). Driver profiles, name rules, session-expiry answers, rate limits, client-side clean-up and backup/restore: [accounts.md](accounts.md) (#24). `GET /api/profile/stats` (read-only career: points, podiums, verified bests, recent results) and the `awards` server message: [career.md](career.md) (#25).
 - Usernames are 3–20 characters (`A-Z a-z 0-9 _ -`), stored lower-case, and unique without regard to case. Passwords are 10–128 characters. **No email or other contact detail is collected**, and no table has such a column (tested).
 - **Hashing.** The `argon2` package, Argon2id with m=19 MiB, t=2, p=1 (the OWASP minimum profile). Hashes run one at a time, with at most 16 queued (beyond that the reply is 503 `busy`), so a login flood cannot exhaust memory or stall races. Unknown users cost the same hash work as known ones.
 - **Sessions.** `express-session` with a PostgreSQL store (`server/sessionStore.ts`, table `sessions`, expired rows pruned every 15 minutes).

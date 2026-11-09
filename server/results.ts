@@ -39,7 +39,8 @@ export class PgResultSink implements ResultSink {
       );
       if (ins.rowCount !== 1) {
         await c.query('ROLLBACK');
-        const had = await this.pool.query<{ digest: string }>('SELECT digest FROM race_results WHERE race_id = $1', [e.raceId]);
+        // on the same connection: asking the pool for another while holding this one could exhaust it under concurrent retries
+        const had = await c.query<{ digest: string }>('SELECT digest FROM race_results WHERE race_id = $1', [e.raceId]);
         if (had.rows[0]?.digest !== e.digest) throw new ResultConflict(`race ${e.raceId} already has a different result`);
         return 'duplicate';
       }
