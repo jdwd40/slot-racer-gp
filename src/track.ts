@@ -338,7 +338,7 @@ export const TRACK_EDGE = 0.6; // track surface extends this far beyond the lane
 // Pit lane (on the right / outside of the main straight; every circuit's
 // segment 0 is a main straight of at least ~36 units)
 export const PIT_IN0 = 3, PIT_IN1 = 8;
-export const BAYS = [12.5, 15.5, 18.5, 21.5];
+export const BAYS: readonly number[] = Object.freeze([12.5, 15.5, 18.5, 21.5]);
 export const BAY_HALF = 1.15;
 /** stop-and-go penalty box: a marked stretch of pit lane between the entry ramp and the first service bay */
 export const PEN_S = 9.3, PEN_HALF = 1.1;
@@ -524,13 +524,33 @@ export class Track {
   }
 }
 
+/**
+ * Freeze a value and everything reachable from it. A shared Track is read by every race on that circuit (and, on the room
+ * server, by concurrent rooms), so no code path may be able to change one race's geometry under another (#21/#22).
+ */
+function deepFreeze<V>(v: V, seen = new Set<unknown>()): V {
+  if (!v || typeof v !== 'object' || seen.has(v) || ArrayBuffer.isView(v)) return v;
+  seen.add(v);
+  for (const k of Reflect.ownKeys(v)) deepFreeze((v as Record<PropertyKey, unknown>)[k], seen);
+  return Object.freeze(v);
+}
+
+/** Every circuit id. */
+export const TRACK_IDS: readonly string[] = Object.freeze(TRACKS.map((d) => d.id));
+export function isTrackId(id: unknown): id is string { return typeof id === 'string' && TRACK_IDS.includes(id); }
+
 const built = new Map<string, Track>();
-/** The immutable context for a circuit (unknown ids fall back to the first circuit). Built once per id and shared. */
+/** The immutable (deep-frozen) context for a circuit (unknown ids fall back to the first circuit). Built once per id and shared. */
 export function trackFor(id: string): Track {
   const def = TRACKS.find((d) => d.id === id) ?? TRACKS[0];
   let t = built.get(def.id);
-  if (!t) { t = new Track(def.id); built.set(def.id, t); }
+  if (!t) { t = deepFreeze(new Track(def.id)); built.set(def.id, t); }
   return t;
+}
+/** The context for a circuit id, refusing unknown ids instead of falling back (the room server validates with this). */
+export function trackById(id: string): Track {
+  if (!isTrackId(id)) throw new Error(`unknown track ${String(id)}`);
+  return trackFor(id);
 }
 
 export const PROFILE_STEP = 0.25;
