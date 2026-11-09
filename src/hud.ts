@@ -78,7 +78,7 @@ export class Hud {
         <button id="t-lane" class="tbtn" tabindex="-1" data-tap="lane"><b data-t="touch.lane"></b><small id="t-lane-cue"></small></button>
         <button id="t-pit" class="tbtn" tabindex="-1" data-tap="pit"><b data-t="touch.pit"></b><small id="t-pit-cue"></small></button>
         <button id="t-defer" class="tbtn" tabindex="-1" data-tap="defer" hidden><b data-t="touch.defer"></b><small data-t="touch.defer.idle"></small></button>
-        <button id="t-throttle" class="tbtn hold" tabindex="-1" data-hold="throttle"><b data-t="touch.throttle"></b><small data-t="touch.hold"></small></button>
+        <button id="t-throttle" class="tbtn hold" tabindex="-1" data-hold="throttle"><b data-t="touch.throttle"></b><small id="t-throttle-cue" data-t="touch.hold"></small></button>
       </div>
     `;
     parent.appendChild(this.root);
@@ -136,7 +136,7 @@ export class Hud {
   }
 
   /** Show a tap control's state as a shape and a word, so it never rests on colour alone. */
-  cue(name: 'lane' | 'pit' | 'brake', state: string): void {
+  cue(name: 'lane' | 'pit' | 'brake' | 'throttle', state: string): void {
     const b = this.el[`t-${name}`];
     if (b.dataset.cue === state) return;
     b.dataset.cue = state;
@@ -202,11 +202,14 @@ export class Hud {
     if (p.fuelDue > 0 && !p.finished) chips.push(`<span class="chip org">⛽ ${t('hud.fuelChip')}${dueChip(p.fuelDue)}</span>`);
     if (p.fuelReq && !p.finished) chips.push(`<span class="chip cyan">⛽ ${t('hud.fuelReq')}</span>`);
     // automatic stop-and-go: what the car is doing for the driver (the simulation decides; the HUD only reads it)
-    const sgp = p.finished || practice ? null : p.sgPhase;
+    // fuel visits drive themselves in practice too (no deadlines there, but the same bay stop)
+    const sgp = p.finished ? null : p.sgPhase;
+    const b = race.bayNo(p);
     if (sgp) {
       const n = Math.max(0, p.sgOwed - p.sgServed).toFixed(1);
-      const cls = sgp === 'armed' ? 'red' : sgp === 'deferred' ? 'yel' : sgp === 'queued' ? 'org' : 'cyan';
-      chips.push(`<span class="chip ${cls} sgp" data-sg="${sgp}">${sgp === 'deferred' ? '⏭' : sgp === 'armed' ? '■' : 'A'} ${t(`hud.sgA.${sgp}`, { n })}</span>`);
+      const cls = sgp === 'armed' ? 'red' : sgp === 'deferred' || sgp === 'release' ? 'yel' : sgp === 'queued' || sgp === 'bayWait' || sgp === 'exit' ? 'org' : 'cyan';
+      const icon = sgp === 'deferred' ? '⏭' : sgp === 'armed' ? '■' : sgp === 'ready' ? '▶' : sgp === 'release' ? '△' : sgp === 'exit' || sgp === 'bayWait' ? '⏸' : 'A';
+      chips.push(`<span class="chip ${cls} sgp" data-sg="${sgp}">${icon} ${t(`hud.sgA.${sgp}`, { n, b })}</span>`);
     }
     if (held && sgp !== 'deferred') chips.push(`<span class="chip yel">⏭ ${t('hud.held')}</span>`);
     const canDefer = race.deferBlock(p) === null;
@@ -218,7 +221,7 @@ export class Hud {
     if (p.squeezeHold) chips.push(`<span class="chip org">▼ ${t('hud.yield')}</span>`);
     // shared pit queue: what the simulation is holding the car for (the HUD keeps no queue of its own)
     const wait = p.finished ? null : p.pitWait;
-    if (wait && !(wait === 'queued' && sgp === 'queued')) chips.push(`<span class="chip org">⏸ ${t(QUEUE_CHIP[wait])}</span>`);
+    if (wait && !(wait === 'queued' && sgp === 'queued') && !(wait === 'exit' && sgp === 'exit')) chips.push(`<span class="chip org">⏸ ${t(QUEUE_CHIP[wait])}</span>`);
     const rev = reversing(p);
     if (rev) chips.push(`<span class="chip rev">R ${t('hud.reverse')}</span>`);
     this.set('h-chips', chips.join(''), true);
@@ -228,11 +231,14 @@ export class Hud {
     if (dEl.hidden === canDefer) dEl.hidden = !canDefer;
     this.root.classList.toggle('defer', canDefer);
     this.cue('brake', rev ? 'reverse' : p.finished ? 'idle' : p.sgCtl ? 'auto' : p.pitHold ? 'held' : 'idle');
+    // Throttle in the bay: what a press does now (the same rule for a key and a finger)
+    this.cue('throttle', sgp === 'ready' ? 'ready' : sgp === 'release' ? 'release' : p.sgCtl && !p.finished ? 'auto' : 'hold');
 
     // status line. fuelVisit: this bay visit is settling (or has settled) a committed fuel stop
     const inBay = p.mode === 'bayIn' || p.mode === 'service' || p.mode === 'bayOut';
     if (!inBay || p.towSvc) this.fuelVisit = false; else if (p.fuelDue > 0) this.fuelVisit = true;
     let st = '';
+    const inPitLane = p.mode === 'pitlane' && !p.finished;
     if (p.sgServing) {
       st = `<b class="red">${t('hud.sgServing', { n: Math.max(0, p.sgOwed - p.sgServed).toFixed(1) })}</b>`;
     } else if (sgp === 'leaving') {
@@ -246,19 +252,27 @@ export class Hud {
       }
     } else if (wait && wait !== 'exit' && p.mode !== 'service') {
       st = `<b class="org">${t(wait === 'bay' ? 'hud.qBayLine' : 'hud.qQueuedLine')}</b>`;
+    } else if (inPitLane && (sgp === 'bay' || sgp === 'bayWait')) {
+      st = `<b class="${sgp === 'bay' ? 'cyan' : 'org'}">${t(`hud.sgL.${sgp}`, { b })}</b>`;
+    } else if (p.mode === 'race' && sgp === 'entry' && p.sgOwed <= 0) {
+      st = `<b class="cyan">${t('hud.sgL.entryBay', { b })}</b>`;
     } else if (p.mode === 'service') {
+      // refuelling, then why departure is not available yet, or what Throttle does now (Waiting for clear exit once asked)
       st = `<b>${t('hud.refuel', { n: Math.round(p.fuel * 100) })}</b>`;
       if (p.fuelDue > 0 && !p.towSvc) st += ` · <span class="org">${t('hud.fuelServing', { n: Math.max(0, SERVICE_READY - p.serviceT + 0.05).toFixed(1) })}</span>`;
       else if (this.fuelVisit) st += ` · <span class="grn">${t('hud.fuelServed')}</span>`;
-      if (p.penalty > 0) st += ` · <span class="red">${t('hud.penalty', { n: Math.ceil(p.penalty) })}</span>`;
-      else if (p.waitingClear) st += ` · ${t('hud.waitClear')}`;
-      else if (!p.finished) st += ` · ${t('hud.refuelHint')}`;
+      const why = race.departBlock(p);
+      if (p.penalty > 0) st += ` · <span class="red">${t('hud.penalty', { n: Math.ceil(p.penalty) })}</span> · ${t('hud.departPenalty')}`;
+      else if (p.exitReq) st += ` · <b class="org">${t('hud.waitClear')}</b>`;
+      else if (p.finished) { /* the AI rule takes the car out after the flag */ }
+      else if (why === 'settle' && !(p.fuelDue > 0 && !p.towSvc)) st += ` · ${t('hud.departSettle', { n: Math.max(0, SERVICE_READY - p.serviceT + 0.05).toFixed(1) })}`;
+      else if (!why) st += ` · <span class="${sgp === 'release' ? 'yel' : 'grn'}">${t(sgp === 'release' ? 'hud.releaseHint' : 'hud.refuelHint')}</span>`;
     } else if (wait === 'exit') {
       st = `<b class="org">${t('hud.qExitLine')}</b>`;
     } else if (p.fuelDue > 0 && !p.finished && !held) {
       st = `<b class="org">${t('hud.fuelDueOwed')}</b>${dueText(p.fuelDue) ? ` · ${dueText(p.fuelDue)}` : ''}`;
     } else if (p.mode === 'pitlane' && T.gapS(race.s(p), T.BAYS[3] + T.BAY_HALF) > 0 && !p.finished) {
-      st = t('hud.stopBay');
+      st = t('hud.stopBay', { b });
     } else if (live && p.svcBreach) {
       st = `<b class="red">${t('hud.breachLine')}</b>`;
     }

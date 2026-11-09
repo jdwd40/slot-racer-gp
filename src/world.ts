@@ -8,11 +8,35 @@ export interface World {
   root: THREE.Group;
   startLights: THREE.MeshStandardMaterial[];
   bayGlow: THREE.MeshBasicMaterial[];
+  /**
+   * Paint each service bay for its owner this race (colour, race number, name tag). Drawing only: who may use a bay is decided
+   * by the race (Car.bayHome), never by these colours.
+   */
+  paintBays(bays: BayPaint[]): void;
   /** stop-and-go penalty box highlight */
   penGlow: THREE.MeshBasicMaterial;
   crowd: THREE.InstancedMesh[];
   /** materials of everything that sits on bridge decks; faded while the player drives underneath */
   bridgeMats: THREE.Material[];
+}
+
+/** How one service bay is drawn: its owner's colour, race number and tag, or a neutral unowned bay (num null). */
+export interface BayPaint { color: number; num: number | null; tag: string; mine: boolean; }
+const UNOWNED = 0x6b7280;
+
+/** Pit board for a bay: bay number on a strip in the owner's colour, the owner's race number, and its tag. */
+function bayBoardTex(j: number, b: BayPaint): THREE.CanvasTexture {
+  const hex = `#${b.color.toString(16).padStart(6, '0')}`;
+  return canvasTex(128, 112, (g) => {
+    g.fillStyle = '#111'; g.fillRect(0, 0, 128, 112);
+    g.fillStyle = hex; g.fillRect(0, 0, 128, 30);
+    if (b.mine) { g.strokeStyle = hex; g.lineWidth = 10; g.strokeRect(5, 5, 118, 102); }
+    const dark = (b.color >> 16) * 0.3 + ((b.color >> 8) & 255) * 0.59 + (b.color & 255) * 0.11 > 150;
+    g.textAlign = 'center'; g.textBaseline = 'middle';
+    g.fillStyle = dark ? '#111' : '#fff'; g.font = 'bold 22px Arial, sans-serif'; g.fillText(`BAY ${j + 1}`, 64, 17);
+    g.fillStyle = '#fff'; g.font = 'bold 46px Arial, sans-serif'; g.fillText(b.num === null ? '–' : String(b.num), 64, 62);
+    g.font = 'bold 18px Arial, sans-serif'; g.fillText(b.tag, 64, 96);
+  }, false);
 }
 
 interface Piece { s0: number; s1: number; up: boolean; }
@@ -330,11 +354,19 @@ export function buildWorld(): World {
   }
   // service bays
   const bayGlow: THREE.MeshBasicMaterial[] = [];
+  // per bay: materials painted in the owner's colour, emissive monitor materials, and the pit board
+  const bayTint: THREE.MeshStandardMaterial[][] = T.BAYS.map(() => []);
+  const bayGlowMon: THREE.MeshStandardMaterial[] = [];
+  const bayBoards: THREE.MeshStandardMaterial[] = [];
+  const tint = (j: number, g: THREE.Group): THREE.Group => { bayTint[j].push((g.children[0] as THREE.Mesh).material as THREE.MeshStandardMaterial); return g; };
   for (let j = 0; j < T.BAYS.length; j++) {
     const bs = T.BAYS[j];
     root.add(mesh(ribbon(bs - T.BAY_HALF, bs + T.BAY_HALF, () => T.BAY_D - 0.6, () => T.PIT_D - 0.6, Y0 - 0.0012, 0.3), std(0x4a4d55, 0.6, 0, { side })));
     const tc = std(TEAM_COLS[j], 0.5, 0, { side });
+    bayTint[j].push(tc);
     for (const e of [-1, 1]) root.add(mesh(ribbon(bs + e * T.BAY_HALF - 0.05, bs + e * T.BAY_HALF + 0.05, () => T.BAY_D - 0.6, () => T.PIT_D + 0.6, Y0 + 0.0035, 0.1), tc));
+    // back line across the bay, in the owner's colour too
+    root.add(mesh(ribbon(bs - T.BAY_HALF, bs + T.BAY_HALF, () => T.BAY_D - 0.6, () => T.BAY_D - 0.48, Y0 + 0.0035, 0.1), tc));
     slotAndRails(bs - 1.2, bs, (s) => T.PIT_D + (T.BAY_D - T.PIT_D) * T.smooth((s - (bs - 1.2)) / 1.2), 0.1);
     const gm = new THREE.MeshBasicMaterial({ color: 0x3cff8a, transparent: true, opacity: 0, side, depthWrite: false });
     bayGlow.push(gm);
@@ -347,11 +379,13 @@ export function buildWorld(): World {
     hose.position.set(rp.x, 0.5, -rp.y); hose.rotation.y = rp.h; root.add(hose);
     for (const off of [-0.5, 0.25]) {
       const cp = T.point(bs + off, T.BAY_D - 0.95);
-      root.add(figure(TEAM_COLS[j], cp.x, cp.y));
+      root.add(tint(j, figure(TEAM_COLS[j], cp.x, cp.y)));
     }
     const pb = groupAt(bs - 0.9, T.PIT_D - 0.95);
-    const board = mesh(new THREE.BoxGeometry(0.3, 0.22, 0.03), std(0xffffff, 0.5, 0, { map: textTex(64, 48, '#111', '#fff', String([7, 11, 3, 24][j]), 'bold 34px Arial') }), castRecv);
-    board.position.y = 0.62; pb.add(board);
+    const boardMat = std(0xffffff, 0.5, 0, { map: textTex(64, 48, '#111', '#fff', String(j + 1), 'bold 34px Arial') });
+    bayBoards.push(boardMat);
+    const board = mesh(new THREE.BoxGeometry(0.34, 0.3, 0.03), boardMat, castRecv);
+    board.position.y = 0.66; pb.add(board);
     const pole = mesh(new THREE.CylinderGeometry(0.015, 0.015, 0.55, 5), postMat); pole.position.y = 0.27; pb.add(pole);
     root.add(pb);
     const wheelG = new THREE.CylinderGeometry(0.11, 0.11, 0.09, 12); wheelG.rotateZ(Math.PI / 2);
@@ -368,10 +402,12 @@ export function buildWorld(): World {
     const s = T.BAYS[j] + 0.3;
     const gr = groupAt(s, -1.7);
     const stool = mesh(new THREE.BoxGeometry(0.5, 0.3, 0.28), std(0x2b2f36, 0.5), castRecv); stool.position.y = 0.47; gr.add(stool);
-    const mon = mesh(new THREE.BoxGeometry(0.34, 0.2, 0.03), std(0x0f172a, 0.3, 0.2, { emissive: TEAM_COLS[j], emissiveIntensity: 0.25 })); mon.position.set(0, 0.72, 0.12); gr.add(mon);
+    const monMat = std(0x0f172a, 0.3, 0.2, { emissive: TEAM_COLS[j], emissiveIntensity: 0.25 });
+    bayGlowMon.push(monMat);
+    const mon = mesh(new THREE.BoxGeometry(0.34, 0.2, 0.03), monMat); mon.position.set(0, 0.72, 0.12); gr.add(mon);
     root.add(gr);
     const cp = T.point(s, -1.3);
-    root.add(figure(TEAM_COLS[j], cp.x, cp.y));
+    root.add(tint(j, figure(TEAM_COLS[j], cp.x, cp.y)));
   }
   // garage building
   {
@@ -562,7 +598,19 @@ export function buildWorld(): World {
   buildScenery(root, { theme, B, nearTrack, isBlocked, blocked, L });
   mergeStatic(root);
 
-  return { root, startLights, bayGlow, penGlow, crowd, bridgeMats };
+  const paintBays = (bays: BayPaint[]): void => {
+    bays.forEach((b, j) => {
+      if (j >= T.BAYS.length) return;
+      const col = b.num === null ? UNOWNED : b.color;
+      for (const m of bayTint[j]) m.color.setHex(col);
+      bayGlowMon[j].emissive.setHex(col);
+      const bm = bayBoards[j];
+      bm.map?.dispose();
+      bm.map = bayBoardTex(j, { ...b, color: col });
+      bm.needsUpdate = true;
+    });
+  };
+  return { root, startLights, bayGlow, penGlow, crowd, bridgeMats, paintBays };
 }
 
 /** Free GPU resources of a world built by buildWorld (geometries, materials, textures). */

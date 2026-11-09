@@ -287,36 +287,38 @@ describe('recovering an overshot bay', () => {
     expect(P.mode).toBe('pitlane');
   });
 
-  it('back up, release in the bay, refuel; Brake held through service and exit does not reverse', () => {
+  it('back up into its own bay, release, refuel; Brake held through service and the automatic exit does not reverse', () => {
     const { r, P } = solo();
     P.fuel = 0.3;
-    inPit(P, T.BAYS[3] + T.BAY_HALF + 0.5);
+    const bs = T.BAYS[P.bayHome];
+    inPit(P, bs + T.BAY_HALF + 0.5);
     engage(r, P);
-    until(r, BRAKE, () => T.gapS(T.BAYS[3], r.s(P)) > 0.2);
+    until(r, BRAKE, () => T.gapS(bs, r.s(P)) > 0.2);
     for (let i = 0; i < 120 && P.mode === 'pitlane'; i++) stepEvents(r, 1, NONE);
     expect(P.mode).toBe('bayIn');
-    expect(P.bay).toBe(3);
+    expect(P.bay).toBe(P.bayHome);
     expect(P.pitStops).toBe(1);
     run(r, BRAKE, 2);
     expect(P.mode).toBe('service');
     expect(P.fuel).toBeGreaterThan(0.5);
-    // leave with Throttle, then hold Brake from the bay exit onwards
+    // leave with a fresh Throttle press, then hold Brake from the bay exit onwards: driven to the exit, never backwards
     until(r, UP, () => P.mode === 'service');
     until(r, BRAKE, () => P.mode === 'bayOut');
-    const u = P.u;
-    run(r, BRAKE, 2);
-    expect(P.u).toBe(u);
+    until(r, BRAKE, () => P.mode === 'pitlane', () => { expect(P.v).toBeGreaterThanOrEqual(0); expect(P.revOn).toBe(false); });
+    run(r, BRAKE, 2, () => { expect(P.v).toBeGreaterThanOrEqual(0); expect(P.revOn).toBe(false); });
+    expect(P.mode).toBe('race'); expect(P.v).toBe(0);
     expect(P.revLatch).toBe(true);
   });
 
-  it('an occupied bay is never captured backing up', () => {
+  it('an occupied bay is never captured backing up, even the car\'s own', () => {
     const r = fresh();
     r.cars.splice(2);
     const [P, A] = r.cars; P.isPlayer = true;
-    inPit(A, T.BAYS[3]); r.enterBay(A, 3); A.mode = 'service'; A.refuelTarget = 2;
-    inPit(P, T.BAYS[3] + T.BAY_HALF + 0.5);
+    const j = P.bayHome;
+    inPit(A, T.BAYS[j]); r.enterBay(A, j); A.mode = 'service'; A.refuelTarget = 2;
+    inPit(P, T.BAYS[j] + T.BAY_HALF + 0.5);
     engage(r, P);
-    until(r, BRAKE, () => T.gapS(T.BAYS[3], r.s(P)) > -0.3);
+    until(r, BRAKE, () => T.gapS(T.BAYS[j], r.s(P)) > -0.3);
     run(r, NONE, 1.5);
     expect(P.mode).toBe('pitlane');
     expect(P.pitStops).toBe(0);
@@ -330,11 +332,12 @@ describe('recovering a missed pit entrance', () => {
     r.requestPit();
     expect(P.pitReq).toBe(true);
     engage(r, P);
-    until(r, BRAKE, () => r.s(P) > T.PIT_IN0 - 1.5, () => { expect(P.mode).toBe('race'); expect(P.d).toBe(-T.LANE_HALF); });
-    run(r, NONE, 1);
-    expect(P.mode).toBe('race');
-    const ev = run(r, UP, 1.2);
-    expect(P.mode).toBe('pitlane');
+    // backing over the entrance brings the fuel visit inside the automatic window: it is taken over (and reverse with it)
+    until(r, BRAKE, () => !P.sgCtl, () => { expect(P.mode).toBe('race'); expect(P.d).toBe(-T.LANE_HALF); });
+    expect(T.gapS(r.s(P), T.PIT_IN0)).toBeGreaterThan(0);
+    expect(P.revOn).toBe(false); expect(P.revLatch).toBe(true);
+    const ev = run(r, BRAKE, 3, () => expect(P.revOn).toBe(false));
+    expect(P.mode).not.toBe('race');
     expect(msgs(ev)).toContain('msg.pitIn');
     expect(P.pitReq).toBe(false);
   });

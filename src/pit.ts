@@ -211,7 +211,7 @@ export class PitTraffic {
     if (this.box === -1 && desired) this.grant('box', desired);
   }
 
-  /** Each fuel visit holds one bay from the approach until its merge back into the lane completes. */
+  /** Each fuel visit holds its own bay (Car.bayHome) from the approach until its merge back into the lane completes. */
   updateBays(byOrder: Car[]): void {
     const r = this.r;
     this.bays.forEach((hi, j) => {
@@ -228,11 +228,11 @@ export class PitTraffic {
     });
     for (const c of byOrder) {
       if (inBay(c) || this.bayOf(c) >= 0 || !this.wantsBay(c)) continue;
-      const s = r.s(c);
-      const ahead = (j: number): boolean => c.mode !== 'pitlane' || T.gapS(s, T.BAYS[j]) > -0.45;
-      let j = c.bay >= 0 && c.bay < T.BAYS.length && ahead(c.bay) && this.bayAvail(c.bay, c) ? c.bay : -1;
-      for (let k = 0; k < T.BAYS.length && j < 0; k++) if (ahead(k) && this.bayAvail(k, c)) j = k;
-      if (j >= 0 && this.grant(`bay${j}`, c)) c.bay = j;
+      // only the car's own bay, ever: while it is occupied the car waits for it, it never takes another team's bay
+      const j = c.bayHome;
+      if (j < 0 || j >= T.BAYS.length) continue;
+      if (c.mode === 'pitlane' && T.gapS(r.s(c), T.BAYS[j]) <= -0.45) continue;
+      if (this.bayAvail(j, c) && this.grant(`bay${j}`, c)) c.bay = j;
     }
   }
 

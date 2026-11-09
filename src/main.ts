@@ -82,7 +82,15 @@ function disposeVisual(v: CarVisual): void {
 /** (re)create car visuals for the cars of the current race */
 function rebuildVisuals(): void {
   visuals.forEach(disposeVisual);
-  visuals = race.cars.map((c) => { const v = makeCar(c.color, [7, 11, 3, 24][c.idx], c.isPlayer); scene.add(v.group); return v; });
+  visuals = race.cars.map((c) => { const v = makeCar(c.color, c.num, c.isPlayer); scene.add(v.group); return v; });
+  paintBays();
+}
+/** Bays are painted from the race's owners (Car.bayHome): the player's in the chosen livery, with its number and tag. */
+function paintBays(): void {
+  world.paintBays(T.BAYS.map((_, j) => {
+    const o = race.bayOwner(j);
+    return o ? { color: o.color, num: o.num, tag: o.isPlayer ? t('hud.you') : DRIVERS[o.idx]?.tag ?? '', mine: o.isPlayer } : { color: 0, num: null, tag: '', mine: false };
+  }));
 }
 rebuildVisuals();
 function setRace(r: Race): void { race = r; laneArrowKey = ''; lastCrossed = 0; prevPoses = race.cars.map(poseOf); stepper.rebase(); rebuildVisuals(); }
@@ -780,13 +788,13 @@ function syncArrows(time: number): void {
     const side = T.ahead(s, race.nextSwitch(p).s0) < T.ahead(s, T.PIT_IN0) ? route.to : p.change ? p.change.to : p.laneSide;
     pitArrowMat.color.setHex(side < 0 ? 0x22d3ee : 0xff6b6b);
   }
-  // service bay glow when the player is in the pit lane
-  const inPit = p.mode === 'pitlane' || p.mode === 'bayIn' || p.mode === 'service';
+  // the player's own bay glows while the car is heading for it (cyan, pulsing) and while it stands in it (green); no other bay is offered
+  const bound = (p.mode === 'pitlane' && p.pitFuel && !p.serviced) || ((p.mode === 'race') && p.sgCtl && p.sgOwed <= 0);
   world.bayGlow.forEach((m, j) => {
-    const free = race.bayFree(j, p);
-    const mine = (p.mode === 'service' || p.mode === 'bayIn') && p.bay === j;
-    m.color.setHex(mine ? 0x3cff8a : 0x7dd3fc);
-    m.opacity = inPit && (free || mine) ? (mine ? 0.45 : 0.25 + Math.sin(time * 7) * 0.15) : 0;
+    const own = j === p.bayHome;
+    const inIt = (p.mode === 'service' || p.mode === 'bayIn') && p.bay === j;
+    m.color.setHex(inIt ? 0x3cff8a : 0x7dd3fc);
+    m.opacity = inIt ? 0.45 : own && bound && race.bayFree(j, p) ? 0.25 + Math.sin(time * 7) * 0.15 : 0;
   });
   // penalty box: pulses red while the player owes a stop-and-go, solid while serving
   const owes = p.sgOwed > 0 && !p.finished;
