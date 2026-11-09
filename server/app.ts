@@ -166,7 +166,21 @@ export function createApp({ cfg, log, manager, pool = null }: AppDeps): App {
     }, () => { release(); reject(socket, 500, 'Internal Server Error'); });
   });
 
+  // keepalive: a ping every 25 s keeps idle lobby sockets inside Nginx's proxy_read_timeout, and a peer that misses a pong
+  // (dead TCP, sleeping phone) is terminated, which starts its seat's reconnect grace
+  const alive = new WeakMap<WebSocket, boolean>();
+  const keepalive = setInterval(() => {
+    for (const c of wss.clients) {
+      if (alive.get(c) === false) { c.terminate(); continue; }
+      alive.set(c, false);
+      try { c.ping(); } catch { c.terminate(); }
+    }
+  }, 25000);
+  keepalive.unref();
+
   function connection(ws: WebSocket, ip: string, account: SessionAccount | null): void {
+    alive.set(ws, true);
+    ws.on('pong', () => alive.set(ws, true));
     let hello = false;
     let room: Room | null = null;
     let pid: string | null = null;
@@ -249,6 +263,7 @@ export function createApp({ cfg, log, manager, pool = null }: AppDeps): App {
       server.listen(cfg.port, cfg.host, () => { const a = server.address(); resolve({ port: typeof a === 'object' && a ? a.port : cfg.port }); });
     }),
     close: async () => {
+      clearInterval(keepalive);
       store?.close();
       for (const c of wss.clients) c.terminate();
       await new Promise<void>((r) => wss.close(() => r()));

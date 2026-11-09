@@ -1,0 +1,57 @@
+# /etc/systemd/system/slotrush-server.service — Slot Rush GP room server (docs/online-server.md).
+# Serves only http://127.0.0.1:8787 (/api and /ws), reached through the slotrush.jdwd40.com Nginx site.
+[Unit]
+Description=Slot Rush GP room server (slotrush.jdwd40.com /api, /ws)
+After=network-online.target postgresql.service
+Wants=network-online.target
+StartLimitIntervalSec=120
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=slotrush-server
+Group=slotrush-server
+WorkingDirectory=/srv/slotrush-server/current
+EnvironmentFile=/etc/slotrush-server/env
+Environment=NODE_ENV=production UV_THREADPOOL_SIZE=2
+# lean V8 heap: the server needs about 15 MB of heap; the cap leaves the rest of MemoryMax for native memory
+ExecStart=/usr/bin/node --max-old-space-size=96 --max-semi-space-size=2 server-dist/main.mjs
+Restart=on-failure
+RestartSec=3
+# SIGTERM aborts running races without results, tells clients the service is restarting, and exits within 5 s
+KillSignal=SIGTERM
+TimeoutStopSec=10
+
+# resource limits on the shared 1-vCPU host
+MemoryMax=256M
+MemoryHigh=200M
+MemorySwapMax=0
+CPUQuota=60%
+TasksMax=48
+LimitNOFILE=512
+
+# hardening: an unprivileged user that can read its release and config and nothing else
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

@@ -21,7 +21,10 @@ async function main(): Promise<void> {
   } else {
     log.warn('db.disabled', { note: 'no DATABASE_URL: guests only, results kept in memory' });
   }
-  const sink: ResultSink = pool ? new PgResultSink(pool) : new MemoryResultSink();
+  const store: ResultSink = pool ? new PgResultSink(pool) : new MemoryResultSink();
+  // results still being written when a stop begins are awaited (within the 5 s stop budget) before the pool closes
+  const pending = new Set<Promise<unknown>>();
+  const sink: ResultSink = { consume: (e) => { const p = store.consume(e); pending.add(p); void p.finally(() => pending.delete(p)).catch(() => undefined); return p; } };
   const manager = new RoomManager({ cfg, log, sink });
   const app = createApp({ cfg, log, manager, pool });
   const { port } = await app.listen();
@@ -36,7 +39,7 @@ async function main(): Promise<void> {
     // races in progress end without a result (never a fabricated one); clients are told the service is restarting
     manager.shutdown('shutdown');
     const hard = setTimeout(() => process.exit(1), 5000); hard.unref();
-    void app.close().then(() => pool?.end()).then(() => process.exit(0), () => process.exit(1));
+    void Promise.allSettled([...pending]).then(() => app.close()).then(() => pool?.end()).then(() => process.exit(0), () => process.exit(1));
   };
   process.on('SIGTERM', () => stop('SIGTERM'));
   process.on('SIGINT', () => stop('SIGINT'));
