@@ -36,3 +36,4 @@ assets/ui/.storefront_pass.json
 server-dist/
 server-bundle/
 .local-pg/
+dist-online/

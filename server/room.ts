@@ -160,7 +160,7 @@ export class Room {
     this.ensureHost();
     this.touch(now);
     this.log.info('room.join', { room: this.id, participant: p.id, slot, guest: !p.accountId, creator });
-    this.broadcastRoom();
+    this.broadcastRoom(peer);   // the joiner gets the room in its private `joined` reply instead
     return { ok: true, participant: p.id, token };
   }
 
@@ -176,7 +176,7 @@ export class Room {
     this.ensureHost();
     this.touch(now);
     this.log.info('room.resume', { room: this.id, participant: p.id });
-    this.broadcastRoom();
+    this.broadcastRoom(peer);
     return { ok: true, participant: p.id, token };
   }
 
@@ -508,7 +508,7 @@ export class Room {
     return JSON.stringify({ t: 'state', tick: this.stepsDone, now, lagMs: Math.round(this.lagMs), snap: this.race.snapshot(), ev: [] } satisfies ServerMsg);
   }
 
-  private broadcastRoom(): void { if (this.state !== 'closed') this.broadcast({ t: 'room', room: this.publicRoom() }); }
+  private broadcastRoom(except?: Peer): void { if (this.state !== 'closed') this.broadcast({ t: 'room', room: this.publicRoom() }, except); }
 
   private broadcastState(now: number): void {
     if (!this.race) return;
@@ -518,9 +518,9 @@ export class Room {
   }
 
   /** Every member gets the same bytes, so every client sees identical decisions. */
-  private broadcast(m: ServerMsg): void {
+  private broadcast(m: ServerMsg, except?: Peer): void {
     const s = JSON.stringify(m);
-    for (const p of this.parts) if (p.peer) this.sendRaw(p, s);
+    for (const p of this.parts) if (p.peer && p.peer !== except) this.sendRaw(p, s);
   }
   private sendTo(peer: Peer, m: ServerMsg): void { try { peer.send(JSON.stringify(m)); } catch { /* closing */ } }
 
