@@ -36,6 +36,7 @@ Functional runs default to 480×270 at Low so SwiftShader can run them. Perf cap
 | `reverse` | Scripted placement, then real keys and emulated touch | Hold-Brake reverse: HUD cue, overshot box and bay, blur and resume, touch Brake and pointer cancel. See [reverse](reverse.md) |
 | `queue` | Scripted placement, then real keys and emulated touch at 844×390 | Shared pit queue: Queued behind the box on Throttle alone, Brake held through the hold, Waiting for bay, a latched bay exit, Waiting for clear exit at the pit exit, the same on the touch pad. See [pit queues](pit-queue.md) |
 | `service` | Scripted placement, then real keys and emulated touch at 360×640 and 640×360 | Service obligations: request, N and touch Defer, route release and re-arm, refused toggles, latched breach, DQ on the results screen and in a championship round, Defer layout, final lap with the box occupied. See [service obligations](penalties.md) |
+| `autosg` | Scripted placement, then real keys and emulated touch at 844×390 | Automatic stop-and-go: Armed, Auto entry, Queued, Serving countdown, Leaving pits and the exit handover on Throttle alone or Brake held, no reverse after the handover, N and touch Defer, pause mid-service, help text, chip clear of the pad. See [automatic stop-and-go](auto-stop-go.md) |
 
 `__game.advance` and scripted state are functional coverage only and are never used for timing or smoothness.
 
