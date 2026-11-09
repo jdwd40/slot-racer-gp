@@ -21,11 +21,14 @@ baseline `525b55b` and the dependencies #17, #22, #23, #24).
 | Command | Result |
 | --- | --- |
 | `npm run typecheck` | pass |
-| `npm test` | RESULT_NPM_TEST |
+| `npm test` | **536 passed**, 23 skipped (the three database files without `SLOTRUSH_TEST_DATABASE_URL`), 27 files |
 | `npm run build` | pass (static build; online off by default, unchanged gate) |
 | `npm run test:db` (`db`, `profiles`, new `career` DB files, local PostgreSQL) | **23 passed**, 0 failed |
 | `npm run build:server && npm run pack:server`; packed release in `NODE_ENV=production` with the migrated local database | without `SLOTRUSH_SPOOL_DIR`: refuses to start (exit 1, message names the variable). With it: `admin migrate` applied `001`, `002`, `003_career_awards_bests`; `admin status` current; all 9 `server-smoke.mjs` checks PASS; health `{"career":true,"db":"ok","schema":"003_career_awards_bests","scoring":"career-1:10-6-4","pendingResults":0,"rssMb":75,"heapMb":11}` (78 MB with a solo race running); `GET /api/profile/stats` without a cookie 401, `POST` 405 |
-| `SLOTRUSH_TEST_DATABASE_URL=… node scripts/online-check.mjs career` (SwiftShader, diagnostics) | RESULT_BROWSER |
+| `SLOTRUSH_TEST_DATABASE_URL=… node scripts/online-check.mjs career` (SwiftShader, diagnostics) | **13 passed, 0 failed**, 203 s (run `2026-11-09T13-51-49`) |
+| Regression, existing browser scenarios: `node scripts/browser-check.mjs online` (default build gate) | 3 passed, 1 n/a: online off by default, **no request to `/api` or `/ws`** |
+| `node scripts/online-check.mjs gate` (online build, service down) | 6 passed, 0 failed |
+| `online-check.mjs accounts` (#24 scenario, with the career UI present) | first run: 12 passed, then **failed on a `page.reload` timeout** (60 s) when a fourth software-rendered page re-probed health, a load-sensitive step the script already documents; **re-run: 25 passed, 0 failed**, 613 s. Recorded as a flaky harness step, not a product failure |
 
 ## Results by acceptance item
 
@@ -42,7 +45,28 @@ baseline `525b55b` and the dependencies #17, #22, #23, #24).
 
 ## Browser scenario (`online-check.mjs career`)
 
-RESULT_BROWSER_TABLE
+Two browser contexts against the repository's server code with the local database (`scripts/qa-server.ts`, schema
+`t_browser`, time ×2): desktop A (laptop 960×540) and phone B (390×844, touch emulation). The QA server routes results
+through the real `DurableSink` with a switch on the storage path. **Seeded on the server:** the three AI cars retire and
+A's car is placed just past the line on its final lap with a valid lap in progress; the race core's own lap counting
+then emits the final lap and the finish. Everything after that (classification, awards, storage, UI) is unmodified.
+
+| Check | Result |
+| --- | --- |
+| New account: profile shows 0 points, no races, no bests | pass |
+| Online menu (signed in): connected championship round offered; verified-points rule stated | pass |
+| Seeded finish classified as finished on lap 13 | pass |
+| Storage down at the finish: "You finished P1", +10, **"⏳ Pending sync: …never counted twice."** | pass |
+| Storage back (queue drained): the same screen shows "✓ Saved to driver accounts."; ledger 0 → 1 row | pass |
+| A second drain adds nothing | pass |
+| Profile: 10 points, 1 win, 1 race, verified solo best `0:08.400 lap 13`, one recent result | pass |
+| Second browser (phone) after sign-in: identical tiles, bests and history | pass |
+| Phone portrait profile with career fits the width, no sideways scroll | pass |
+| Rename on the phone: career and history unchanged, new name shown | pass |
+| Sign out and create another account on the phone: 0 points, no rows (nothing leaks or transfers) | pass |
+| No page errors (both pages) | pass |
+
+Screenshots: `.qa/online-check/2026-11-09T13-51-49-461Z/career-*.png` (not committed; `.qa/` is git-ignored).
 
 ## Not verified
 
