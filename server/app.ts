@@ -61,8 +61,9 @@ export function createApp({ cfg, log, manager, pool = null }: AppDeps): App {
   };
   const readBody = (req: IncomingMessage): Promise<unknown> => new Promise((resolve, reject) => {
     let n = 0; const chunks: Buffer[] = [];
-    req.on('data', (c: Buffer) => { n += c.length; if (n > BODY_MAX) { reject(new Error('too_large')); req.destroy(); } else chunks.push(c); });
-    req.on('end', () => { try { resolve(JSON.parse(Buffer.concat(chunks).toString('utf8'))); } catch { reject(new Error('malformed')); } });
+    let over = false;
+    req.on('data', (c: Buffer) => { if (over) return; n += c.length; if (n > BODY_MAX) { over = true; reject(new Error('too_large')); } else chunks.push(c); });
+    req.on('end', () => { if (over) return; try { resolve(JSON.parse(Buffer.concat(chunks).toString('utf8'))); } catch { reject(new Error('malformed')); } });
     req.on('error', reject);
   });
 
