@@ -41,7 +41,7 @@ function serveBox(r: Race, c: Car, lap: number, sec = 3.2) {
   return stepEvents(r, Math.ceil(sec / DT));
 }
 /** Stop in a free bay: after the 0.45 s turn-in, stand in service for `sec`, without pressing Throttle. */
-function standInBay(r: Race, c: Car, lap: number, sec: number, bay = 1) {
+function standInBay(r: Race, c: Car, lap: number, sec: number, bay = c.bayHome) {
   c.mode = 'pitlane'; c.crossed = lap; c.lapsDone = lap - 1; c.serviced = false;
   c.u = lap * T.L + T.BAYS[bay]; c.hiU = Math.max(c.hiU, c.u); c.d = T.pitD(c.u); c.v = 0; c.throttle = 0;
   const ev = stepEvents(r, 1);           // captured
@@ -381,14 +381,15 @@ describe('robustness', () => {
     stepEvents(r, 1);
     expect(held(r, P)).toBe(false); expect(P.pitReq).toBe(true);
     for (let i = 0; i < 120 && !P.revOn; i++) stepEvents(r, 1, BRAKE);
-    for (let i = 0; i < 600 && r.s(P) > T.PIT_IN0 - 1.5; i++) stepEvents(r, 1, BRAKE);
+    // backing over the entrance brings it inside the automatic window: the fuel visit is taken over (and reverse with it)
+    for (let i = 0; i < 600 && r.s(P) > T.PIT_IN0 - 1.5 && !P.sgCtl; i++) stepEvents(r, 1, BRAKE);
+    expect(P.sgCtl).toBe(true); expect(T.gapS(r.s(P), T.PIT_IN0)).toBeGreaterThan(0);
     expect(r.apprLap(P)).toBe(4);
     expect(held(r, P)).toBe(false);
     expect(r.deferBlock(P)).toBe('used');
     expect(P.fuelDue).toBe(4);
-    // and driving in now is early, valid service
-    stepEvents(r, 40);
-    for (let i = 0; i < 120 && P.mode !== 'pitlane'; i++) stepEvents(r, 1, UP);
+    // and driving in now is early, valid service: the controller takes it in, with no pedal
+    for (let i = 0; i < 240 && P.mode !== 'pitlane'; i++) stepEvents(r, 1);
     expect(P.mode).toBe('pitlane');
   });
 

@@ -68,11 +68,21 @@ export const AUTO = {
   stopTol: 0.05,       // within this of the stop point the car is brought to rest
   entryLead: 0.5,      // the entry profile reaches the pit limit this far before the entrance
   entryTol: 0.5,       // a stop-and-go car not under automatic control is refused entry this far above the pit limit
+  bayWait: T.CAR_LEN + 0.5 + 0.3, // with its own bay occupied, a car waits this far short of it: clear of the occupant's merge
+  bayTol: 0.15,        // a car at rest within this of its bay centre turns in
 };
 /** where the car is stopped: the centre of the penalty box */
 export const SG_STOP = T.PEN_S;
-/** what the automatic stop-and-go is doing for the player, for the HUD (null when nothing applies) */
-export type SgPhase = 'armed' | 'entry' | 'queued' | 'serving' | 'leaving' | 'deferred' | null;
+/**
+ * What automatic pit service is doing for the player, for the HUD (null when nothing applies). Stop-and-go: armed, entry,
+ * queued, serving. Fuel visit (docs/auto-bay.md): entry, queued, then `bay` (driving to the car's own bay), `bayWait` (its
+ * bay or the way in is occupied), `refuel` (settling or a penalty still running: departure not available yet), `release`
+ * (Throttle still held from before departure was ready), `ready` (a fresh Throttle press leaves), `exit` (departure latched,
+ * waiting for a clear merge). Both end with `leaving`, driven to the pit exit.
+ */
+export type SgPhase = 'armed' | 'entry' | 'queued' | 'serving' | 'leaving' | 'deferred' | 'bay' | 'bayWait' | 'refuel' | 'release' | 'ready' | 'exit' | null;
+/** why a departure from the bay is not available yet: the minimum stationary service, or a tow penalty still running */
+export type DepartBlock = 'settle' | 'penalty';
 
 /** AI defending tuning */
 export const DEF = {
@@ -116,6 +126,13 @@ export interface OffState { x: number; y: number; vx: number; vy: number; yaw: n
 
 export interface Car {
   idx: number; name: string; color: number; isPlayer: boolean;
+  /** race number painted on the car and on its bay's pit board */
+  num: number;
+  /**
+   * The car's own service bay for the whole race: its participant slot, fixed at the start. Grants, captures and tows only
+   * ever use this bay; an occupied bay means waiting, never another team's bay. `bay` is the bay currently held or used.
+   */
+  bayHome: number;
   u: number; v: number; laneSide: number;
   change: { from: number; to: number; s0: number; s1: number } | null;
   laneReq: boolean;
@@ -203,8 +220,10 @@ export interface Car {
   sgCommit: number;
   /** cruise speed latched at the takeover: the controller never accelerates the car above it on the road */
   sgVc: number;
-  /** penalty served on a penalty-only visit: driven to the pit exit, where normal control returns */
+  /** driven to the pit exit, where normal control returns: after a penalty-only stop, or after leaving the bay */
   sgLeave: boolean;
+  /** Throttle as last seen in the bay: a departure needs a fresh press, so a pedal held while arriving must be released first */
+  upPrev: boolean;
 }
 
 export type RaceEvent =
@@ -231,11 +250,12 @@ export interface RaceOpts {
   playerColor?: number;
 }
 
-export const DRIVERS: { name: string; color: number; persona: PersonaId }[] = [
-  { name: 'YOU', color: 0xffcc1a, persona: 'player' },
-  { name: 'Red Comet', color: 0xe8322a, persona: 'aggressive' },
-  { name: 'Blue Arrow', color: 0x2a6df0, persona: 'consistent' },
-  { name: 'Green Viper', color: 0x22b04b, persona: 'tactical' },
+/** participant slots: the slot is the car's identity (idx), its race number and its own bay (bayHome) */
+export const DRIVERS: { name: string; color: number; persona: PersonaId; num: number; tag: string }[] = [
+  { name: 'YOU', color: 0xffcc1a, persona: 'player', num: 7, tag: 'YOU' },
+  { name: 'Red Comet', color: 0xe8322a, persona: 'aggressive', num: 11, tag: 'RED' },
+  { name: 'Blue Arrow', color: 0x2a6df0, persona: 'consistent', num: 3, tag: 'BLUE' },
+  { name: 'Green Viper', color: 0x22b04b, persona: 'tactical', num: 24, tag: 'GREEN' },
 ];
 
 const STATUS_RANK: Record<CarStatus, number> = { finished: 0, running: 1, dnf: 2, dq: 3 };
@@ -273,6 +293,7 @@ export class Race {
       const P = PERSONAS[D.persona];
       const c: Car = {
         idx: g.di, name: D.name, color: g.di === 0 && opts.playerColor !== undefined ? opts.playerColor : D.color, isPlayer: g.di === 0,
+        num: D.num, bayHome: g.di,
         u: T.FINISH_S + g.prog, v: 0, laneSide: g.side, change: null, laneReq: false, pitReq: false, pitPenaltyOnly: false, laneOverride: false,
         fuelReq: false, fuelDue: 0, sgDue: 0, sgDeferred: false, routeHold: -1, overAppr: -1, hiU: T.FINISH_S + g.prog,
         svcBreach: null, towSvc: false, towPit: false, status: 'running', dqReason: null,
@@ -290,7 +311,7 @@ export class Race {
         x: 0, y: 0, h: 0, z: 0, roll: 0, pitch: 0, bumpT: 0,
         revOn: false, revHoldT: 0, revLatch: false, revMark: null,
         pitWait: null, pitCap: 1e9, pitHold: false, exitHold: false, exitReq: false, pitFuel: false,
-        sgPhase: null, sgCtl: false, sgCommit: -1, sgVc: 0, sgLeave: false,
+        sgPhase: null, sgCtl: false, sgCommit: -1, sgVc: 0, sgLeave: false, upPrev: false,
       };
       this.cars.push(c);
     }
@@ -319,9 +340,9 @@ export class Race {
         this.pmsg(c, this.deferBlock(c) === null ? 'msg.queueNoSwitch' : 'msg.queueNoSwitchFinal', 'warn');
         return;
       }
-      // the same with a stop-and-go owed: an override no switch can use would only release automatic entry and miss the stop
-      if (c.sgOwed > 0 && !c.laneOverride && !this.switchBeforeEntry(c)) {
-        this.pmsg(c, this.deferBlock(c) === null ? 'msg.sgNoSwitch' : 'msg.sgNoSwitchFinal', 'warn');
+      // the same with a stop-and-go owed or a fuel visit under way: an override no switch can use would only release automatic entry
+      if ((c.sgOwed > 0 || c.fuelReq || c.fuelDue > 0) && !c.laneOverride && !this.switchBeforeEntry(c)) {
+        this.pmsg(c, c.sgOwed > 0 ? (this.deferBlock(c) === null ? 'msg.sgNoSwitch' : 'msg.sgNoSwitchFinal') : 'msg.fuelNoSwitch', 'warn');
         return;
       }
       c.laneOverride = !c.laneOverride;
@@ -419,6 +440,9 @@ export class Race {
     if (this.pit.box >= 0 && this.pit.box !== c.idx) return true;
     return this.cars.some((o) => o !== c && o.mode === 'pitlane' && Math.abs(T.gapS(this.s(o), T.PEN_S)) < T.PEN_HALF);
   }
+
+  /** The car whose own bay j is for this race, or null (practice leaves the rivals' bays unowned). Ownership is identity, never colour. */
+  bayOwner(j: number): Car | null { return this.cars.find((c) => c.bayHome === j) ?? null; }
 
   /** Pit routing applies: only the player is assisted, the AI makes its own lane decisions. */
   pitAssist(c: Car): boolean { return c.isPlayer && c.pitReq && !c.finished; }
@@ -673,16 +697,15 @@ export class Race {
         this.pit.release('exit', c, 'done');
         if (c.sgOwed > 0 && !c.finished) this.pmsg(c, 'msg.penStillOwed', 'bad');
       }
+      // automatic fuel visit: brought to rest at the centre of the car's own bay, it turns in (the usual entry animation)
+      else if (c.isPlayer && c.sgCtl && this.autoBay(c, s)) {
+        if (Math.abs(T.gapS(s, T.BAYS[c.bayHome])) < AUTO.bayTol && Math.abs(c.v) < 0.05 && this.bayFree(c.bayHome, c)) this.enterBay(c, c.bayHome);
+      }
       // a bay is only captured nearly stopped: never while reversing past it, nor while the queue holds the car (unless braking there)
       else if (Math.abs(c.v) < 0.7 && !c.revOn && c.isPlayer && !c.sgCtl && !c.sgLeave && !c.serviced && !c.sgServing && (!c.pitHold || input.down)) this.tryBay(c, s);
       else if (!c.isPlayer && c.pitPlan) {
-        const bs = T.BAYS[c.bay];
-        if (Math.abs(T.gapS(s, bs)) < 0.45 && c.v < 1.5 && this.bayFree(c.bay, c)) this.enterBay(c, c.bay);
-        else if (T.gapS(s, bs) < -0.45 || !this.bayFree(c.bay, c)) {
-          // own bay passed or occupied: take the next free one ahead, else queue at the last bay
-          const j = this.pickBay(c, s);
-          if (j >= 0) c.bay = j;
-        }
+        // only the car's own bay: occupied, it waits short of it (ai()); passed, it goes round again and never takes another team's
+        if (Math.abs(T.gapS(s, T.BAYS[c.bayHome])) < 0.45 && c.v < 1.5 && this.bayFree(c.bayHome, c)) this.enterBay(c, c.bayHome);
       }
     }
 
@@ -725,41 +748,78 @@ export class Race {
     if (c.revMark !== null && c.u >= c.revMark) c.revMark = null;
   }
 
-  // ---------------------------------------------------------------- automatic stop-and-go (player only)
+  // ---------------------------------------------------------------- automatic pit service (player only)
   /**
    * Decide, before the car moves, whether automatic control owns the pedals and what to show. On the road it takes over within
-   * `AUTO.window` of an entrance the car is routed into for a stop-and-go and can still reach (outside lane, a change to it, or a
-   * switch to it ahead), and only if braking to the pit limit by the entrance is possible. Defer and the lane override release it.
-   * In the pit lane it keeps control from the entrance to the box, through the stop, and on a penalty-only visit to the exit.
+   * `AUTO.window` of an entrance the car is routed into for a stop-and-go or a fuel visit and can still reach (outside lane, a
+   * change to it, or a switch to it ahead), and only if braking to the pit limit by the entrance is possible. Defer, the lane
+   * override and cancelling an optional stop release it. In the pit lane it keeps control from the entrance to the box and through
+   * the stop, then to the car's own bay on a fuel visit (docs/auto-bay.md), through the bay service, and on to the pit exit.
    */
   sgUpdate(c: Car): void {
     c.sgCtl = false; c.sgPhase = null;
     if (!c.isPlayer || c.finished || c.status !== 'running' || this.phase !== 'racing') return;
     const s = this.s(c);
+    if (c.mode === 'bayIn' || c.mode === 'service' || c.mode === 'bayOut') {
+      // in the bay the pedals never move the car; only a fresh Throttle press once departure is ready asks to leave
+      c.sgCtl = true;
+      c.sgPhase = c.mode === 'bayIn' ? 'refuel' : c.mode === 'bayOut' ? 'leaving' : c.exitReq ? 'exit' : this.departBlock(c) ? 'refuel' : c.upPrev ? 'release' : 'ready';
+      return;
+    }
     if (c.mode === 'pitlane') {
-      // run dry on the way out: the controller cannot drive the car on, so it hands back and a bay or the tow takes over
+      // run dry on the way out: the controller cannot drive the car on, so it hands back and its bay or the tow takes over
       if (c.sgLeave && c.fuel <= 0) { c.sgLeave = false; this.pmsg(c, 'msg.sgDry', 'bad'); }
       if (c.sgLeave) { c.sgCtl = true; c.sgPhase = 'leaving'; return; }
       // in control up to the end of the box; a car beyond it (it can only get there in reverse recovery) is driven by hand
-      if (c.sgOwed > 0 && T.gapS(s, SG_STOP) > -T.PEN_HALF) { c.sgCtl = true; c.sgPhase = c.sgServing ? 'serving' : c.pitHold ? 'queued' : 'entry'; }
+      if (c.sgOwed > 0) {
+        if (T.gapS(s, SG_STOP) > -T.PEN_HALF) { c.sgCtl = true; c.sgPhase = c.sgServing ? 'serving' : c.pitHold ? 'queued' : 'entry'; }
+        return;
+      }
+      if (this.autoBay(c, s)) { c.sgCtl = true; c.sgPhase = c.pitHold ? 'queued' : this.bayFree(c.bayHome, c) ? 'bay' : 'bayWait'; }
       return;
     }
     c.sgLeave = false;
-    if (c.sgOwed <= 0 || c.mode !== 'race') { c.sgCommit = -1; return; }
+    const sg = c.sgOwed > 0;
+    if ((!sg && !c.fuelReq && c.fuelDue <= 0) || c.mode !== 'race') { c.sgCommit = -1; return; }
     const k = this.apprLap(c);
-    if (c.routeHold === k) { c.sgPhase = 'deferred'; c.sgCommit = -1; return; }
-    c.sgPhase = 'armed';
+    if (c.routeHold === k) { if (sg) c.sgPhase = 'deferred'; c.sgCommit = -1; return; }
+    if (sg) c.sgPhase = 'armed';
     const dEntry = T.ahead(s, T.PIT_IN0);
-    // an override armed earlier (say for a fuel stop) that no switch before the entrance can use any more changes nothing: drop it
+    // an override armed earlier that no switch before the entrance can use any more changes nothing: drop it
     if (c.laneOverride && !this.switchBeforeEntry(c) && (c.change ? c.change.to < 0 : c.laneSide < 0)) c.laneOverride = false;
     if (!this.pitAssist(c) || c.laneOverride || dEntry >= AUTO.window || !this.sgPath(c, s, dEntry)) { c.sgCommit = -1; return; }
     if (c.sgCommit !== k) {
-      // too fast for this entrance: no takeover and no entry, so the debt policy decides (never a snap or an instant stop)
+      // too fast for this entrance: no takeover (a stop-and-go is then not entered; a fuel visit is taken over in the pit lane)
       if (c.v * c.v > T.PIT_SPEED ** 2 + 2 * AUTO.late * dEntry) return;
       c.sgCommit = k; c.sgVc = Math.max(T.PIT_SPEED, c.v);
-      this.pmsg(c, 'msg.sgAuto', 'info');
+      this.pmsg(c, sg ? 'msg.sgAuto' : 'msg.bayAuto', 'info', { n: this.bayNo(c) });
     }
     c.sgCtl = true; c.sgPhase = c.pitHold ? 'queued' : 'entry';
+  }
+
+  /**
+   * The player's fuel visit in the pit lane is still to reach its own bay: the controller drives it there (stop-and-go first).
+   * A car already past the bay centre (only by hand) is left to the driver: reversing back and releasing captures the bay as usual.
+   */
+  autoBay(c: Car, s: number): boolean {
+    return c.mode === 'pitlane' && c.pitFuel && !c.serviced && !c.sgLeave && c.sgOwed <= 0 && T.gapS(s, T.BAYS[c.bayHome]) > -AUTO.bayTol;
+  }
+
+  /** The bay number shown to the driver: 1 for the first bay down the pit lane. */
+  bayNo(c: Car): number { return c.bayHome + 1; }
+
+  /** Why the car in its bay may not ask to leave yet, or null. A stationary minimum (so a fuel stop counts) and any tow penalty. */
+  departBlock(c: Car): DepartBlock | null {
+    if (c.penalty > 0) return 'penalty';
+    if (c.serviceT <= SERVICE_READY) return 'settle';
+    return null;
+  }
+
+  /** Where automatic control brings the car to rest next: the box centre, its own bay, or short of that bay while it is occupied. */
+  autoStopS(c: Car): number {
+    if (c.sgOwed > 0) return SG_STOP;
+    const bs = T.BAYS[c.bayHome];
+    return this.bayFree(c.bayHome, c) ? bs : bs - AUTO.bayWait;
   }
 
   /** The car can still be on the outside lane at the entrance `dEntry` ahead: it is there, changing to it, or has a switch to it in time. */
@@ -771,14 +831,15 @@ export class Race {
 
   /**
    * Speed the controller drives at now: the takeover speed on the road, braking at `AUTO.plan` to the pit limit at the entrance and
-   * at `AUTO.box` to rest at the box centre, and a stopping gap behind traffic ahead. The shared queue's cap still applies on top.
+   * at `AUTO.box` to rest at the box centre or the car's own bay, and a stopping gap behind traffic ahead. The shared queue's cap still applies on top.
    */
   sgTarget(c: Car): number {
     const s = this.s(c);
     if (c.sgLeave) return T.PIT_SPEED;
     const road = c.mode === 'race';
     const dEntry = road ? T.ahead(s, T.PIT_IN0) : 0;
-    const dStop = road ? dEntry + SG_STOP - T.PIT_IN0 : T.gapS(s, SG_STOP);
+    const stopS = this.autoStopS(c);
+    const dStop = road ? dEntry + stopS - T.PIT_IN0 : T.gapS(s, stopS);
     if (c.sgServing || (!road && dStop <= AUTO.stopTol)) return 0;
     let v = road ? Math.max(T.PIT_SPEED, c.sgVc) : T.PIT_SPEED;
     if (road) v = Math.min(v, Math.sqrt(T.PIT_SPEED ** 2 + 2 * AUTO.plan * Math.max(0, dEntry - AUTO.entryLead)), this.sgFollow(c, s), this.sgCorner(c, s));
@@ -935,18 +996,10 @@ export class Race {
   /** Nobody else is in bay j or has reserved it. */
   bayFree(j: number, self: Car): boolean { return this.pit.bayAvail(j, self); }
 
+  /** A car stopped by hand alongside its own bay turns in, if the bay is free. Another team's bay never captures it. */
   tryBay(c: Car, s: number): void {
-    for (let j = 0; j < T.BAYS.length; j++) {
-      if (Math.abs(T.gapS(s, T.BAYS[j])) < T.BAY_HALF && this.bayFree(j, c)) { this.enterBay(c, j); return; }
-    }
-  }
-
-  /** first free bay still ahead of s in the pit lane; -1 if none */
-  pickBay(c: Car, s: number): number {
-    for (let j = 0; j < T.BAYS.length; j++) {
-      if (T.gapS(s, T.BAYS[j]) > -0.45 && this.bayFree(j, c)) return j;
-    }
-    return -1;
+    const j = c.bayHome;
+    if (j >= 0 && j < T.BAYS.length && Math.abs(T.gapS(s, T.BAYS[j])) < T.BAY_HALF && this.bayFree(j, c)) this.enterBay(c, j);
   }
 
   /** fuel the AI needs to reach the flag from here, planned at a realistic burn rate */
@@ -957,7 +1010,8 @@ export class Race {
 
   enterBay(c: Car, j: number): void {
     this.holdBay(c, j);
-    c.mode = 'bayIn'; c.bay = j; c.bayT = 0; c.v = 0; c.serviceT = 0; c.fuelAtBay = c.fuel; c.towSvc = false; c.exitReq = false;
+    // Throttle counts as held until the bay sees it released: a pedal held on arrival never asks to leave
+    c.mode = 'bayIn'; c.bay = j; c.bayT = 0; c.v = 0; c.serviceT = 0; c.fuelAtBay = c.fuel; c.towSvc = false; c.exitReq = false; c.upPrev = true;
     c.pitStops++;
     if (!c.isPlayer) c.refuelTarget = Math.min(1, Math.max(0.3, this.fuelToFinish(c, this.s(c)) + rnd(0.06, 0.2)));
   }
@@ -975,6 +1029,8 @@ export class Race {
     const s = this.s(c);
     c.v = 0; c.yawOff *= 0.8; c.wobble *= 0.9;
     if (!c.isPlayer || c.finished) c.throttle = 0; else c.throttle += ((input.up ? 1 : 0) - c.throttle) * Math.min(1, dt * 6);
+    // a Throttle held while turning in is still the arrival's: it has to be released before a press can ask to leave
+    if (c.isPlayer && c.mode === 'bayIn') c.upPrev = c.upPrev && input.up;
     if (c.mode === 'bayIn') {
       c.bayT = Math.min(1, c.bayT + dt / 0.45);
       c.u += T.gapS(s, bs) * Math.min(1, dt * 10);
@@ -984,14 +1040,21 @@ export class Race {
     } else if (c.mode === 'service') {
       c.serviceT += dt;
       c.penalty = Math.max(0, c.penalty - dt);
-      if (c.serviceT > 0.4) c.fuel = Math.min(1, c.fuel + REFUEL_RATE * dt);
+      // refuelling stops at the departure request; the tank never passes full
+      if (c.serviceT > 0.4 && !c.exitReq) c.fuel = Math.min(1, c.fuel + REFUEL_RATE * dt);
       // a committed fuel stop counts once the car has stood in its bay for the departure-ready time (a full tank is fine; a tow is not a visit)
       if (c.fuelDue > 0 && !c.towSvc && c.serviceT > SERVICE_READY) { c.fuelDue = 0; this.pmsg(c, 'msg.fuelDone', 'good'); }
-      // a departure request is latched: it waits in the bay for a safe merge and then goes, once, without pressing again
-      let wantGo: boolean;
-      if (c.isPlayer && !c.finished) wantGo = input.up && c.serviceT > SERVICE_READY;
-      else wantGo = c.fuel >= c.refuelTarget || c.fuel >= 1;
-      if (wantGo && c.penalty <= 0) c.exitReq = true;
+      // a departure request is latched: it waits in the bay for a safe merge and then goes, once, without pressing again.
+      // The player asks with a fresh Throttle press once departure is ready; a full tank never leaves by itself
+      if (c.isPlayer && !c.finished) {
+        const press = input.up && !c.upPrev;
+        c.upPrev = input.up;
+        if (press && !c.exitReq) {
+          const why = this.departBlock(c);
+          if (!why) { c.exitReq = true; this.pmsg(c, 'msg.departReq', 'info'); }
+          else this.pmsg(c, why === 'penalty' ? 'msg.departPenalty' : 'msg.departSettle', 'warn', { n: Math.max(0.1, why === 'penalty' ? c.penalty : SERVICE_READY - c.serviceT + 0.05).toFixed(1) });
+        }
+      } else if ((c.fuel >= c.refuelTarget || c.fuel >= 1) && c.penalty <= 0) c.exitReq = true;
       // the merge is granted by the shared pit traffic at the start of a step, from where everyone is
       if (c.exitReq && this.pit.merges[c.bay] === c.idx) { c.mode = 'bayOut'; c.bayT = 0; c.pitPlan = false; c.waitingClear = false; }
     } else {
@@ -1000,6 +1063,8 @@ export class Race {
       c.yawOff = Math.sin(c.bayT * Math.PI) * 0.5;
       if (c.bayT >= 1) {
         c.mode = 'pitlane'; c.v = 0; c.d = T.PIT_D; c.yawOff = 0; c.serviced = true; c.exitReq = false;
+        // the player is driven on along the pit lane, through the exit yield, and handed back past the merge
+        if (c.isPlayer && !c.finished) c.sgLeave = true;
         // back in the through lane: the merge and the bay are released, once
         this.pit.release(`merge${c.bay}`, c, 'done'); this.pit.release(`bay${c.bay}`, c, 'done');
       }
@@ -1054,21 +1119,15 @@ export class Race {
     c.towT += dt; c.v = 0;
     if (c.towT < 1.6) return;
     const s = this.s(c);
-    let j = -1;
-    if (c.towPit) {
-      // already in the pit lane: the nearest free bay, ahead or behind, never round a lap
-      for (let i = 0; i < T.BAYS.length; i++) if (this.bayFree(i, c) && (j < 0 || Math.abs(T.gapS(s, T.BAYS[i])) < Math.abs(T.gapS(s, T.BAYS[j])))) j = i;
-    } else {
-      j = this.bayFree(c.bay, c) ? c.bay : -1;
-      for (let i = 0; i < T.BAYS.length && j < 0; i++) if (this.bayFree(i, c)) j = i;
-    }
-    if (j < 0) return;
+    // always to the car's own bay; while it is occupied the tow waits. From the pit lane it moves ahead or back, never round a lap
+    const j = c.bayHome;
+    if (!this.bayFree(j, c)) return;
     const dist = c.towPit ? T.gapS(s, T.BAYS[j]) : T.ahead(s, T.BAYS[j]);
     // pulled back up the pit lane: points already passed (the timing line among them) are not decided again
     const mark = dist < 0 ? Math.max(c.revMark ?? -Infinity, c.u) : null;
     c.u += dist;
     this.holdBay(c, j);
-    c.bay = j; c.mode = 'service'; c.serviceT = 0; c.d = T.BAY_D; c.laneSide = -1; c.yawOff = 0; c.revMark = null; c.towSvc = true; c.exitReq = false;
+    c.bay = j; c.mode = 'service'; c.serviceT = 0; c.d = T.BAY_D; c.laneSide = -1; c.yawOff = 0; c.revMark = null; c.towSvc = true; c.exitReq = false; c.upPrev = true;
     if (mark !== null) c.revMark = mark;
     c.towPit = false;
     if (c.u > c.hiU) c.hiU = c.u;
@@ -1095,9 +1154,10 @@ export class Race {
         const a = T.gapS(s, T.PEN_S);
         if (a > -T.PEN_HALF) target = Math.min(target, Math.sqrt(2 * 16 * Math.max(0, a)));
       } else if (c.pitPlan) {
-        const a = T.gapS(s, T.BAYS[c.bay]);
-        const free = this.bayFree(c.bay, c);
-        if (a > -0.3) target = Math.min(target, Math.sqrt(2 * 16 * Math.max(0, a - (free ? 0 : 0.8))) + (free ? 0.4 : 0));
+        // its own bay; while that is occupied it waits short of it, clear of the occupant's merge
+        const a = T.gapS(s, T.BAYS[c.bayHome]);
+        const free = this.bayFree(c.bayHome, c);
+        if (a > -0.3) target = Math.min(target, Math.sqrt(2 * 16 * Math.max(0, a - (free ? 0 : AUTO.bayWait))) + (free ? 0.4 : 0));
       }
     } else {
       const look = s + c.v * P.look;

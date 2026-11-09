@@ -429,7 +429,7 @@ describe('overrides with no switch left', () => {
 });
 
 describe('out of fuel in the pit lane', () => {
-  it('running dry after a penalty-only stop hands back control, so the car is captured by the bay it stops beside and refuelled', () => {
+  it('running dry after a penalty-only stop hands back control; stopped beside another team\'s bay it is towed to its own', () => {
     const { r, P } = setup();
     inPit(P, T.PEN_S); P.sgOwed = PEN.stopSeconds; P.sgDue = LAP; P.fuel = 0.0015;
     const tr = run(r, UP, 10, () => P.mode === 'service');
@@ -437,10 +437,22 @@ describe('out of fuel in the pit lane', () => {
     expect(tr.msgs).toContain('msg.sgDry');
     expect([P.sgCtl, P.sgLeave]).toEqual([false, false]);
     expect(P.mode).toBe('service');
-    expect(T.BAYS[P.bay]).toBe(15.5);
+    // it rolled to rest past its own bay (the first), so no other bay captured it: the tow took it back to its own
+    expect(P.bay).toBe(P.bayHome);
+    expect(tr.events.some((e) => e.type === 'tow')).toBe(true);
+    expect(P.towSvc).toBe(true);
     run(r, NONE, 2);
     expect(P.fuel).toBeGreaterThan(0.0015);
-    expect(P.towSvc).toBe(false);
+  });
+
+  it('running dry beside its own bay after a penalty-only stop, the car is captured by it and refuelled without a tow', () => {
+    const { r, P } = setup();
+    inPit(P, T.BAYS[P.bayHome] - 0.4, 0.6); P.sgLeave = true; P.fuel = 0;
+    const tr = run(r, NONE, 3, () => P.mode === 'bayIn');
+    expect(tr.msgs).toContain('msg.sgDry');
+    expect(P.mode).toBe('bayIn'); expect(P.bay).toBe(P.bayHome);
+    run(r, NONE, 2);
+    expect(P.fuel).toBeGreaterThan(0); expect(P.towSvc).toBe(false);
   });
 
   it('standing in the box with no fuel, the stop is served in full before the tow takes the car to a bay', () => {
@@ -472,9 +484,12 @@ describe('out of fuel in the pit lane', () => {
     const crossed = P.crossed, laps = P.lapsDone, u = P.u, hi = P.hiU;
     run(r, NONE, 3, () => P.mode === 'service');
     expect(P.mode).toBe('service');
-    expect(T.BAYS[P.bay]).toBe(T.BAYS[T.BAYS.length - 1]);
+    // always its own bay (the first), wherever it ran dry
+    expect(P.bay).toBe(P.bayHome);
     expect(P.u).toBeCloseTo(u - (T.FINISH_S + 1.5 - T.BAYS[P.bay]), 6);
     expect(P.hiU).toBe(hi);
+    // the tow penalty runs out, then a fresh Throttle press leaves; the controller drives on to the exit
+    run(r, NONE, P.penalty + 0.2);
     run(r, UP, 20, () => P.mode === 'race');
     expect(P.mode).toBe('race');
     expect([P.crossed, P.lapsDone]).toEqual([crossed, laps]);
@@ -482,7 +497,7 @@ describe('out of fuel in the pit lane', () => {
 });
 
 describe('combined fuel visit', () => {
-  it('an optional fuel request survives the penalty: control returns at the box with the bay still reserved', () => {
+  it('an optional fuel request survives the penalty: after the box the car is driven on to its own bay', () => {
     const { r, P, rival } = setup();
     approach(r, P, 60, -1, 14);
     P.fuel = 0.5;
@@ -490,17 +505,17 @@ describe('combined fuel visit', () => {
     award(r, P, rival);
     const tr = run(r, driver(UP), 30, () => P.sgOwed === 0);
     expect(tr.vIn).toBeLessThanOrEqual(T.PIT_SPEED + 0.05);
-    r.update(DT, NONE);
-    expect(P.sgCtl).toBe(false); expect(P.sgLeave).toBe(false); expect(P.sgPhase).toBe(null);
+    r.update(DT, UP);
+    expect(P.sgCtl).toBe(true); expect(P.sgLeave).toBe(false); expect(P.sgPhase).toBe('bay');
     expect(P.mode).toBe('pitlane'); expect(P.pitFuel).toBe(true);
-    const bay = r.pit.bayOf(P);
-    expect(bay).toBeGreaterThanOrEqual(0);
-    // manual from here until the assigned-bay controller lands: creep to the bay and brake there
-    run(r, UP, 3, () => T.gapS(r.s(P), T.BAYS[bay]) < 0.6);
-    run(r, BRAKE, 3, () => P.mode === 'service');
-    expect(P.mode).toBe('service');
-    run(r, NONE, 1);
+    expect(r.pit.bayOf(P)).toBe(P.bayHome);
+    // Throttle held all the way: stopped and turned in at its own bay, no Brake, no overshoot
+    const tr2 = run(r, UP, 5, () => P.mode === 'service');
+    expect(P.mode).toBe('service'); expect(P.bay).toBe(P.bayHome);
+    expect(tr2.phases).toContain('bay');
+    run(r, UP, 1);
     expect(P.fuel).toBeGreaterThan(0.5);
+    expect(P.mode).toBe('service');      // the Throttle held on arrival never departs
   });
 
   it('a committed fuel stop and the stop-and-go clear independently on one visit', () => {
@@ -514,10 +529,9 @@ describe('combined fuel visit', () => {
     run(r, driver(UP), 30, () => P.sgOwed === 0);
     expect([P.sgOwed, P.fuelDue]).toEqual([0, LAP + 1]);
     r.update(DT, NONE);
-    expect(P.sgCtl).toBe(false);
-    const bay = r.pit.bayOf(P);
-    run(r, UP, 3, () => T.gapS(r.s(P), T.BAYS[bay]) < 0.6);
-    run(r, BRAKE, 3, () => P.mode === 'service');
+    expect(P.sgCtl).toBe(true);
+    run(r, NONE, 5, () => P.mode === 'service');
+    expect(P.bay).toBe(P.bayHome);
     run(r, NONE, 1);
     expect(P.fuelDue).toBe(0);
   });

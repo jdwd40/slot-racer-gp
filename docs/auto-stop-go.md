@@ -38,8 +38,8 @@ The shared queue's `pitCap` and the pit limiter apply on top of this. The car co
 ## Fuel visits
 
 - **Penalty only** (`pitFuel` false at the entrance). The controller drives on through the pit lane after the stop and never captures a bay, even with Brake held next to one. Fuel never increases, no pit stop is counted, and the lap is counted once at the timing line.
-- **Combined** (an optional or committed fuel stop, so `pitFuel` is true). The fuel reason is kept. After the stop the controller hands back at the box (the status line then reads "Brake to stop in a service bay"), and the bay reserved for the car on the approach stays reserved. The assigned-bay controller is the next task. Until it lands, the player brakes into the bay as before. The two debts clear independently.
-- **Out of fuel in the pit lane.** If the tank runs dry while Leaving pits, the controller hands back ("Out of fuel in the pit lane — stop in a service bay or wait for the tow"). A car that comes to rest beside a free bay is captured by it and refuelled as normal. Anywhere else in the pit lane a car at rest with no fuel is towed to the nearest free bay, ahead or behind, never round a lap, with the usual tow penalty. The one exception is a car standing in the box with the stop owed: it serves the whole stop first, then is towed. A car that runs dry short of the box is towed and keeps the debt. This applies to AI cars too (none ran dry in the pit lane in the 20 seeded all-AI races, which are unchanged).
+- **Combined** (an optional or committed fuel stop, so `pitFuel` is true). The fuel reason is kept. After the stop the controller keeps the car and drives it on to its own bay, then through the departure and exit: see [automatic bay visits](auto-bay.md). The two debts clear independently.
+- **Out of fuel in the pit lane.** If the tank runs dry while Leaving pits, the controller hands back ("Out of fuel in the pit lane — stop in your bay or wait for the tow"). A car that comes to rest beside its own free bay is captured by it and refuelled as normal. Anywhere else in the pit lane a car at rest with no fuel is towed to its own bay, ahead or behind, never round a lap, with the usual tow penalty (since [automatic bay visits](auto-bay.md), never to another team's bay). The one exception is a car standing in the box with the stop owed: it serves the whole stop first, then is towed. A car that runs dry short of the box is towed and keeps the debt. This applies to AI cars too (none ran dry in the pit lane in the 20 seeded all-AI races, which are unchanged).
 
 ## Brake, reverse, pause
 
@@ -86,6 +86,6 @@ Updated older tests (manual stopping is gone):
 
 ### Known limits
 
-- The assigned-bay controller (next task) is not here. A combined visit hands back at the box for a manual bay stop.
+- The assigned-bay controller is in [automatic bay visits](auto-bay.md). A combined visit now continues to the car's own bay.
 - The controller does not accelerate a car above its takeover speed. A player who takes their foot off long before the 40 m window can still coast to a stop there. That is ordinary control.
 - Scripted placement only. No full race was played to an automatic stop-and-go in real frames, and no physical device was tested.

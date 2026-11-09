@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Bounded browser validation of the real game. Procedure and results: docs/validation.md.
 //
-//   node scripts/browser-check.mjs [tracks race controlled routing practice championship touch responsive touchrace reverse service queue autosg]   functional checks (default: all)
+//   node scripts/browser-check.mjs [tracks race controlled routing practice championship touch responsive touchrace reverse service queue autosg autobay]   functional checks (default: all)
 //   node scripts/browser-check.mjs perf --label updated --machine "<name>"          frame-time capture
 //   node scripts/browser-check.mjs compare <baseline.json> <updated.json>           like-for-like comparison
 //
@@ -123,6 +123,8 @@ function instrument({ seed }) {
       }
       cmd.up = p.v < target - 0.2;
       cmd.down = p.v > target + 0.5;
+    } else if (p.mode === 'pitlane' && p.sgCtl) {
+      // automatic pit service has the pedals (box, own bay, exit): no key changes anything, so none is pressed
     } else if (p.mode === 'pitlane') {
       let stop = null;
       if (p.sgOwed > 0) stop = T.PEN_S;
@@ -136,7 +138,7 @@ function instrument({ seed }) {
       else if (stop === null || a < -1) cmd.up = true;
       else if (a < Math.max(0.8, reach + 0.2)) cmd.down = true;
       else cmd.up = p.v < Math.min(T.PIT_SPEED, 1.5 + a);
-    } else if (p.mode === 'service') cmd.up = p.fuel >= fill && p.penalty <= 0;
+    } else if (p.mode === 'service') cmd.up = p.fuel >= fill && p.penalty <= 0 && p.sgPhase !== 'refuel';   // a fresh press once ready
     else if (p.mode === 'bayOut') cmd.up = true;
     return { st, cmd };
   };
@@ -1671,7 +1673,7 @@ async function reverse(run, c) {
   // ---- keyboard
   const s = await open(run);
   const { page, keys } = s;
-  const T0 = await read(page, () => ({ PEN_S: window.__game.T.PEN_S, PEN_HALF: window.__game.T.PEN_HALF, BAY3: window.__game.T.BAYS[3], BAY_HALF: window.__game.T.BAY_HALF, PIT_IN1: window.__game.T.PIT_IN1 }));
+  const T0 = await read(page, () => ({ PEN_S: window.__game.T.PEN_S, PEN_HALF: window.__game.T.PEN_HALF, BAY0: window.__game.T.BAYS[0], BAY_HALF: window.__game.T.BAY_HALF, PIT_IN1: window.__game.T.PIT_IN1 }));
   await setup(page, { s: T0.PEN_S + T0.PEN_HALF + 0.5, pit: true, sgOwed: 3 });
   // slow software frames can reach the box between two reads, so the chip is watched as it changes
   await read(page, (label) => { const el = document.getElementById('h-chips'); window.__qa.revChip = false; new MutationObserver(() => { if (el.textContent.includes(label)) window.__qa.revChip = true; }).observe(el, { childList: true, subtree: true, characterData: true }); }, STRINGS['hud.reverse']);
@@ -1693,15 +1695,15 @@ async function reverse(run, c) {
   c.ok('Box: Brake still held after service never reverses, through the automatic exit and after the handover', after.mode === 'race' && after.v === 0 && !after.revOn && after.minV >= 0 && after.latch, after);
   await keys.set('ArrowDown', false);
 
-  await setup(page, { s: T0.BAY3 + T0.BAY_HALF + 0.5, pit: true, fuel: 0.3 });
+  await setup(page, { s: T0.BAY0 + T0.BAY_HALF + 0.5, pit: true, fuel: 0.3 });
   await frames(page, 2);
   await keys.set('ArrowDown', true);
   // released on reaching the bay's far edge: a key lands a few slow software frames after the read that chose it
-  await waitFor(page, (b) => { const g = window.__game, p = g.race.player; return g.T.gapS(b, g.T.wrapS(p.u)) < 0.9; }, T0.BAY3, 15000);
+  await waitFor(page, (b) => { const g = window.__game, p = g.race.player; return g.T.gapS(b, g.T.wrapS(p.u)) < 0.9; }, T0.BAY0, 15000);
   await keys.set('ArrowDown', false);
   await waitFor(page, () => ['bayIn', 'service'].includes(window.__game.race.player.mode), null, 10000).catch(() => null);
   const bay = await P(page);
-  c.ok('Bay: back past an overshot bay, release, and the bay is captured for refuelling', ['bayIn', 'service'].includes(bay.mode) && bay.bay === 3 && bay.pitStops === 1, bay);
+  c.ok('Bay: back past its own overshot bay, release, and the bay is captured for refuelling', ['bayIn', 'service'].includes(bay.mode) && bay.bay === 0 && bay.pitStops === 1, bay);
 
   await setup(page, { s: 120 });
   await keys.set('ArrowDown', true);
@@ -2033,6 +2035,233 @@ async function autosg(run, c) {
   return s;
 }
 
+/**
+ * Automatic fuel visits to the player's own bay (docs/auto-bay.md): bay paint per livery, entry and stop with Throttle held,
+ * the release-then-press departure, a blocked bay merge with pause and blur, a blocked pit exit, a combined visit, and touch.
+ */
+async function autobay(run, c) {
+  const PH = ['armed', 'deferred', 'entry', 'queued', 'serving', 'bay', 'bayWait', 'refuel', 'release', 'ready', 'exit', 'leaving'];
+  const LABEL = Object.fromEntries(PH.map((k) => [k, text(`hud.sgA.${k}`)]));
+  const st = (page) => read(page, () => {
+    const g = window.__game, r = g.race, p = r.player, T = g.T, q = window.__qa;
+    return { screen: g.screen, mode: p.mode, s: +T.wrapS(p.u).toFixed(2), v: +p.v.toFixed(3), phase: p.sgPhase, ctl: p.sgCtl, bay: p.bay, home: p.bayHome, exitReq: p.exitReq, wait: p.pitWait,
+      fuel: +p.fuel.toFixed(4), owed: p.sgOwed, stops: p.pitStops, revOn: p.revOn, latch: p.revLatch, held: g.input.held('throttle'),
+      wrongBay: r.pit.log.filter((e) => e.zone.startsWith('bay') && e.op === 'grant' && +e.zone.slice(3) !== e.car).length,
+      merges: r.pit.log.filter((e) => e.car === p.idx && e.zone.startsWith('merge') && e.op === 'grant').length,
+      offences: r.cars.reduce((n, x) => n + x.offences, 0) - q.off0,
+      chips: document.getElementById('h-chips').textContent, status: document.getElementById('h-status').textContent,
+      thrCue: document.getElementById('t-throttle').dataset.cue, thrText: document.getElementById('t-throttle-cue').textContent, brakeCue: document.getElementById('t-brake').dataset.cue,
+      minV: q.minV, vIn: q.vIn, maxPast: q.maxPast, handS: q.handS, phases: q.phases.join('>'), seen: q.seen, inputs: q.inputs.join(' '), fuelAtReq: q.fuelAtReq, maxFuelAfter: q.maxFuelAfter };
+  });
+  /** lap 3, the player `before` m short of the entrance at `v`; `fuel` sets the tank; `cars` places AI cars: lane (pitlane s), bay (in bay j), road (outside lane s) */
+  const setup = (page, o) => read(page, (x) => {
+    const g = window.__game, T = g.T, L = 3;
+    if (g.screen !== 'race') g.startSession('race');
+    if (g.race.phase === 'countdown') g.advance(7);
+    const r = g.race, p = r.player;
+    r.pit = new r.pit.constructor(r);
+    r.squeezeQ.length = 0;
+    const put = (car, s, mode, v, side = -1) => Object.assign(car, { u: L * T.L + s, hiU: L * T.L + s, v, change: null, laneSide: side, mode, d: mode === 'pitlane' ? T.pitD(s) : side * T.LANE_HALF, throttle: 0, graceT: 0, recoverT: 0, cutT: 0, pushedT: 0, revMark: null, revOn: false, crossed: L, lapsDone: L - 1, serviced: false, exitReq: false, sgOwed: 0, sgServed: 0, sgServing: false, sgDue: 0, sgDeferred: false, sgCommit: -1, sgLeave: false, sgCtl: false, sgPhase: null, svcBreach: null, pitPlan: false, pitReq: false, fuelReq: false, fuelDue: 0, pitFuel: false, laneOverride: false, routeHold: -1, offences: 0, fuel: 0.6, refuelTarget: 1, penalty: 0, towSvc: false, upPrev: false });
+    r.cars.forEach((car, i) => { if (i) put(car, T.L / 2 + i * 8, 'race', 0, 1); });
+    put(p, T.PIT_IN0 - x.before, 'race', x.v);
+    p.fuel = x.fuel;
+    {
+      const q = window.__qa;
+      q.hold = new Set();
+      for (const k of x.cars ?? []) {
+        const car = r.cars[k.i];
+        if (k.lane !== undefined) put(car, k.lane, 'pitlane', 0);
+        if (k.road !== undefined) put(car, k.road, 'race', 0);
+        if (k.bay !== undefined) { put(car, T.BAYS[k.bay], 'pitlane', 0); r.enterBay(car, k.bay); Object.assign(car, { mode: 'service', d: T.BAY_D, bayT: 1, serviceT: 1, refuelTarget: 2 }); }
+        q.hold.add(car.idx);
+      }
+      if (!r.__ai) { const ai = r.ai.bind(r); r.__ai = ai; r.ai = (car, dt) => (window.__qa.hold.has(car.idx) ? { t: 0, b: 1 } : car.mode === 'race' && car.laneSide > 0 ? { t: 0, b: 1 } : ai(car, dt)); }
+      if (x.sg) { p.offences = 2; r.offence(p, r.cars[1], 'rear'); r.cars[1].offences = 0; }
+      Object.assign(q, { minV: 0, vIn: -1, maxPast: -1e9, handS: -1, phases: [], seen: {}, inputs: [], fuelAtReq: null, maxFuelAfter: 0, off0: r.cars.reduce((n, y) => n + y.offences, 0) });
+      if (!q.bayObs) {
+        const el = document.getElementById('h-chips');
+        q.bayObs = new MutationObserver(() => { const e = el.querySelector('.sgp'); if (e) q.seen[e.dataset.sg] = el.textContent.includes(x.labels[e.dataset.sg].split('{')[0].trim()); });
+        q.bayObs.observe(el, { childList: true, subtree: true, characterData: true });
+      }
+      clearInterval(q.bayT);
+      let last = { mode: p.mode, req: false };
+      q.bayT = setInterval(() => {
+        const rr = window.__game.race, pp = rr.player;
+        q.minV = Math.min(q.minV, pp.v);
+        if (pp.mode === 'pitlane' && !pp.serviced) q.maxPast = Math.max(q.maxPast, T.gapS(T.BAYS[pp.bayHome], T.wrapS(pp.u)));
+        if (last.mode === 'race' && pp.mode === 'pitlane') q.vIn = +pp.v.toFixed(2);
+        if (last.mode === 'pitlane' && pp.mode === 'race' && q.handS < 0) q.handS = +T.wrapS(pp.u).toFixed(2);
+        if (pp.exitReq && !last.req) q.fuelAtReq = pp.fuel;
+        if (q.fuelAtReq !== null) q.maxFuelAfter = Math.max(q.maxFuelAfter, pp.fuel);
+        if (q.phases.at(-1) !== pp.sgPhase) q.phases.push(pp.sgPhase);
+        const ik = `${window.__game.input.held('throttle') ? 'T' : '-'}${window.__game.input.held('brake') ? 'B' : '-'}${pp.sgCtl ? 'A' : '-'}${pp.mode[0]}`;
+        if (q.inputs.at(-1)?.split('@')[0] !== ik) q.inputs.push(`${ik}@${T.wrapS(pp.u).toFixed(1)}`);
+        last = { mode: pp.mode, req: pp.exitReq };
+      }, 5);
+    }
+  }, { labels: LABEL, ...o });
+  const until = (page, fn, ms = 30000) => waitFor(page, fn, null, ms).catch(() => null);
+  const inService = (page, ms) => until(page, () => window.__game.race.player.mode === 'service', ms);
+  const handed = (page, ms = 30000) => until(page, () => { const p = window.__game.race.player; return p.mode === 'race' && p.pitStops > 0 && !p.sgCtl; }, ms);
+  const freeAI = (page) => read(page, () => window.__qa.hold.clear());
+
+  // ---- bays painted from their owners, for every livery
+  const s = await open(run);
+  const { page, keys } = s;
+  await page.click(`.track[data-id="${TRACK}"]`);
+  const paints = [];
+  for (const l of await read(page, () => window.__game.R.LIVERIES)) {
+    await page.click(`.car[data-car="${l.id}"]`);
+    const b = await read(page, () => window.__game.bays);
+    paints.push({ id: l.id, want: l.color, got: b[0].color, num: b[0].num, tag: b[0].tag, mine: b[0].mine, rivals: b.slice(1).map((x) => x.color) });
+  }
+  const DRV = [0xe8322a, 0x2a6df0, 0x22b04b];
+  c.ok('Bays: the player\'s bay takes each selectable livery, with the car number and YOU; rivals keep their colours', paints.every((x) => x.got === x.want && x.num === 7 && x.tag === STRINGS['hud.you'] && x.mine && x.rivals.join() === DRV.join()), paints);
+  await page.click(`.car[data-car="violet"]`);
+  await page.click('#o-start');
+  await setup(page, { before: 30, v: 0, fuel: 0.5 });
+  // the camera over the bays, the player parked in the through lane beside them
+  await read(page, () => { const g = window.__game, T = g.T, p = g.race.player; Object.assign(p, { u: 3 * T.L + T.BAYS[1] + 1.5, mode: 'pitlane', d: T.PIT_D, v: 0 }); g.zoom(5); g.snapCam(); });
+  await frames(page, 6);
+  await page.screenshot({ path: path.join(run.out, 'autobay-bays-violet.png') });
+  await read(page, () => window.__game.showTitle());
+  await pickRaceSetup(page);
+  await page.click('#o-start');
+  const G = await read(page, () => { const T = window.__game.T; return { BAY0: T.BAYS[0], PIT_OUT0: T.PIT_OUT0, PIT_OUT1: T.PIT_OUT1, PIT_SPEED: T.PIT_SPEED, PEN_S: T.PEN_S }; });
+
+  // ---- keyboard: P, then Throttle held from before the takeover into the bay; no Brake
+  await setup(page, { before: 44, v: 0, fuel: 0.3 });
+  await keys.tap('KeyP');
+  await keys.set('KeyW', true);
+  await inService(page);
+  await sleep(1500);
+  const arr = await st(page);
+  await page.screenshot({ path: path.join(run.out, 'autobay-service-held.png') });
+  c.ok('Keyboard: P and Throttle held: Auto entry, at the pit limit, stopped in its own bay without passing it, no Brake', arr.mode === 'service' && arr.bay === arr.home && arr.seen.entry && arr.seen.bay && arr.vIn > 0 && arr.vIn <= G.PIT_SPEED + 0.05 && arr.maxPast <= 0.2 && !arr.inputs.includes('B') && arr.minV >= 0 && arr.wrongBay === 0, arr);
+  c.ok('Keyboard: Throttle still held after arrival does not depart; HUD says release Throttle', !arr.exitReq && arr.phase === 'release' && arr.chips.includes(LABEL.release) && arr.status.includes(STRINGS['hud.releaseHint']) && arr.fuel > 0.3, arr);
+  await keys.set('KeyW', false);
+  await frames(page, 3);
+  const rdy = await st(page);
+  c.ok('Keyboard: released, the HUD shows Ready — Throttle to leave', rdy.phase === 'ready' && rdy.chips.includes(LABEL.ready) && rdy.status.includes(STRINGS['hud.refuelHint']), rdy);
+  await keys.tap('KeyW');
+  await handed(page);
+  await sleep(300);
+  const gone = await st(page);
+  c.ok('Keyboard: one tap of W leaves: refuelling stops at the request, Leaving pits, control back past the pit exit', gone.mode === 'race' && gone.merges === 1 && gone.fuelAtReq !== null && gone.maxFuelAfter <= gone.fuelAtReq + 1e-9 && gone.seen.leaving && gone.handS >= G.PIT_OUT1 && gone.handS < G.PIT_OUT1 + 5 && gone.offences === 0, gone);
+
+  // ---- a blocked bay merge: Waiting for clear exit in the bay; Esc and a window blur keep the request; released AI lets it go
+  await setup(page, { before: 25, v: 10, fuel: 0.4 });
+  await keys.tap('KeyP');
+  await inService(page);
+  await sleep(800);
+  // once the player is in its bay, an AI car stands in the through lane just behind it, inside the merge zone
+  await read(page, () => { const g = window.__game, T = g.T, a = g.race.cars[1]; Object.assign(a, { u: 3 * T.L + T.BAYS[0] - 1.2, hiU: 3 * T.L + T.BAYS[0] - 1.2, d: T.pitD(T.BAYS[0] - 1.2), v: 0, mode: 'pitlane', laneSide: -1, pitFuel: false, pitPlan: false, sgOwed: 0 }); window.__qa.hold.add(1); });
+  await keys.tap('KeyW');
+  await frames(page, 4);
+  const blk = await st(page);
+  await page.screenshot({ path: path.join(run.out, 'autobay-waiting-exit.png') });
+  c.ok('Keyboard: with the bay merge blocked, the car stays in its bay showing Waiting for clear exit; refuelling has stopped', blk.mode === 'service' && blk.exitReq && blk.phase === 'exit' && blk.chips.includes(LABEL.exit) && blk.status.includes(STRINGS['hud.waitClear'].split(' —')[0]) && blk.maxFuelAfter <= blk.fuelAtReq + 1e-9, blk);
+  await keys.tap('Escape');
+  await waitFor(page, () => window.__game.screen === 'pause', null, 5000).catch(() => null);
+  await keys.tap('Escape');
+  await read(page, () => window.dispatchEvent(new Event('blur')));
+  await waitFor(page, () => window.__game.screen === 'pause', null, 5000).catch(() => null);
+  const pz = await st(page);
+  await keys.tap('Escape');
+  await frames(page, 3);
+  const pz2 = await st(page);
+  c.ok('Keyboard: Esc and a window blur pause; the latched request survives both, with no key held afterwards', pz.screen === 'pause' && pz2.screen === 'race' && pz2.exitReq && pz2.mode === 'service' && !pz2.held, { pz, pz2 });
+  await freeAI(page);
+  await handed(page);
+  const blkDone = await st(page);
+  c.ok('Keyboard: once the lane car moves on, the car leaves without another press and rejoins with no contact', blkDone.mode === 'race' && blkDone.merges === 1 && blkDone.offences === 0 && blkDone.wrongBay === 0, blkDone);
+
+  // ---- Throttle held across a blur on arrival: forgotten, so a fresh press is still needed
+  await setup(page, { before: 20, v: 10, fuel: 0.4 });
+  await keys.tap('KeyP');
+  await keys.set('KeyW', true);
+  await inService(page);
+  await sleep(800);
+  await read(page, () => window.dispatchEvent(new Event('blur')));
+  await waitFor(page, () => window.__game.screen === 'pause', null, 5000).catch(() => null);
+  await keys.tap('Escape');                                   // W is still physically down: no new keydown reaches the game
+  await sleep(1200);
+  const stale = await st(page);
+  c.ok('Keyboard: a key held across a blur is cleared and never departs; the car waits in its bay, Ready', stale.mode === 'service' && !stale.exitReq && !stale.held && stale.phase === 'ready', stale);
+  await keys.set('KeyW', false);
+  await keys.tap('KeyW');
+  await handed(page);
+  c.ok('Keyboard: the next fresh press leaves', (await st(page)).mode === 'race');
+
+  // ---- a blocked pit exit: out of the bay, waits at the exit line, merges once the outside lane is clear
+  await setup(page, { before: 20, v: 10, fuel: 0.6, cars: [{ i: 1, road: G.PIT_OUT1 + 1.2 }] });
+  await keys.tap('KeyP');
+  await inService(page);
+  await sleep(700);
+  await keys.tap('KeyW');
+  await until(page, () => { const p = window.__game.race.player; return p.mode === 'pitlane' && p.pitWait === 'exit' && p.v === 0; }, 15000);
+  const ex = await st(page);
+  c.ok('Keyboard: a car standing at the pit-exit merge holds the player at the exit line, Waiting for clear exit, still automatic', ex.mode === 'pitlane' && ex.wait === 'exit' && ex.phase === 'leaving' && ex.ctl && ex.s < G.PIT_OUT0 && ex.chips.includes(text('hud.qExit')), ex);
+  await freeAI(page);
+  await handed(page);
+  const exDone = await st(page);
+  c.ok('Keyboard: once the outside lane clears it merges and is handed back, no contact', exDone.mode === 'race' && exDone.handS >= G.PIT_OUT1 && exDone.offences === 0, exDone);
+
+  // ---- combined: stop-and-go first in the box, then the bay
+  await setup(page, { before: 44, v: 0, fuel: 0.4, sg: true });
+  await keys.tap('KeyP');
+  await keys.set('KeyW', true);
+  await inService(page, 40000);
+  await keys.set('KeyW', false);
+  const cmb = await st(page);
+  c.ok('Keyboard: a combined visit serves the stop-and-go in the box, then stops in the bay (Serving, then Auto pit)', cmb.mode === 'service' && cmb.owed === 0 && cmb.bay === cmb.home && /serving.*bay/.test(cmb.phases) && cmb.wrongBay === 0, cmb);
+  await sleep(400);
+  await keys.tap('KeyW');
+  await handed(page);
+
+  // the help
+  await keys.tap('Escape');
+  await waitFor(page, () => window.__game.screen === 'pause', null, 5000).catch(() => null);
+  const help = await page.locator('.overlay').textContent().catch(() => '');
+  c.ok('Keyboard: the pause help explains the automatic bay stop and the release-then-press departure', help.includes(STRINGS['ctl.rules']) && help.includes(STRINGS['ctl.pit']), help.slice(0, 120));
+  await keys.tap('Escape');
+
+  // ---- emulated touch, phone and tablet
+  for (const vp of [{ width: 844, height: 390, name: 'phone' }, { width: 360, height: 640, name: 'portrait phone' }, { width: 1024, height: 768, name: 'tablet' }]) {
+    const t = await open(run, { viewport: { width: vp.width, height: vp.height }, device: PHONE });
+    await read(t.page, () => window.__game.setTouchMode('on'));
+    await pickRaceSetup(t.page);
+    await t.page.click('#o-start');
+    const f = new Fingers(t.page, await t.context.newCDPSession(t.page));
+    await setup(t.page, { before: 30, v: 10, fuel: 0.4 });
+    await f.tap('#t-pit');
+    const thr = await f.put('#t-throttle');
+    await inService(t.page);
+    await sleep(900);
+    const th = await st(t.page);
+    // the state chip and the status line stay clear of every pad control and inside the viewport
+    const overlap = await read(t.page, () => {
+      const els = [document.querySelector('#h-chips .sgp'), document.getElementById('h-status')].map((e) => e?.getBoundingClientRect());
+      if (els.some((e) => !e || !e.width)) return null;
+      const off = els.some((e) => e.left < 0 || e.top < 0 || e.right > innerWidth || e.bottom > innerHeight);
+      return off || [...document.querySelectorAll('#t-pad .tbtn')].filter((b) => !b.hidden).some((b) => { const r = b.getBoundingClientRect(); return els.some((c) => !(r.right <= c.left || r.left >= c.right || r.bottom <= c.top || r.top >= c.bottom)); });
+    });
+    await t.page.screenshot({ path: path.join(run.out, `autobay-touch-${vp.name.replace(' ', '-')}.png`) });
+    c.ok(`Touch ${vp.name}: finger held on Throttle into its own bay; it does not depart, Throttle reads lift off; chip and status are on screen and cover no control`, th.mode === 'service' && th.bay === th.home && !th.exitReq && th.phase === 'release' && th.thrCue === 'release' && th.thrText === STRINGS['touch.throttle.release'] && overlap === false && !th.inputs.includes('B'), { ...th, overlap });
+    await f.lift(thr);
+    await frames(t.page, 3);
+    const tr = await st(t.page);
+    c.ok(`Touch ${vp.name}: lifted, Throttle reads tap · leave`, tr.phase === 'ready' && tr.thrCue === 'ready' && tr.thrText === STRINGS['touch.throttle.ready'], tr);
+    await f.tap('#t-throttle');
+    await handed(t.page);
+    const tg = await st(t.page);
+    c.ok(`Touch ${vp.name}: one tap leaves; refuelling stopped at the tap; handed back past the pit exit`, tg.mode === 'race' && tg.merges === 1 && tg.maxFuelAfter <= tg.fuelAtReq + 1e-9 && tg.handS >= G.PIT_OUT1 && tg.offences === 0, tg);
+    c.ok(`Touch ${vp.name}: no page or console errors`, t.errors.length === 0, t.errors.slice(0, 5));
+    await t.context.close();
+  }
+  return s;
+}
+
 /** Real-time frame capture with the renderer on. Reports presentation and clock separately. */
 async function perf(run) {
   const s = await open(run);
@@ -2064,7 +2293,7 @@ async function perf(run) {
 }
 
 // ------------------------------------------------------------ cli
-const SCENARIOS = { tracks, race, controlled, routing, practice, championship, touch, responsive, touchrace, reverse, service, queue, autosg };
+const SCENARIOS = { tracks, race, controlled, routing, practice, championship, touch, responsive, touchrace, reverse, service, queue, autosg, autobay };
 const USAGE = 'usage: browser-check.mjs [tracks|race|controlled|routing|practice|championship|touch|responsive|touchrace|reverse|service|queue|autosg ...] | perf | compare <a.json> <b.json>\n'
   + 'options: --dist <dir> --url <url> --commit <sha> --machine <name> --label <name> --viewport WxH --dpr N --preset low|balanced|high\n'
   + '         --seconds N --headed --channel <chrome|msedge> --out <dir> --max-minutes N';

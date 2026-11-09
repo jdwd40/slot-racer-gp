@@ -13,7 +13,7 @@ The game can be played without a keyboard. **Touch controls: Auto / On / Off** i
 
 | Control | Action | Place |
 | --- | --- | --- |
-| Throttle | Hold | Bottom right, the largest control |
+| Throttle | Hold. In the pit bay, lift off and tap it once to leave: see [automatic bay visits](auto-bay.md) | Bottom right, the largest control |
 | Brake | Hold. Keep holding at rest to reverse: see [reverse](reverse.md) | Bottom left |
 | Lane, Pit | Tap | Beside Brake, or above it in portrait, so the left thumb has them while the right holds Throttle |
 | Defer | Tap. Shown above Pit only while a pit visit can be put back one lap, which then makes it compulsory: see [service obligations](penalties.md) | Same column as Lane and Pit |
@@ -28,6 +28,7 @@ Zoom, sound and ghost are enlarged to 48×48 CSS pixels and act on `touchstart`,
 | Automatic pit route | `P auto`, double border |
 | Override | `⇄ override`, dashed border |
 | Pit armed | `✓ armed`, solid border |
+| Throttle in the bay | `lift off` while a finger held since arrival must be released, `tap · leave` once departure is ready, `auto` while the controller drives |
 | Compulsory stop (stop-and-go or committed fuel stop) | `■ must stop`, thick double border |
 | Approach deferred | Pit shows `⏭ next lap`, dashed orange border |
 | Deferral available | Defer button, `⏭ next lap`, dashed orange border |

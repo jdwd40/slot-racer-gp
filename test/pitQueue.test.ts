@@ -150,15 +150,18 @@ describe('queue order', () => {
     expect(w.overlaps).toBe(0); expect(w.offences).toBe(0);
     expect(w.held.get(P.idx)).toBeGreaterThan(1);       // the player queued on Throttle alone
     expect(P.revOn).toBe(false);
-    expect(trail(r, 'bay0')).toEqual([`${P.idx}:bay0:grant`, `${P.idx}:bay0:release:passed`]); // drove past its bay: released
-    paired(r); expect(allFree(r)).toBe(true);
+    // the player is stopped at its own bay automatically and is still in it (Throttle held on arrival never departs)
+    expect(trail(r, 'bay0')).toEqual([`${P.idx}:bay0:grant`]);
+    expect([P.mode, P.bay]).toEqual(['service', P.bayHome]);
+    paired(r); expect(r.pit.held(P)).toEqual(['bay0']);
+    for (const c of [A, B, D]) expect(r.pit.held(c)).toEqual([]);
     for (const [rev, dt] of [[true, DT], [false, 1 / 30], [true, 1 / 144]] as const) {
       const v = fourArrive(rev, dt);
       expect(v.skipped).toBe(false); expect(v.spilled).toBe(true);
       expect(served(v.w)).toEqual(served(w));
       expect(trail(v.r, 'box')).toEqual(trail(r, 'box'));
       expect(v.w.overlaps).toBe(0); expect(v.w.offences).toBe(0);
-      paired(v.r); expect(allFree(v.r)).toBe(true);
+      paired(v.r); expect(v.r.pit.held(v.P)).toEqual(['bay0']);
     }
   });
 });
@@ -243,15 +246,15 @@ describe('occupancy', () => {
     const r = setup(3);
     const [, A, B] = r.cars;
     inPit(A, T.PEN_S); owes(A);
-    inPit(B, T.PIT_IN1 - 3, 6); fuels(B); B.bay = 3;
+    inPit(B, T.PIT_IN1 - 3, 6); fuels(B);
     let passed = false;
     const w = sim(r, 2.5, NONE, watch(), DT, () => { if (T.gapS(r.s(A), r.s(B)) > -T.CAR_LEN) passed = true; return false; });
     expect(passed).toBe(false);
     expect(B.pitWait).toBe('queued'); expect(B.v).toBeLessThan(0.05);
-    expect(r.pit.box).toBe(A.idx); expect(r.pit.bays[3]).toBe(B.idx);
-    // once A has served and gone, B reaches its bay
+    expect(r.pit.box).toBe(A.idx); expect(r.pit.bays[B.bayHome]).toBe(B.idx);
+    // once A has served and gone, B reaches its own bay
     sim(r, 10, NONE, w, DT, () => B.mode === 'service');
-    expect(B.mode).toBe('service'); expect(B.bay).toBe(3);
+    expect(B.mode).toBe('service'); expect(B.bay).toBe(B.bayHome);
     expect(w.overlaps).toBe(0);
   });
 
@@ -288,10 +291,10 @@ describe('occupancy', () => {
     inPit(P, T.BAYS[1]);
     sim(r, 0.2, BRAKE);
     expect(P.mode).toBe('pitlane');
-    // B wants bay 1 too: it is given another, and only one
+    // B's current target pointing at bay 1 changes nothing: it is given its own bay, and only one
     approach(B, 20); fuels(B); B.bay = 1;
     r.pit.update();
-    expect(B.bay).not.toBe(1);
+    expect(B.bay).toBe(B.bayHome); expect(r.pit.bays[B.bayHome]).toBe(B.idx);
     expect(r.pit.bays.filter((h) => h === B.idx)).toHaveLength(1);
     expect(r.pit.bays.filter((h) => h === A.idx)).toHaveLength(1);
   });
@@ -301,10 +304,10 @@ describe('bay departures', () => {
   it('an exit request waits for the gap, then completes exactly once without pressing again', () => {
     const r = setup(2, true);
     const [P, A] = r.cars;
-    inBay(r, P, 1);
-    inPit(A, T.BAYS[1] - 2.6, 8);       // committed: cannot stop short of the merge
+    inBay(r, P, 0);
+    inPit(A, T.BAYS[0] - 2.6, 8);       // committed: cannot stop short of the merge
     r.ai = () => ({ t: 1, b: 0 });
-    sim(r, DT, UP);                      // one press of Throttle
+    sim(r, DT, NONE); sim(r, DT, UP);    // one fresh press of Throttle
     const w = watch();
     let outs = 0, prev = P.mode, waited = false;
     sim(r, 4, NONE, w, DT, () => {
@@ -314,8 +317,8 @@ describe('bay departures', () => {
     });
     expect(waited).toBe(true);
     expect(outs).toBe(1);
-    expect(P.mode).toBe('pitlane'); expect(P.exitReq).toBe(false);
-    expect(trail(r, 'merge')).toEqual([`${P.idx}:merge1:grant`, `${P.idx}:merge1:release:done`]);
+    expect(['pitlane', 'race']).toContain(P.mode); expect(P.exitReq).toBe(false);
+    expect(trail(r, 'merge')).toEqual([`${P.idx}:merge0:grant`, `${P.idx}:merge0:release:done`]);
     expect(w.overlaps).toBe(0);
   });
 
