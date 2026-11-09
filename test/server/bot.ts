@@ -26,5 +26,5 @@ export function drive(snap: RaceSnapshot, id: string, pace = 1): BotOut {
   const prof = profile(snap.track, side);
   const s = T.wrapS(c.u + Math.max(0, c.v) * 0.2);
   const target = prof[Math.min(prof.length - 1, Math.max(0, Math.round(s / T.PROFILE_STEP)))] * pace;
-  return { up: c.v < target - 0.2, down: c.v > target + 2, pit: c.fuel < 0.42 && !c.pitReq && !c.fuelReq && c.fuelDue <= 0 && c.mode === 'race' };
+  return { up: c.v < target - 0.2, down: c.v > target + 2, pit: c.fuel < 0.42 && c.crossed < snap.laps && !c.pitReq && !c.fuelReq && c.fuelDue <= 0 && c.mode === 'race' };
 }
