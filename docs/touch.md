@@ -42,7 +42,7 @@ Lane and Pit states come from `Race` every frame through `laneCue` and `pitCue`.
 `src/input.ts` holds the shared layer. `src/main.ts` connects it to the race.
 
 - `DrivingInput` records which source holds which action. Each key is `key:<code>` and each finger is `pointer:<id>`, so one source letting go never releases another. An action is held while any source holds it.
-- Taps call one handler per action, and those handlers call `Race.requestLane()`, `Race.requestPit()` and `Race.requestDefer()`. Space, P and N use the same path, so [pit routing](pit-routing.md) needs no touch logic.
+- Taps call one handler per action, and those handlers call `Race.requestLane(id)`, `Race.requestPit(id)` and `Race.requestDefer(id)` for the local driver. Space, P and N use the same path, so [pit routing](pit-routing.md) needs no touch logic.
 - `TouchPad` follows each pointer id. Every control captures its pointer, and `pointerup`, `pointercancel` and `lostpointercapture` all release it. Repeats are no-ops, and a pointer id only counts on the control that holds it.
 - Taps fire on `pointerdown`, because browsers do not reliably send `click` for a second finger while the first is held. `touchstart` is cancelled on the controls, so no `click` follows and a tap cannot land on the menu it opens. A second finger on a pressed tap control is not another tap.
 

@@ -3,7 +3,7 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import * as T from '../src/track';
 import { Race, Car, PEN, LAPS } from '../src/race';
-import { fresh, place, park, stepEvents, offences, msgs, seedRandom, crossLine, UP, DT } from './helpers';
+import { fresh, place, park, stepEvents, offences, msgs, seedRandom, crossLine, UP, DT, all, me } from './helpers';
 
 beforeEach(() => seedRandom(7));
 afterEach(() => { vi.restoreAllMocks(); });
@@ -177,7 +177,7 @@ describe('stop-and-go deadline', () => {
   it('a missed due lap uses the one deferral, the next latches the breach once, and later service settles only the stop', () => {
     const r = fresh(); park(r);
     const B = r.cars[2];
-    B.isPlayer = true; B.pitPlan = false;
+    B.human = true; B.pitPlan = false;
     B.sgOwed = 3; B.sgDue = 4; B.sgDeferred = false;
     // the line ending lap 3 is not the deadline
     let ev = crossLine(r, B, 3, 1);
@@ -206,7 +206,7 @@ describe('stop-and-go deadline', () => {
 describe('serving in the penalty box', () => {
   it('counts only a continuous stationary stop inside the box and suspends refuelling', () => {
     const r = fresh(); park(r);
-    const B = r.cars[2]; B.isPlayer = true;
+    const B = r.cars[2]; B.human = true;
     B.sgOwed = 3; B.sgDue = 2; B.mode = 'pitlane'; B.u = T.PEN_S - 0.2; B.d = T.pitD(B.u); B.v = 0; B.fuel = 0.4;
     let ev = stepEvents(r, 90);
     expect(B.sgServing).toBe(true);
@@ -257,7 +257,7 @@ describe('unserved at the flag', () => {
 describe('AI compliance', () => {
   it('enters the pits, stands still in the box for the full stop and rejoins', () => {
     const r = fresh();
-    r.player.isPlayer = true;
+    me(r).human = true;
     const B = r.cars[2];
     for (const c of r.cars) place(c, T.FINISH_S + 30 + c.idx * 3, c.idx % 2 ? 1 : -1, 12);
     B.offences = 2; B.sgOwed = 3; B.sgDue = r.apprLap(B) + (r.reachablePitEntry(B) ? 0 : 1);
@@ -279,12 +279,12 @@ describe('AI compliance', () => {
 describe('player penalty', () => {
   it('arms the pit request and refuses to cancel it while a stop is outstanding', () => {
     const r = fresh(); park(r);
-    const P = r.player; P.isPlayer = true; const A = r.cars[1];
+    const P = me(r); P.human = true; const A = r.cars[1];
     P.offences = 2; place(A, 60, 1, 10); place(P, 60 - T.CAR_LEN + 0.1, 1, 16);
     const ev = stepEvents(r);
     expect(P.sgOwed).toBe(3); expect(P.pitReq).toBe(true);
     expect(ev.some((e) => e.type === 'offence' && e.car === P && e.stop)).toBe(true);
-    r.requestPit();
+    r.requestPit(me(r).id);
     expect(P.pitReq).toBe(true);
     expect(msgs(r.events)).toContain('msg.pitRequired');
   });

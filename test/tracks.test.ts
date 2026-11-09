@@ -2,7 +2,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import * as T from '../src/track';
 import { Race, LAPS, VMAX, AI_GRIP } from '../src/race';
-import { seedRandom, NONE, DT } from './helpers';
+import { seedRandom, NONE, DT, all, me } from './helpers';
 
 beforeEach(() => seedRandom(11));
 afterEach(() => vi.restoreAllMocks());
@@ -59,11 +59,11 @@ describe.each(ids)('%s all-AI simulation', (id) => {
   it('runs 90 s with every car in a valid state and making progress', () => {
     T.setTrack(id);
     const r = new Race();
-    r.player.isPlayer = false;
+    me(r).human = false;
     const startU = r.cars.map((c) => c.u);
     let n = 0;
     for (let t = 0; t < 90; t += DT) {
-      r.update(DT, NONE);
+      r.update(DT, all(r, NONE));
       if (++n % 10) { r.events.length = 0; continue; }
       for (const e of r.events) expect(['msg', 'bump', 'deslot', 'switch', 'lap', 'finish', 'tow', 'offence', 'served', 'dq', 'breach', 'go', 'light']).toContain(e.type);
       r.events.length = 0;
@@ -89,9 +89,9 @@ describe('full race', () => {
   it('completes a 13-lap race on Clubman Park with a consistent classification', () => {
     T.setTrack('circuit-1');
     const r = new Race();
-    r.player.isPlayer = false;
+    me(r).human = false;
     let t = 0;
-    while (r.phase !== 'done' && t < 900) { r.update(DT, NONE); r.events.length = 0; t += DT; }
+    while (r.phase !== 'done' && t < 900) { r.update(DT, all(r, NONE)); r.events.length = 0; t += DT; }
     expect(r.phase).toBe('done');
     const res = r.results();
     // the field is run on to the flag: every car has a real result, none an estimate

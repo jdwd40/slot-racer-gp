@@ -72,7 +72,7 @@ function instrument({ seed }) {
     cb(ts);
     const g = window.__game;
     if (!g) return;
-    const r = g.race, p = r.player;
+    const r = g.race, p = r.car(window.__game.localId);
     qa.rows.push({ ts, screen: g.screen, phase: r.phase, raceTime: r.raceTime, dropped: g.stepper ? g.stepper.dropped : null, v: +p.v.toFixed(2), throttle: +p.throttle.toFixed(2), brake: p.brake });
     note(ts, r.raceTime, 'screen', g.screen);
     note(ts, r.raceTime, 'phase', r.phase);
@@ -92,7 +92,7 @@ function instrument({ seed }) {
 
   /** Read the player's situation and decide the keys: stay under the corner speed, hold back in traffic, pit for fuel or a penalty. */
   qa.drive = (o) => {
-    const g = window.__game, r = g.race, T = g.T, p = r.player, s = T.wrapS(p.u);
+    const g = window.__game, r = g.race, T = g.T, p = r.car(window.__game.localId), s = T.wrapS(p.u);
     const st = { screen: g.screen, phase: r.phase, mode: p.mode, lap: p.lapsDone, crossed: p.crossed, v: p.v, fuel: p.fuel, side: p.laneSide, raceTime: r.raceTime, finished: p.finished, sgOwed: p.sgOwed, pitStops: p.pitStops, view: g.view, lapValid: p.lapValid };
     const cmd = { up: false, down: false, lane: false, pit: false };
     if (g.screen !== 'race' || p.finished) return { st, cmd };
@@ -194,7 +194,7 @@ async function open(run, { seed = SEED, fixtures = null, viewport = run.viewport
 }
 
 const read = (page, fn, arg) => page.evaluate(fn, arg);
-const game = (page) => read(page, () => { const g = window.__game, r = g.race, p = r.player; return { screen: g.screen, mode: g.mode, view: g.view, track: g.T.DEF.id, phase: r.phase, raceTime: r.raceTime, t: r.t, lights: r.lights, pmode: p.mode, lap: p.lapsDone, u: p.u, v: p.v, throttle: p.throttle, fuel: p.fuel, dropped: g.stepper ? g.stepper.dropped : null }; });
+const game = (page) => read(page, () => { const g = window.__game, r = g.race, p = r.car(window.__game.localId); return { screen: g.screen, mode: g.mode, view: g.view, track: g.T.DEF.id, phase: r.phase, raceTime: r.raceTime, t: r.t, lights: r.lights, pmode: p.mode, lap: p.lapsDone, u: p.u, v: p.v, throttle: p.throttle, fuel: p.fuel, dropped: g.stepper ? g.stepper.dropped : null }; });
 const waitFor = (page, fn, arg, timeout = 30000) => page.waitForFunction(fn, arg, { timeout, polling: 50 });
 /** wait for n more frames to be drawn */
 const frames = async (page, n = 3) => { const c = await read(page, () => window.__qa.rows.length); await waitFor(page, (m) => window.__qa.rows.length >= m, c + n); };
@@ -348,8 +348,8 @@ async function race(run, c) {
 
   await waitFor(page, () => window.__game.screen === 'results');
   const res = await read(page, () => {
-    const r = window.__game.race, p = r.player, rows = [...document.querySelectorAll('.card.results tbody tr')];
-    return { phase: r.phase, lapsDone: p.lapsDone, finished: p.finished, finishTime: p.finishTime, bestLap: p.bestLap, pitStops: p.pitStops, offences: p.offences, timePen: p.timePen, heading: document.querySelector('.card.results h2').textContent, place: document.querySelector('.card.results .place').textContent, rows: rows.map((x) => [...x.children].map((td) => td.textContent.trim()).join(' | ')), mine: document.querySelector('.card.results tr.me')?.textContent ?? '', board: window.__game.R.board('race', 'circuit-1').length, playerResult: r.results().find((x) => x.car.isPlayer).time, again: !!document.getElementById('o-again') };
+    const r = window.__game.race, p = r.car(window.__game.localId), rows = [...document.querySelectorAll('.card.results tbody tr')];
+    return { phase: r.phase, lapsDone: p.lapsDone, finished: p.finished, finishTime: p.finishTime, bestLap: p.bestLap, pitStops: p.pitStops, offences: p.offences, timePen: p.timePen, heading: document.querySelector('.card.results h2').textContent, place: document.querySelector('.card.results .place').textContent, rows: rows.map((x) => [...x.children].map((td) => td.textContent.trim()).join(' | ')), mine: document.querySelector('.card.results tr.me')?.textContent ?? '', board: window.__game.R.board('race', 'circuit-1').length, playerResult: r.results().find((x) => x.car.id === window.__game.localId).time, again: !!document.getElementById('o-again') };
   });
   await page.setViewportSize({ width: Math.max(run.viewport.width, 960), height: Math.max(run.viewport.height, 620) });
   await frames(page, 2);
@@ -416,7 +416,7 @@ async function routing(run, c) {
     g.applyTrack(x);
     g.startSession('race');
     g.advance(7);
-    const r = g.race, p = r.player;
+    const r = g.race, p = r.car(window.__game.localId);
     const sw = [...T.SWITCHES].sort((a, b) => T.ahead(a.s1, T.PIT_IN0) - T.ahead(b.s1, T.PIT_IN0))[0];
     const put = (car, u, side, v) => { car.u = u; car.laneSide = side; car.d = side * T.LANE_HALF; car.v = v; car.change = null; car.mode = 'race'; car.throttle = 0; car.graceT = 0; car.recoverT = 0; car.cutT = 0; car.pushedT = 0; };
     const u = p.crossed * T.L + T.wrapS(sw.s0 - 20);
@@ -450,13 +450,13 @@ async function routing(run, c) {
       c.ok('Fuel: a second Space restores automatic outside', (await chips()).includes(STRINGS['hud.routeOutsideMove']), await chips());
     }
     const entry = await driveUntil(s, (st) => st.mode === 'pitlane', held);
-    const inPit = await read(page, () => { const p = window.__game.race.player; return { pitReq: p.pitReq, override: p.laneOverride, moved: p.laneSide }; });
+    const inPit = await read(page, () => { const p = window.__game.race.car(window.__game.localId); return { pitReq: p.pitReq, override: p.laneOverride, moved: p.laneSide }; });
     c.ok(`${id}: routed outside from the inside lane and entered the pits with no lane key`, entry.mode === 'pitlane' && !inPit.pitReq && !inPit.override, { sw, ...inPit });
     if (!first) continue;
     await driveUntil(s, (st) => st.mode === 'service', held);
     const out = await driveUntil(s, (st) => st.mode === 'race', held);
     await frames(page, 3);
-    const after = await read(page, () => { const p = window.__game.race.player; return { pitReq: p.pitReq, fuel: p.fuel, pitStops: p.pitStops }; });
+    const after = await read(page, () => { const p = window.__game.race.car(window.__game.localId); return { pitReq: p.pitReq, fuel: p.fuel, pitStops: p.pitStops }; });
     c.ok('Fuel: serviced, rejoined and the request is over', out.mode === 'race' && !after.pitReq && after.fuel > 0.3 && after.pitStops >= 1, after);
     c.ok('Fuel: no route chip after the stop', !(await chips()).includes('PIT ROUTE'), await chips());
     await keys.release();
@@ -465,12 +465,12 @@ async function routing(run, c) {
   // stop-and-go: same routing with no P key
   await keys.release();
   await approach(ids[0]);
-  const due0 = await read(page, () => { const r = window.__game.race, p = r.player; p.fuel = 1; p.offences = 2; r.offence(p, r.cars[2], 'rear'); return p.sgDue; });
+  const due0 = await read(page, () => { const r = window.__game.race, p = r.car(window.__game.localId); p.fuel = 1; p.offences = 2; r.offence(p, r.cars[2], 'rear'); return p.sgDue; });
   await frames(page, 3);
   c.ok('Stop-and-go: award alone shows the automatic route', (await chips()).includes(STRINGS['hud.routeOutsideMove']) && (await chips()).includes(STRINGS['hud.sgChip']), await chips());
   await keys.tap('Space');
   await frames(page, 3);
-  const over = await read(page, () => { const p = window.__game.race.player; return { sgOwed: p.sgOwed, sgDue: p.sgDue, sgDeferred: p.sgDeferred, pitReq: p.pitReq, override: p.laneOverride }; });
+  const over = await read(page, () => { const p = window.__game.race.car(window.__game.localId); return { sgOwed: p.sgOwed, sgDue: p.sgDue, sgDeferred: p.sgDeferred, pitReq: p.pitReq, override: p.laneOverride }; });
   c.ok('Stop-and-go: override keeps the penalty and its deadline', over.override && over.pitReq && over.sgOwed === 3 && over.sgDue === due0 && !over.sgDeferred, over);
   await keys.tap('Space');
   await frames(page, 3);
@@ -478,7 +478,7 @@ async function routing(run, c) {
   const left = await driveUntil(s, (st) => st.mode === 'race', held);
   await keys.release();
   await frames(page, 3);
-  const end = await read(page, () => { const p = window.__game.race.player; return { timePen: p.timePen, sgOwed: p.sgOwed, pitReq: p.pitReq, penaltyOnly: p.pitPenaltyOnly }; });
+  const end = await read(page, () => { const p = window.__game.race.car(window.__game.localId); return { timePen: p.timePen, sgOwed: p.sgOwed, pitReq: p.pitReq, penaltyOnly: p.pitPenaltyOnly }; });
   c.evidence.stopAndGo = await read(page, () => window.__qa.log.filter((e) => ['pitReq', 'lane', 'mode', 'toast'].includes(e.key)).slice(-16).map((e) => `${e.raceTime.toFixed(1)} ${e.key}=${e.value}`));
   c.ok('Stop-and-go: routed in, served in the box, no time penalty, no stale request', served.mode === 'pitlane' && left.mode === 'race' && end.timePen === 0 && !end.pitReq && !end.penaltyOnly, end);
   return s;
@@ -499,7 +499,7 @@ async function controlled(run, c) {
   // de-slot: a real grip failure, entering the tightest corner flat out
   await keys.set('KeyW', true);
   const off = await read(page, () => {
-    const g = window.__game, T = g.T, r = g.race, p = r.player;
+    const g = window.__game, T = g.T, r = g.race, p = r.car(window.__game.localId);
     let s0 = 40, k = 0;
     for (let x = 40; x < T.L - 20; x += 0.5) if (Math.abs(T.curvature(x)) > k) { k = Math.abs(T.curvature(x)); s0 = x; }
     r.cars.forEach((x, i) => { if (i) window.__put(x, s0 + 40 + i * 8, 1, 0); });
@@ -511,8 +511,8 @@ async function controlled(run, c) {
   await frames(page, 2);
   c.ok('De-slot: overspeed left the slot and voided the lap', off.mode === 'off' && !off.lapValid, off);
   c.ok('De-slot message shown', (await toast(page)).startsWith(text('msg.deslot')));
-  await waitFor(page, () => window.__game.race.player.mode === 'race', undefined, 20000);
-  const back = await read(page, () => { const p = window.__game.race.player; return { u: p.u, recoverT: p.recoverT, graceT: p.graceT, v: p.v }; });
+  await waitFor(page, () => window.__game.race.car(window.__game.localId).mode === 'race', undefined, 20000);
+  const back = await read(page, () => { const p = window.__game.race.car(window.__game.localId); return { u: p.u, recoverT: p.recoverT, graceT: p.graceT, v: p.v }; });
   await frames(page, 2);
   c.ok('Recovery: marshal replaced the car behind the exit with grace', Math.abs(back.u - (off.u0 - 1.6)) < 0.5 && back.graceT > 0, back);
   c.ok('Recovery message shown', (await toast(page)).startsWith(text('msg.backOn')));
@@ -520,7 +520,7 @@ async function controlled(run, c) {
   // penalties: real contacts judged by the real collision code
   await setup();
   const hit = () => read(page, () => {
-    const g = window.__game, T = g.T, r = g.race, p = r.player, a = r.cars[2];
+    const g = window.__game, T = g.T, r = g.race, p = r.car(window.__game.localId), a = r.cars[2];
     const base = 40 + p.crossed * T.L;
     r.cars.forEach((x, i) => { if (i && x !== a) window.__put(x, base + 30 + i * 8, 1, 0); });
     window.__put(a, base, 1, 10);
@@ -540,18 +540,18 @@ async function controlled(run, c) {
   c.ok('Third contact issues a stop-and-go and arms the pit', h3.offences === 3 && h3.sgOwed === 3 && h3.pitReq, h3);
   c.ok('Stop-and-go chip shown on the HUD', (await page.locator('#h-chips').textContent()).includes(STRINGS['hud.sgChip']));
   // serve it with real keys, stopping in the box
-  await read(page, () => { const g = window.__game, T = g.T, r = g.race, p = r.player; r.cars.forEach((x, i) => { if (i) window.__put(x, (p.crossed + 1) * T.L + 60 + i * 8, 1, 0); }); window.__put(p, p.crossed * T.L + T.L - 10, -1, 8); p.pitReq = true; });
+  await read(page, () => { const g = window.__game, T = g.T, r = g.race, p = r.car(window.__game.localId); r.cars.forEach((x, i) => { if (i) window.__put(x, (p.crossed + 1) * T.L + 60 + i * 8, 1, 0); }); window.__put(p, p.crossed * T.L + T.L - 10, -1, 8); p.pitReq = true; });
   const served = await driveUntil(s, (st) => st.sgOwed === 0, { budgetMs: 40000 });
   await keys.release();
   await frames(page, 2);
-  const servedState = await read(page, () => { const p = window.__game.race.player; return { timePen: p.timePen, sgOwed: p.sgOwed, mode: p.mode }; });
+  const servedState = await read(page, () => { const p = window.__game.race.car(window.__game.localId); return { timePen: p.timePen, sgOwed: p.sgOwed, mode: p.mode }; });
   c.ok('Stop-and-go served in the box with no time penalty', served.mode === 'pitlane' && servedState.timePen === 0, servedState);
   c.ok('Served message shown', (await toast(page)).startsWith(text('msg.penServed')));
 
   // an unserved stop disqualifies at the flag, on the real results screen
   await hit();
   const finish = await read(page, () => {
-    const g = window.__game, T = g.T, r = g.race, p = r.player;
+    const g = window.__game, T = g.T, r = g.race, p = r.car(window.__game.localId);
     const owed = p.sgOwed;
     window.__put(p, T.FINISH_S + 13 * T.L - 3, -1, 16);
     p.crossed = 13; p.lapsDone = 12; p.sectors = 7;
@@ -561,18 +561,18 @@ async function controlled(run, c) {
   await read(page, () => window.__game.advance(5));
   await keys.release();
   await waitFor(page, () => window.__game.screen === 'results');
-  const res = await read(page, () => { const r = window.__game.race, p = r.player; const mine = r.results().find((x) => x.car.isPlayer); return { timePen: p.timePen, status: mine.status, reason: p.dqReason, est: r.results().some((x) => x.est), row: document.querySelector('.card.results tr.me').textContent, place: document.querySelector('.card.results .place').textContent, title: document.querySelector('.card.results h2').textContent }; });
+  const res = await read(page, () => { const r = window.__game.race, p = r.car(window.__game.localId); const mine = r.results().find((x) => x.car.id === window.__game.localId); return { timePen: p.timePen, status: mine.status, reason: p.dqReason, est: r.results().some((x) => x.est), row: document.querySelector('.card.results tr.me').textContent, place: document.querySelector('.card.results .place').textContent, title: document.querySelector('.card.results h2').textContent }; });
   c.ok('Unserved stop disqualifies at the flag: DQ row and reason on the results screen, no time penalty, no estimate', finish.owed === 3 && res.status === 'dq' && res.reason === 'stopGo' && res.timePen === 0 && !res.est && res.row.includes(STRINGS['res.dq']) && res.place.startsWith(STRINGS['res.youDq']) && !res.title.includes('🏆'), res);
 
   // lifecycle. Blur and hidden are synthetic events here: headless pages cannot really lose focus
   await setup();
   await keys.set('KeyW', true);
-  await waitFor(page, () => window.__game.race.player.throttle > 0.9);
+  await waitFor(page, () => window.__game.race.car(window.__game.localId).throttle > 0.9);
   await read(page, () => window.dispatchEvent(new Event('blur')));
   const blurred = await game(page);
   await page.click('#o-resume');
   // settling takes about 0.12 s of race time however many frames that is. Bounded in race time, so a throttle that never falls reaches the check below instead of a timeout
-  await waitFor(page, (until) => { const g = window.__game, r = g.race; return g.screen !== 'race' || r.player.throttle < 0.05 || r.raceTime >= until; }, blurred.raceTime + 0.5);
+  await waitFor(page, (until) => { const g = window.__game, r = g.race; return g.screen !== 'race' || r.car(window.__game.localId).throttle < 0.05 || r.raceTime >= until; }, blurred.raceTime + 0.5);
   const afterBlur = await game(page);
   await keys.release();
   c.ok('Blur (synthetic) pauses and clears held keys', blurred.screen === 'pause' && afterBlur.screen === 'race' && afterBlur.throttle < 0.05, { blurred: blurred.screen, throttleAfterResume: afterBlur.throttle });
@@ -664,7 +664,7 @@ async function practice(run, c) {
 
   // a de-slot voids the lap: no record, no new ghost
   const before = await read(page, (k) => ({ pb: window.__game.pbMs, board: window.__game.R.board('practice', 'circuit-1').length, ghost: localStorage.getItem(k) }), key);
-  await read(page, () => { const r = window.__game.race; r.deslot(r.player); });
+  await read(page, () => { const r = window.__game.race; r.deslot(r.car(window.__game.localId)); });
   const lapNow = (await game(page)).lap;
   await driveUntil(s, (st) => st.lap > lapNow, { budgetMs: 60000, opts });
   await frames(page, 2);
@@ -705,7 +705,7 @@ async function championship(run, c) {
   c.ok('Continue loads the third championship circuit', g.mode === 'champ' && g.track === 'circuit-4' && g.screen === 'race', { mode: g.mode, track: g.track });
 
   await read(page, () => {
-    const gm = window.__game, T = gm.T, r = gm.race, p = r.player;
+    const gm = window.__game, T = gm.T, r = gm.race, p = r.car(window.__game.localId);
     gm.advance(7);
     r.cars.forEach((x, i) => { if (i) x.u += 40 + i * 8; });
     p.u = T.FINISH_S + 13 * T.L - 3; p.crossed = 13; p.lapsDone = 12; p.sectors = 7; p.v = 16; p.mode = 'race';
@@ -785,9 +785,9 @@ async function touch(run, c) {
   const padShown = (page) => read(page, () => ({ body: document.body.classList.contains('touch'), pad: !document.getElementById('t-pad').hidden }));
   const radio = (page) => read(page, () => document.querySelector('[data-touch][aria-checked="true"]').dataset.touch);
   /** count every call the race receives, so a double dispatch cannot hide behind a toggle */
-  const countActions = (page) => read(page, () => { const r = window.__game.race, n = (window.__qa.actions = { lane: 0, pit: 0, armed: [] }); for (const [m, k] of [['requestLane', 'lane'], ['requestPit', 'pit']]) { const f = r[m].bind(r); r[m] = () => { n[k]++; f(); if (k === 'lane') n.armed.push(r.player.laneReq); }; } });
+  const countActions = (page) => read(page, () => { const r = window.__game.race, n = (window.__qa.actions = { lane: 0, pit: 0, armed: [] }); for (const [m, k] of [['requestLane', 'lane'], ['requestPit', 'pit']]) { const f = r[m].bind(r); r[m] = (...a) => { n[k]++; f(...a); if (k === 'lane') n.armed.push(r.car(window.__game.localId).laneReq); }; } });
   const actions = (page) => read(page, () => window.__qa.actions);
-  const state = (page) => read(page, () => { const r = window.__game.race, p = r.player, cue = (x) => document.getElementById(x); return { laneReq: p.laneReq, pitReq: p.pitReq, only: p.pitPenaltyOnly, override: p.laneOverride, route: r.nextRoute(p), laneCue: cue('t-lane').dataset.cue, pitCue: cue('t-pit').dataset.cue, laneText: cue('t-lane-cue').textContent, pitText: cue('t-pit-cue').textContent, chips: cue('h-chips').textContent }; });
+  const state = (page) => read(page, () => { const r = window.__game.race, p = r.car(window.__game.localId), cue = (x) => document.getElementById(x); return { laneReq: p.laneReq, pitReq: p.pitReq, only: p.pitPenaltyOnly, override: p.laneOverride, route: r.nextRoute(p), laneCue: cue('t-lane').dataset.cue, pitCue: cue('t-pit').dataset.cue, laneText: cue('t-lane-cue').textContent, pitText: cue('t-pit-cue').textContent, chips: cue('h-chips').textContent }; });
 
   // ---- desktop: no touch hardware, mouse and keyboard
   const d = await open(run);
@@ -815,7 +815,7 @@ async function touch(run, c) {
     c.ok('Touch Off: the pad is hidden and W holds throttle', (await held(page)).throttle && !(await padShown(page)).pad);
     await keys.tap('Space');
     await keys.tap('KeyP');
-    const kb = await read(page, () => { const p = window.__game.race.player; return { pitReq: p.pitReq, laneReq: p.laneReq }; });
+    const kb = await read(page, () => { const p = window.__game.race.car(window.__game.localId); return { pitReq: p.pitReq, laneReq: p.laneReq }; });
     await keys.set('KeyW', false);
     c.ok('Touch Off: Space and P still reach the race and W releases', kb.pitReq && !(await held(page)).throttle, kb);
 
@@ -913,11 +913,11 @@ async function touch(run, c) {
   c.ok('Touch: audio initialised by the tap on Start', audio !== null, audio);
 
   const thr = await f.put('#t-throttle');
-  await waitFor(page, () => window.__game.race.player.throttle > 0.5);
+  await waitFor(page, () => window.__game.race.car(window.__game.localId).throttle > 0.5);
   const h1 = await held(page);
   c.ok('Throttle: holds, shows pressed, and has pointer capture', h1.throttle && h1.throttleDown && await read(page, () => { const e = document.getElementById('t-throttle'); return [...window.__qa.pointerIds].some((i) => e.hasPointerCapture(i)); }), h1);
   await page.screenshot({ path: path.join(run.out, 'touch-pressed-phone.png') });
-  await waitFor(page, () => window.__game.race.phase === 'racing' && window.__game.race.player.v > 3);
+  await waitFor(page, () => window.__game.race.phase === 'racing' && window.__game.race.car(window.__game.localId).v > 3);
   await countActions(page);
   await f.tap('#t-lane');
   await frames(page, 2);
@@ -970,7 +970,7 @@ async function touch(run, c) {
   await page.keyboard.press('Escape');
   await waitFor(page, () => window.__game.screen === 'race');
   const now = await game(page);
-  await waitFor(page, (until) => { const r = window.__game.race; return r.player.throttle < 0.05 || r.raceTime >= until; }, now.raceTime + 0.5);
+  await waitFor(page, (until) => { const r = window.__game.race; return r.car(window.__game.localId).throttle < 0.05 || r.raceTime >= until; }, now.raceTime + 0.5);
   const after = await game(page);
   await f.lift(pause1);
   c.ok('Resume with the old finger still down gives no throttle', after.throttle < 0.05 && clear(await held(page)), { throttle: after.throttle });
@@ -1015,7 +1015,7 @@ async function touch(run, c) {
     const g = window.__game, T = g.T;
     g.startSession('race');
     g.advance(7);
-    const r = g.race, p = r.player;
+    const r = g.race, p = r.car(window.__game.localId);
     const sw = [...T.SWITCHES].sort((a, b) => T.ahead(a.s1, T.PIT_IN0) - T.ahead(b.s1, T.PIT_IN0))[0];
     const put = (car, u, side, v) => { car.u = u; car.laneSide = side; car.d = side * T.LANE_HALF; car.v = v; car.change = null; car.mode = 'race'; car.throttle = 0; car.graceT = 0; car.recoverT = 0; car.cutT = 0; car.pushedT = 0; };
     const u = p.crossed * T.L + T.wrapS(sw.s0 - 20);
@@ -1041,7 +1041,7 @@ async function touch(run, c) {
   c.ok('Pit, override, restore, cancel: touch and keyboard give the same states', JSON.stringify(byTouch) === JSON.stringify(byKey) && byTouch[1].lane === 'override', byTouch.map((x) => `${x.pitCue}/${x.lane}`));
 
   await placed();
-  await read(page, () => { const r = window.__game.race, p = r.player; p.fuel = 1; p.offences = 2; r.offence(p, r.cars[2], 'rear'); });
+  await read(page, () => { const r = window.__game.race, p = r.car(window.__game.localId); p.fuel = 1; p.offences = 2; r.offence(p, r.cars[2], 'rear'); });
   await frames(page, 2);
   const sg1 = await state(page);
   await f.tap('#t-pit');
@@ -1135,13 +1135,13 @@ async function touch(run, c) {
  * and emulated touch: functional coverage only.
  */
 async function service(run, c) {
-  const st = (page) => read(page, () => { const g = window.__game, r = g.race, p = r.player; return { fuelReq: p.fuelReq, fuelDue: p.fuelDue, sgOwed: p.sgOwed, sgDue: p.sgDue, sgDeferred: p.sgDeferred, hold: p.routeHold, appr: r.apprLap(p), pitReq: p.pitReq, route: !!r.nextRoute(p), mode: p.mode, breach: p.svcBreach, status: p.status, reason: p.dqReason, block: r.deferBlock(p), crossed: p.crossed, screen: g.screen, pitArrow: g.arrows.pit.visible, chips: document.getElementById('h-chips').textContent, status2: document.getElementById('h-status').textContent, toast: document.getElementById('h-toast').textContent, defer: !document.getElementById('t-defer').hidden, pitCue: document.getElementById('t-pit').dataset.cue, pitText: document.getElementById('t-pit-cue').textContent }; });
+  const st = (page) => read(page, () => { const g = window.__game, r = g.race, p = r.car(window.__game.localId); return { fuelReq: p.fuelReq, fuelDue: p.fuelDue, sgOwed: p.sgOwed, sgDue: p.sgDue, sgDeferred: p.sgDeferred, hold: p.routeHold, appr: r.apprLap(p), pitReq: p.pitReq, route: !!r.nextRoute(p), mode: p.mode, breach: p.svcBreach, status: p.status, reason: p.dqReason, block: r.deferBlock(p), crossed: p.crossed, screen: g.screen, pitArrow: g.arrows.pit.visible, chips: document.getElementById('h-chips').textContent, status2: document.getElementById('h-status').textContent, toast: document.getElementById('h-toast').textContent, defer: !document.getElementById('t-defer').hidden, pitCue: document.getElementById('t-pit').dataset.cue, pitText: document.getElementById('t-pit-cue').textContent }; });
   /** racing on lap `lap`, the player stopped on the outside lane `into` m past the line, rivals parked half a lap on (or by the line, `field`) */
   const setup = (page, o) => read(page, (x) => {
     const g = window.__game, T = g.T;
     if (g.screen !== 'race') g.startSession(g.mode === 'champ' ? 'champ' : 'race');
     if (g.race.phase === 'countdown') g.advance(7);
-    const r = g.race, p = r.player;
+    const r = g.race, p = r.car(window.__game.localId);
     const put = (car, u, side, v) => Object.assign(car, { u, hiU: u, laneSide: side, d: side * T.LANE_HALF, v, change: null, mode: 'race', throttle: 0, graceT: 0, recoverT: 0, cutT: 0, pushedT: 0, revMark: null });
     const into = x.into < 0 ? T.L + x.into : x.into; // negative: metres before the line that ends the lap
     const u = T.FINISH_S + (x.lap - 1) * T.L + into;
@@ -1150,7 +1150,7 @@ async function service(run, c) {
     put(p, u, -1, x.v ?? 0);
     r.squeezeQ.length = 0;
   }, o);
-  const award = (page) => read(page, () => { const r = window.__game.race, p = r.player; p.offences = 2; r.offence(p, r.cars[2], 'rear'); });
+  const award = (page) => read(page, () => { const r = window.__game.race, p = r.car(window.__game.localId); p.offences = 2; r.offence(p, r.cars[2], 'rear'); });
 
   // ---- keyboard
   const s = await open(run);
@@ -1181,9 +1181,9 @@ async function service(run, c) {
   await keys.tap('KeyN'); // release this approach again
   await frames(page, 2);
   // drive past the released entrance with real keys: no entry, then routing re-arms for the due lap
-  await read(page, () => { const g = window.__game, T = g.T, p = g.race.player; Object.assign(p, { u: 2 * T.L + T.L + T.PIT_IN0 - 6, v: 8 }); p.hiU = p.u; });
+  await read(page, () => { const g = window.__game, T = g.T, p = g.race.car(window.__game.localId); Object.assign(p, { u: 2 * T.L + T.L + T.PIT_IN0 - 6, v: 8 }); p.hiU = p.u; });
   await keys.set('KeyW', true);
-  await waitFor(page, () => { const g = window.__game, T = g.T, p = g.race.player; return p.u > 3 * T.L + T.PIT_IN0 + 2 || p.mode !== 'race'; }, undefined, 30000);
+  await waitFor(page, () => { const g = window.__game, T = g.T, p = g.race.car(window.__game.localId); return p.u > 3 * T.L + T.PIT_IN0 + 2 || p.mode !== 'race'; }, undefined, 30000);
   await keys.set('KeyW', false);
   await frames(page, 3);
   a = await st(page);
@@ -1191,7 +1191,7 @@ async function service(run, c) {
   // miss it on the due lap: the breach is latched at the line and shown at once
   await setup(page, { lap: due, into: -3, v: 12 });
   await keys.set('KeyW', true);
-  await waitFor(page, (n) => window.__game.race.player.crossed > n, due, 30000);
+  await waitFor(page, (n) => window.__game.race.car(window.__game.localId).crossed > n, due, 30000);
   await keys.set('KeyW', false);
   await frames(page, 3);
   a = await st(page);
@@ -1200,10 +1200,10 @@ async function service(run, c) {
   // the flag: DQ, results reached, no estimate anywhere
   await setup(page, { lap: LAPS, into: -3, v: 12, field: true });
   await keys.set('KeyW', true);
-  await waitFor(page, () => window.__game.race.player.finished, undefined, 30000);
+  await waitFor(page, () => window.__game.race.car(window.__game.localId).finished, undefined, 30000);
   await keys.set('KeyW', false);
   await waitFor(page, () => window.__game.screen === 'results', undefined, 30000);
-  const res = await read(page, () => { const r = window.__game.race; return { rows: r.results().map((x) => ({ s: x.status, est: x.est })), me: document.querySelector('.card.results tr.me').textContent, place: document.querySelector('.card.results .place').textContent, title: document.querySelector('.card.results h2').textContent, reason: r.player.dqReason }; });
+  const res = await read(page, () => { const r = window.__game.race; return { rows: r.results().map((x) => ({ s: x.status, est: x.est })), me: document.querySelector('.card.results tr.me').textContent, place: document.querySelector('.card.results .place').textContent, title: document.querySelector('.card.results h2').textContent, reason: r.car(window.__game.localId).dqReason }; });
   c.ok('Flag: DQ (missed deadline) on the real results screen, below the classified finishers, no trophy, no estimates', res.reason === 'deadline' && res.me.includes(STRINGS['res.dq']) && res.place.startsWith(STRINGS['res.youDq']) && !res.title.includes('🏆') && res.rows[res.rows.length - 1].s === 'dq' && res.rows.every((x) => !x.est && x.s !== 'running'), res);
   await page.screenshot({ path: path.join(run.out, 'service-dq-results.png') });
   await keys.tap('KeyR');
@@ -1222,7 +1222,7 @@ async function service(run, c) {
     await page.click('#o-champ-cont');
     await frames(page, 2);
     await setup(page, { lap: LAPS, into: -3, v: 12, field: true });
-    await read(page, () => { window.__game.race.player.svcBreach = 'stopGo'; });
+    await read(page, () => { window.__game.race.car(window.__game.localId).svcBreach = 'stopGo'; });
     await keys.set('KeyW', true);
     await waitFor(page, () => window.__game.screen === 'champ', undefined, 30000);
     await keys.release();
@@ -1264,7 +1264,7 @@ async function service(run, c) {
     // final lap with the box occupied: queue, no deferral
     await setup(page, { lap: LAPS, into: 60 });
     await read(page, () => { const g = window.__game, T = g.T, r = g.race, o = r.cars[3]; Object.assign(o, { mode: 'pitlane', u: (13 - 1) * T.L + T.PEN_S + T.L, v: 0 }); o.d = T.pitD(o.u); o.hiU = o.u; o.sgOwed = 3; o.sgDue = 13; o.sgDeferred = true; });
-    await read(page, () => { const p = window.__game.race.player; p.sgOwed = 0; p.sgDue = 0; p.sgDeferred = false; });
+    await read(page, () => { const p = window.__game.race.car(window.__game.localId); p.sgOwed = 0; p.sgDue = 0; p.sgDeferred = false; });
     await award(page);
     await frames(page, 3);
     a = await st(page);
@@ -1281,7 +1281,7 @@ const CONTROLS = ['t-throttle', 't-brake', 't-lane', 't-pit', 't-pause'];
 const held2 = (page) => read(page, () => { const i = window.__game.input; return { throttle: i.held('throttle'), brake: i.held('brake') }; });
 
 /** Worst case for the HUD: a stop-and-go owed on the pit route, low fuel, a time penalty and a long message at once. Layout only: the race is not played on from here. */
-const crowdHud = (page) => read(page, () => { const g = window.__game, p = g.race.player; p.fuel = 0.05; p.sgOwed = 5; p.sgDue = g.race.apprLap(p); p.fuelDue = p.sgDue + 1; p.svcBreach = 'fuel'; p.timePen = 10; p.pitReq = true; p.pitPenaltyOnly = true; p.laneOverride = true; p.finished = false; document.getElementById('h-toast').textContent = 'Second contact with Green Viper. One more and you serve a stop-and-go penalty'; document.getElementById('h-toast').className = 'toast show warn'; });
+const crowdHud = (page) => read(page, () => { const g = window.__game, p = g.race.car(window.__game.localId); p.fuel = 0.05; p.sgOwed = 5; p.sgDue = g.race.apprLap(p); p.fuelDue = p.sgDue + 1; p.svcBreach = 'fuel'; p.timePen = 10; p.pitReq = true; p.pitPenaltyOnly = true; p.laneOverride = true; p.finished = false; document.getElementById('h-toast').textContent = 'Second contact with Green Viper. One more and you serve a stop-and-go penalty'; document.getElementById('h-toast').className = 'toast show warn'; });
 
 /** Geometry of the racing HUD: what is on screen, what touches what, and how much of the track is left. */
 function measureHud(ids) {
@@ -1422,7 +1422,7 @@ async function responsive(run, c) {
       if (w === 360) await shot(page, 'race-tray-360x640');
       await f.tap('#b-more');
     }
-    await read(page, () => { const p = window.__game.race.player; p.fuel = 1; p.sgOwed = 0; p.sgDue = 0; p.fuelDue = 0; p.svcBreach = null; p.timePen = 0; p.pitReq = false; p.pitPenaltyOnly = false; p.laneOverride = false; document.getElementById('h-toast').className = 'toast'; });
+    await read(page, () => { const p = window.__game.race.car(window.__game.localId); p.fuel = 1; p.sgOwed = 0; p.sgDue = 0; p.fuelDue = 0; p.svcBreach = null; p.timePen = 0; p.pitReq = false; p.pitPenaltyOnly = false; p.laneOverride = false; document.getElementById('h-toast').className = 'toast'; });
   }
 
   // tray actions with a finger already down
@@ -1491,7 +1491,7 @@ async function responsive(run, c) {
   await page.locator('#o-resume').tap();
   await waitFor(page, () => window.__game.screen === 'race');
   await frames(page, 2);
-  c.ok('Resume tap does not leak into a driving action', !(await held2(page)).throttle && !(await held2(page)).brake && await read(page, () => !window.__game.race.player.pitReq && !window.__game.race.player.laneReq));
+  c.ok('Resume tap does not leak into a driving action', !(await held2(page)).throttle && !(await held2(page)).brake && await read(page, () => !window.__game.race.car(window.__game.localId).pitReq && !window.__game.race.car(window.__game.localId).laneReq));
 
   // results and championship
   await read(page, () => { window.__game.race.phase = 'done'; });
@@ -1502,7 +1502,9 @@ async function responsive(run, c) {
   await waitFor(page, () => window.__game.screen === 'title');
   await page.locator('#o-champ-cont').tap();
   await waitFor(page, () => window.__game.screen === 'race' && window.__game.mode === 'champ');
-  await read(page, () => { const g = window.__game; g.race.phase = 'done'; });
+  // end the round for real: every car terminally classified, then the race closes and freezes its final standings (a
+  // championship only records race.final, never a live order)
+  await read(page, () => { const r = window.__game.race; r.classifyRunning('timeout'); r.humansDoneT = r.t - 4; });
   await waitFor(page, () => window.__game.screen === 'champ');
   await menus('championship');
   await size(page, 360, 640);
@@ -1641,7 +1643,7 @@ async function touchrace(run, c) {
   await frames(page, 2);
   const m = await read(page, measureMenu);
   await page.screenshot({ path: path.join(run.out, 'touchrace-results.png') });
-  const res = await read(page, () => { const r = window.__game.race, p = r.player; return { stops: p.pitStops, lap: p.lapsDone, rows: document.querySelectorAll('.card.results tbody tr').length, place: document.querySelector('.place').textContent, time: p.finishTime }; });
+  const res = await read(page, () => { const r = window.__game.race, p = r.car(window.__game.localId); return { stops: p.pitStops, lap: p.lapsDone, rows: document.querySelectorAll('.card.results tbody tr').length, place: document.querySelector('.place').textContent, time: p.finishTime }; });
   const { log } = await capture(page);
   const modes = log.filter((e) => e.key === 'mode').map((e) => e.value);
   c.ok('Touch race: fuel stop entered, served and left, in order', ['pitlane', 'bayIn', 'service', 'bayOut', 'pitlane', 'race'].every((x, i, a) => modes.join().includes(a.slice(0, i + 1).join())) && res.stops >= 1, { stops: res.stops, modes: modes.slice(0, 10) });
@@ -1662,13 +1664,13 @@ async function reverse(run, c) {
     const g = window.__game, T = g.T;
     if (g.screen !== 'race') g.startSession('race');
     if (g.race.phase === 'countdown') g.advance(7);
-    const r = g.race, p = r.player;
+    const r = g.race, p = r.car(window.__game.localId);
     r.cars.forEach((o2, i) => { if (i) { o2.u = p.u + T.L / 2 + i * 8; o2.laneSide = 1; o2.d = T.LANE_HALF; o2.mode = 'race'; o2.change = null; } });
     r.squeezeQ.length = 0;
     Object.assign(p, { u: o.s, v: 0, change: null, laneSide: -1, mode: o.pit ? 'pitlane' : 'race', d: o.pit ? T.pitD(o.s) : -T.LANE_HALF, throttle: 0, revMark: null, serviced: false, fuel: o.fuel ?? 1, sgOwed: o.sgOwed ?? 0, sgDue: o.sgOwed ? 99 : 0, sgServed: 0, sgServing: false, sgLeave: false, sgCommit: -1, sgCtl: false, sgPhase: null, pitFuel: false });
     if (o.sgOwed) { p.pitReq = true; p.pitPenaltyOnly = true; }
   }, x);
-  const P = (page) => read(page, () => { const g = window.__game, r = g.race, p = r.player, T = g.T; return { s: T.wrapS(p.u), v: p.v, revOn: p.revOn, latch: p.revLatch, mode: p.mode, sgOwed: p.sgOwed, sgServing: p.sgServing, timePen: p.timePen, bay: p.bay, pitStops: p.pitStops, screen: g.screen, chips: document.getElementById('h-chips').textContent, brakeCue: document.getElementById('t-brake').dataset.cue, brakeText: document.getElementById('t-brake-cue').textContent }; });
+  const P = (page) => read(page, () => { const g = window.__game, r = g.race, p = r.car(window.__game.localId), T = g.T; return { s: T.wrapS(p.u), v: p.v, revOn: p.revOn, latch: p.revLatch, mode: p.mode, sgOwed: p.sgOwed, sgServing: p.sgServing, timePen: p.timePen, bay: p.bay, pitStops: p.pitStops, screen: g.screen, chips: document.getElementById('h-chips').textContent, brakeCue: document.getElementById('t-brake').dataset.cue, brakeText: document.getElementById('t-brake-cue').textContent }; });
 
   // ---- keyboard
   const s = await open(run);
@@ -1678,17 +1680,17 @@ async function reverse(run, c) {
   // slow software frames can reach the box between two reads, so the chip is watched as it changes
   await read(page, (label) => { const el = document.getElementById('h-chips'); window.__qa.revChip = false; new MutationObserver(() => { if (el.textContent.includes(label)) window.__qa.revChip = true; }).observe(el, { childList: true, subtree: true, characterData: true }); }, STRINGS['hud.reverse']);
   await keys.set('ArrowDown', true);
-  await waitFor(page, () => window.__game.race.player.revOn || window.__game.race.player.sgServing, null, 10000);
+  await waitFor(page, () => window.__game.race.car(window.__game.localId).revOn || window.__game.race.car(window.__game.localId).sgServing, null, 10000);
   await frames(page, 2);
   const backing = { ...(await P(page)), chipSeen: await read(page, () => window.__qa.revChip) };
   c.ok('Keyboard: holding Brake at a standstill engages reverse and the HUD shows it', backing.chipSeen && backing.s < T0.PEN_S + T0.PEN_HALF + 0.4, backing);
   await page.screenshot({ path: path.join(run.out, 'reverse-hud.png') });
-  await waitFor(page, () => window.__game.race.player.sgServing, null, 15000);
+  await waitFor(page, () => window.__game.race.car(window.__game.localId).sgServing, null, 15000);
   const serving = await P(page);
-  await read(page, () => { clearInterval(window.__qa.revMinT); window.__qa.revMinV = 0; window.__qa.revMinT = setInterval(() => { window.__qa.revMinV = Math.min(window.__qa.revMinV, window.__game.race.player.v); }, 5); });
-  await waitFor(page, () => window.__game.race.player.sgOwed === 0, null, 20000);
+  await read(page, () => { clearInterval(window.__qa.revMinT); window.__qa.revMinV = 0; window.__qa.revMinT = setInterval(() => { window.__qa.revMinV = Math.min(window.__qa.revMinV, window.__game.race.car(window.__game.localId).v); }, 5); });
+  await waitFor(page, () => window.__game.race.car(window.__game.localId).sgOwed === 0, null, 20000);
   // automatic stop-and-go (docs/auto-stop-go.md): the penalty-only visit is then driven to the pit exit with Brake still held
-  await waitFor(page, () => window.__game.race.player.mode === 'race', null, 20000).catch(() => null);
+  await waitFor(page, () => window.__game.race.car(window.__game.localId).mode === 'race', null, 20000).catch(() => null);
   await sleep(1200);
   const after = { ...(await P(page)), minV: await read(page, () => window.__qa.revMinV) };
   c.ok('Box: backing up with Brake held stops in the box and serves the full stop', Math.abs(serving.s - T0.PEN_S) < T0.PEN_HALF && after.sgOwed === 0 && after.timePen === 0, { serving, after });
@@ -1699,15 +1701,15 @@ async function reverse(run, c) {
   await frames(page, 2);
   await keys.set('ArrowDown', true);
   // released on reaching the bay's far edge: a key lands a few slow software frames after the read that chose it
-  await waitFor(page, (b) => { const g = window.__game, p = g.race.player; return g.T.gapS(b, g.T.wrapS(p.u)) < 0.9; }, T0.BAY0, 15000);
+  await waitFor(page, (b) => { const g = window.__game, p = g.race.car(window.__game.localId); return g.T.gapS(b, g.T.wrapS(p.u)) < 0.9; }, T0.BAY0, 15000);
   await keys.set('ArrowDown', false);
-  await waitFor(page, () => ['bayIn', 'service'].includes(window.__game.race.player.mode), null, 10000).catch(() => null);
+  await waitFor(page, () => ['bayIn', 'service'].includes(window.__game.race.car(window.__game.localId).mode), null, 10000).catch(() => null);
   const bay = await P(page);
   c.ok('Bay: back past its own overshot bay, release, and the bay is captured for refuelling', ['bayIn', 'service'].includes(bay.mode) && bay.bay === 0 && bay.pitStops === 1, bay);
 
   await setup(page, { s: 120 });
   await keys.set('ArrowDown', true);
-  await waitFor(page, () => window.__game.race.player.v < -1, null, 10000);
+  await waitFor(page, () => window.__game.race.car(window.__game.localId).v < -1, null, 10000);
   await read(page, () => window.dispatchEvent(new Event('blur')));
   await frames(page, 2);
   const paused = await P(page);
@@ -1724,7 +1726,7 @@ async function reverse(run, c) {
   await setup(t.page, { s: 120 });
   await frames(t.page, 3);
   const id = await f.put('#t-brake');
-  await waitFor(t.page, () => window.__game.race.player.v < -1, null, 10000);
+  await waitFor(t.page, () => window.__game.race.car(window.__game.localId).v < -1, null, 10000);
   await frames(t.page, 2);
   const tb = await P(t.page);
   c.ok('Touch: holding the Brake button engages reverse, and the button shows R', tb.revOn && tb.brakeCue === 'reverse' && tb.brakeText === STRINGS['touch.brake.reverse'], tb);
@@ -1741,13 +1743,13 @@ async function reverse(run, c) {
 
 /** Shared pit queue HUD and holds. Scripted placement, then real keys and emulated touch: functional diagnostics only. */
 async function queue(run, c) {
-  const st = (page) => read(page, () => { const g = window.__game, r = g.race, p = r.player, T = g.T; return { mode: p.mode, s: +T.wrapS(p.u).toFixed(2), v: +p.v.toFixed(3), wait: p.pitWait, hold: p.pitHold, revOn: p.revOn, latch: p.revLatch, exitReq: p.exitReq, serviced: p.serviced, offences: (window.__qa.scene ?? []).reduce((n, i) => n + r.cars[i].offences, 0), chips: document.getElementById('h-chips').textContent, status: document.getElementById('h-status').textContent, brakeCue: document.getElementById('t-brake').dataset.cue, brakeText: document.getElementById('t-brake-cue').textContent, minV: window.__qa.minV, minGap: window.__qa.minGap, seen: window.__qa.seen, inputs: window.__qa.inputs.join(' '), merges: r.pit.log.filter((e) => e.car === p.idx && e.zone.startsWith('merge')).map((e) => `${e.op}${e.why ? ':' + e.why : ''}`) }; });
+  const st = (page) => read(page, () => { const g = window.__game, r = g.race, p = r.car(window.__game.localId), T = g.T; return { mode: p.mode, s: +T.wrapS(p.u).toFixed(2), v: +p.v.toFixed(3), wait: p.pitWait, hold: p.pitHold, revOn: p.revOn, latch: p.revLatch, exitReq: p.exitReq, serviced: p.serviced, offences: (window.__qa.scene ?? []).reduce((n, i) => n + r.cars[i].offences, 0), chips: document.getElementById('h-chips').textContent, status: document.getElementById('h-status').textContent, brakeCue: document.getElementById('t-brake').dataset.cue, brakeText: document.getElementById('t-brake-cue').textContent, minV: window.__qa.minV, minGap: window.__qa.minGap, seen: window.__qa.seen, inputs: window.__qa.inputs.join(' '), merges: r.pit.log.filter((e) => e.car === p.idx && e.zone.startsWith('merge')).map((e) => `${e.op}${e.why ? ':' + e.why : ''}`) }; });
   /** lap 3 under way, every car placed by script: listed cars where given, the rest parked half a lap on; AI cars in `hold` keep their brakes on */
   const setup = (page, o) => read(page, (x) => {
     const g = window.__game, T = g.T, L = 3;
     if (g.screen !== 'race') g.startSession('race');
     if (g.race.phase === 'countdown') g.advance(7);
-    const r = g.race, p = r.player;
+    const r = g.race, p = r.car(window.__game.localId);
     if (!r.__ai) { const ai = r.ai.bind(r); r.__ai = ai; r.ai = (car, dt) => ((window.__qa.holdAI ?? []).includes(car.idx) ? { t: 0, b: 1 } : ai(car, dt)); }
     window.__qa.holdAI = x.hold ?? [];
     r.pit = new r.pit.constructor(r);
@@ -1770,7 +1772,7 @@ async function queue(run, c) {
     }
     clearInterval(window.__qa.qT);
     window.__qa.qT = setInterval(() => {
-      const rr = window.__game.race, pp = rr.player;
+      const rr = window.__game.race, pp = rr.car(window.__game.localId);
       window.__qa.minV = Math.min(window.__qa.minV, pp.v);
       const ik = `${window.__game.input.held('throttle') ? 'T' : '-'}${window.__game.input.held('brake') ? 'B' : '-'}${pp.pitHold ? 'H' : '-'}${pp.mode[0]}`;
       if (window.__qa.inputs.at(-1)?.split('@')[0] !== ik) window.__qa.inputs.push(`${ik}@${T.wrapS(pp.u).toFixed(1)}`);
@@ -1788,7 +1790,7 @@ async function queue(run, c) {
   // Queued: an AI car serves in the box; the player arrives on Throttle alone and is held behind it
   await setup(page, { cars: [{ i: 1, s: G.PEN_S, sg: 6 }, { i: 0, s: G.PIT_IN0 + 1.5, v: 6 }] });
   await keys.set('KeyW', true);
-  await waitFor(page, () => window.__game.race.player.pitWait === 'queued', null, 15000);
+  await waitFor(page, () => window.__game.race.car(window.__game.localId).pitWait === 'queued', null, 15000);
   await frames(page, 3);
   let a = await st(page);
   c.ok('Keyboard: Throttle alone joins the box queue; HUD shows Queued with its reason', a.wait === 'queued' && a.chips.includes(STRINGS['hud.qQueued']) && a.status.includes(text('hud.qQueuedLine')) && a.v < 0.1 && ok(a), a);
@@ -1797,14 +1799,14 @@ async function queue(run, c) {
   await keys.set('KeyW', false);
   await keys.set('ArrowDown', true);
   await read(page, () => { window.__qa.minV = 0; });
-  await waitFor(page, () => { const r = window.__game.race; return r.cars[1].sgOwed === 0 && !r.player.pitHold; }, null, 20000);
+  await waitFor(page, () => { const r = window.__game.race; return r.cars[1].sgOwed === 0 && !r.car(window.__game.localId).pitHold; }, null, 20000);
   await sleep(1500);
   const held = await st(page);
   c.ok('Keyboard: Brake held through the queue and its release never arms reverse', held.minV >= 0 && !held.revOn && held.latch && ok(held), held);
   await keys.set('ArrowDown', false);
   await frames(page, 2);
   await keys.set('ArrowDown', true);
-  await waitFor(page, () => window.__game.race.player.revOn, null, 10000).catch(() => null);
+  await waitFor(page, () => window.__game.race.car(window.__game.localId).revOn, null, 10000).catch(() => null);
   const fresh = await st(page);
   c.ok('Keyboard: a fresh Brake press after the hold is deliberate reverse again', fresh.revOn, fresh);
   await keys.set('ArrowDown', false);
@@ -1812,8 +1814,8 @@ async function queue(run, c) {
   // Waiting for bay: a car pulls out of bay 2 just ahead of the player (already refuelled, driving out), who is held clear of its merge
   await setup(page, { cars: [{ i: 2, s: G.BAYS[2], bay: 2, leave: true }, { i: 0, s: G.BAYS[2] - 2, serviced: true }] });
   await keys.set('KeyW', true);
-  await waitFor(page, () => window.__qa.seen['WAITING FOR BAY'] || window.__game.race.player.mode !== 'pitlane', null, 15000).catch(() => null);
-  await waitFor(page, () => { const g = window.__game; return g.T.gapS(g.T.wrapS(g.race.player.u), g.T.BAYS[3]) < 0; }, null, 15000).catch(() => null);
+  await waitFor(page, () => window.__qa.seen['WAITING FOR BAY'] || window.__game.race.car(window.__game.localId).mode !== 'pitlane', null, 15000).catch(() => null);
+  await waitFor(page, () => { const g = window.__game; return g.T.gapS(g.T.wrapS(g.race.car(window.__game.localId).u), g.T.BAYS[3]) < 0; }, null, 15000).catch(() => null);
   a = await st(page);
   await keys.set('KeyW', false);
   c.ok('Keyboard: a departing bay car holds the through lane; HUD shows Waiting for bay, no contact', a.seen[STRINGS['hud.qBay']] === true && ok(a), a);
@@ -1827,19 +1829,19 @@ async function queue(run, c) {
   c.ok('Keyboard: an exit request waits in the bay; HUD shows Waiting for clear exit', a.mode === 'service' && a.exitReq && a.wait === 'exit' && a.chips.includes(STRINGS['hud.qExit']) && a.status.includes(text('hud.waitClear')), a);
   await page.screenshot({ path: path.join(run.out, 'queue-exit-bay.png') });
   await read(page, () => { window.__qa.holdAI = []; });
-  await waitFor(page, () => { const p = window.__game.race.player; return p.mode === 'pitlane' && p.serviced; }, null, 15000).catch(() => null);
+  await waitFor(page, () => { const p = window.__game.race.car(window.__game.localId); return p.mode === 'pitlane' && p.serviced; }, null, 15000).catch(() => null);
   a = await st(page);
   c.ok('Keyboard: the bay exit completes exactly once, with no second press', a.mode === 'pitlane' && a.serviced && a.merges.join() === 'grant,release:done' && ok(a), a);
 
   // the pit exit: a car standing in the outside lane at the merge holds the pit car at the line
   await setup(page, { cars: [{ i: 0, s: G.PIT_OUT0 - 3, v: 6 }, { i: 3, s: G.PIT_OUT1 + 1, mode: 'race' }], hold: [3] });
   await keys.set('KeyW', true);
-  await waitFor(page, () => window.__game.race.player.pitWait === 'exit', null, 15000).catch(() => null);
+  await waitFor(page, () => window.__game.race.car(window.__game.localId).pitWait === 'exit', null, 15000).catch(() => null);
   await frames(page, 3);
   a = await st(page);
   c.ok('Keyboard: stationary traffic at the pit exit; HUD shows Waiting for clear exit and the car waits at the line', a.wait === 'exit' && a.mode === 'pitlane' && a.s < G.PIT_OUT0 && a.chips.includes(STRINGS['hud.qExit']), a);
   await read(page, () => { window.__qa.holdAI = []; });
-  await waitFor(page, () => window.__game.race.player.mode === 'race', null, 15000).catch(() => null);
+  await waitFor(page, () => window.__game.race.car(window.__game.localId).mode === 'race', null, 15000).catch(() => null);
   a = await st(page);
   await keys.set('KeyW', false);
   c.ok('Keyboard: the merge goes once the outside lane clears, with no contact', a.mode === 'race' && ok(a), a);
@@ -1853,7 +1855,7 @@ async function queue(run, c) {
   // a longer stop in the box: emulated touches land several slow software frames apart
   await setup(t.page, { cars: [{ i: 1, s: G.PEN_S, sg: 15 }, { i: 0, s: G.PIT_IN0 + 1.5, v: 6 }] });
   const thr = await f.put('#t-throttle');
-  await waitFor(t.page, () => window.__game.race.player.pitWait === 'queued', null, 15000).catch(() => null);
+  await waitFor(t.page, () => window.__game.race.car(window.__game.localId).pitWait === 'queued', null, 15000).catch(() => null);
   await frames(t.page, 3);
   const tq = await st(t.page);
   await f.lift(thr);
@@ -1861,7 +1863,7 @@ async function queue(run, c) {
   await read(t.page, () => { window.__qa.minV = 0; });
   c.ok('Touch: Throttle alone joins the queue; chips show Queued and Brake says reverse is off', tq.wait === 'queued' && tq.chips.includes(STRINGS['hud.qQueued']) && tq.brakeCue === 'held' && tq.brakeText === STRINGS['touch.brake.held'], tq);
   await t.page.screenshot({ path: path.join(run.out, 'queue-touch.png') });
-  await waitFor(t.page, () => { const r = window.__game.race; return r.cars[1].sgOwed === 0 && !r.player.pitHold; }, null, 60000).catch(() => null);
+  await waitFor(t.page, () => { const r = window.__game.race; return r.cars[1].sgOwed === 0 && !r.car(window.__game.localId).pitHold; }, null, 60000).catch(() => null);
   await sleep(1500);
   const tb = await st(t.page);
   c.ok('Touch: holding Brake through the queue and its release never reverses', tb.minV >= 0 && !tb.revOn && tb.latch && tb.mode === 'pitlane' && tb.inputs.split(' ').some((e) => e.startsWith('-BH')) && ok(tb), tb);
@@ -1879,7 +1881,7 @@ async function autosg(run, c) {
   const PH = ['armed', 'entry', 'queued', 'serving', 'leaving', 'deferred'];
   const LABEL = Object.fromEntries(PH.map((k) => [k, text(`hud.sgA.${k}`)]));
   const st = (page) => read(page, () => {
-    const g = window.__game, r = g.race, p = r.player, T = g.T, q = window.__qa;
+    const g = window.__game, r = g.race, p = r.car(window.__game.localId), T = g.T, q = window.__qa;
     return { screen: g.screen, mode: p.mode, s: +T.wrapS(p.u).toFixed(2), v: +p.v.toFixed(3), phase: p.sgPhase, ctl: p.sgCtl, owed: p.sgOwed, served: +p.sgServed.toFixed(2), due: p.sgDue, deferred: p.sgDeferred, box: r.pit.box,
       bayGrants: r.pit.log.filter((e) => e.car === p.idx && e.zone.startsWith('bay') && e.op === 'grant').length, boxGrants: r.pit.log.filter((e) => e.car === p.idx && e.zone === 'box' && e.op === 'grant').length,
       revOn: p.revOn, latch: p.revLatch, fuel: +p.fuel.toFixed(4), offences: r.cars.reduce((n, x) => n + x.offences, 0) - q.off0,
@@ -1892,7 +1894,7 @@ async function autosg(run, c) {
     const g = window.__game, T = g.T, L = 3;
     if (g.screen !== 'race') g.startSession('race');
     if (g.race.phase === 'countdown') g.advance(7);
-    const r = g.race, p = r.player;
+    const r = g.race, p = r.car(window.__game.localId);
     r.pit = new r.pit.constructor(r);
     r.squeezeQ.length = 0;
     const put = (car, s, mode, v, side = -1) => Object.assign(car, { u: L * T.L + s, hiU: L * T.L + s, v, change: null, laneSide: side, mode, d: mode === 'pitlane' ? T.pitD(s) : side * T.LANE_HALF, throttle: 0, graceT: 0, recoverT: 0, cutT: 0, pushedT: 0, revMark: null, revOn: false, crossed: L, lapsDone: L - 1, serviced: false, exitReq: false, sgOwed: 0, sgServed: 0, sgServing: false, sgDue: 0, sgDeferred: false, sgCommit: -1, sgLeave: false, sgCtl: false, sgPhase: null, svcBreach: null, pitPlan: false, pitReq: false, fuelReq: false, fuelDue: 0, pitFuel: false, laneOverride: false, routeHold: -1, offences: 0, fuel: 0.6, refuelTarget: 1 });
@@ -1911,7 +1913,7 @@ async function autosg(run, c) {
     clearInterval(q.sgT);
     let last = { mode: p.mode, fuel: p.fuel };
     q.sgT = setInterval(() => {
-      const rr = window.__game.race, pp = rr.player;
+      const rr = window.__game.race, pp = rr.car(window.__game.localId);
       q.minV = Math.min(q.minV, pp.v);
       if (pp.mode === 'pitlane') q.maxVPit = Math.max(q.maxVPit, pp.v);
       if (last.mode === 'race' && pp.mode === 'pitlane') q.vIn = +pp.v.toFixed(2);
@@ -1923,7 +1925,7 @@ async function autosg(run, c) {
       last = { mode: pp.mode, fuel: pp.fuel };
     }, 5);
   }, { labels: LABEL, ...o });
-  const handed = (page, ms = 40000) => waitFor(page, () => { const p = window.__game.race.player; return p.sgOwed === 0 && p.mode === 'race'; }, null, ms).catch(() => null);
+  const handed = (page, ms = 40000) => waitFor(page, () => { const p = window.__game.race.car(window.__game.localId); return p.sgOwed === 0 && p.mode === 'race'; }, null, ms).catch(() => null);
   const clean = (a) => a.minV >= 0 && a.offences === 0 && a.bayGrants === 0 && !a.fuelUp;
 
   // ---- keyboard
@@ -1940,7 +1942,7 @@ async function autosg(run, c) {
   const armed = await st(page);
   c.ok('Keyboard: before the approach the HUD shows Stop-and-go armed and ordinary control applies', armed.phase === 'armed' && !armed.ctl && armed.chips.includes(LABEL.armed), armed);
   await keys.set('KeyW', true);
-  await waitFor(page, () => window.__game.race.player.sgServing, null, 30000).catch(() => null);
+  await waitFor(page, () => window.__game.race.car(window.__game.localId).sgServing, null, 30000).catch(() => null);
   await frames(page, 2);
   const serving = await st(page);
   await page.screenshot({ path: path.join(run.out, 'autosg-serving.png') });
@@ -1953,7 +1955,7 @@ async function autosg(run, c) {
   // an occupied box: queued behind an AI car serving there, Brake held through the entry, the queue, the box and the handover
   await setup(page, { before: 30, v: 12, cars: [{ i: 1, s: G.PEN_S, sg: 6 }] });
   await keys.set('ArrowDown', true);
-  await waitFor(page, () => window.__game.race.player.sgPhase === 'queued', null, 20000).catch(() => null);
+  await waitFor(page, () => window.__game.race.car(window.__game.localId).sgPhase === 'queued', null, 20000).catch(() => null);
   await frames(page, 2);
   const queued = await st(page);
   c.ok('Keyboard: Brake held, the occupied box queues the car short of it; HUD shows Queued and auto · no R', queued.phase === 'queued' && queued.chips.includes(LABEL.queued) && queued.s < G.PEN_S - G.PEN_HALF && queued.box !== 0, queued);
@@ -1964,7 +1966,7 @@ async function autosg(run, c) {
   await keys.set('ArrowDown', false);
   await frames(page, 2);
   await keys.set('ArrowDown', true);
-  await waitFor(page, () => window.__game.race.player.revOn, null, 10000).catch(() => null);
+  await waitFor(page, () => window.__game.race.car(window.__game.localId).revOn, null, 10000).catch(() => null);
   const rev = await st(page);
   c.ok('Keyboard: a fresh Brake press after the handover is deliberate reverse', rev.revOn, rev);
   await keys.set('ArrowDown', false);
@@ -1975,14 +1977,14 @@ async function autosg(run, c) {
   await frames(page, 3);
   const dfr = await st(page);
   c.ok('Keyboard: N before the approach defers the stop; HUD shows Deferred — due next lap', dfr.phase === 'deferred' && dfr.chips.includes(LABEL.deferred) && dfr.due === 4 && dfr.deferred, dfr);
-  await read(page, () => { const g = window.__game, p = g.race.player; p.u = p.hiU = 3 * g.T.L + g.T.PIT_IN0 - 3; p.v = 8; });
-  await waitFor(page, () => { const g = window.__game; return g.T.wrapS(g.race.player.u) > g.T.PIT_IN0 + 2; }, null, 10000).catch(() => null);
+  await read(page, () => { const g = window.__game, p = g.race.car(window.__game.localId); p.u = p.hiU = 3 * g.T.L + g.T.PIT_IN0 - 3; p.v = 8; });
+  await waitFor(page, () => { const g = window.__game; return g.T.wrapS(g.race.car(window.__game.localId).u) > g.T.PIT_IN0 + 2; }, null, 10000).catch(() => null);
   const past = await st(page);
   c.ok('Keyboard: the deferred approach is not taken over or entered; the debt stays', past.mode === 'race' && !past.seen.entry && past.owed > 0 && past.boxGrants === 0, past);
 
   // pause mid-service (Esc), then resume with nothing pressed: the stop carries on and completes on its own
   await setup(page, { before: 20, v: 10 });
-  await waitFor(page, () => window.__game.race.player.sgServed > 0.5, null, 20000).catch(() => null);
+  await waitFor(page, () => window.__game.race.car(window.__game.localId).sgServed > 0.5, null, 20000).catch(() => null);
   await keys.tap('Escape');
   await waitFor(page, () => window.__game.screen === 'pause', null, 5000).catch(() => null);
   const p1 = await st(page);
@@ -2009,7 +2011,7 @@ async function autosg(run, c) {
   const f = new Fingers(t.page, await t.context.newCDPSession(t.page));
   await setup(t.page, { before: 30, v: 12, cars: [{ i: 1, s: G.PEN_S, sg: 12 }] });
   const thr = await f.put('#t-throttle');
-  await waitFor(t.page, () => window.__game.race.player.sgPhase === 'queued', null, 20000).catch(() => null);
+  await waitFor(t.page, () => window.__game.race.car(window.__game.localId).sgPhase === 'queued', null, 20000).catch(() => null);
   await frames(t.page, 2);
   const tq = await st(t.page);
   const overlap = await read(t.page, () => {
@@ -2043,7 +2045,7 @@ async function autobay(run, c) {
   const PH = ['armed', 'deferred', 'entry', 'queued', 'serving', 'bay', 'bayWait', 'refuel', 'release', 'ready', 'exit', 'leaving'];
   const LABEL = Object.fromEntries(PH.map((k) => [k, text(`hud.sgA.${k}`)]));
   const st = (page) => read(page, () => {
-    const g = window.__game, r = g.race, p = r.player, T = g.T, q = window.__qa;
+    const g = window.__game, r = g.race, p = r.car(window.__game.localId), T = g.T, q = window.__qa;
     return { screen: g.screen, mode: p.mode, s: +T.wrapS(p.u).toFixed(2), v: +p.v.toFixed(3), phase: p.sgPhase, ctl: p.sgCtl, bay: p.bay, home: p.bayHome, exitReq: p.exitReq, wait: p.pitWait,
       fuel: +p.fuel.toFixed(4), owed: p.sgOwed, stops: p.pitStops, revOn: p.revOn, latch: p.revLatch, held: g.input.held('throttle'),
       wrongBay: r.pit.log.filter((e) => e.zone.startsWith('bay') && e.op === 'grant' && +e.zone.slice(3) !== e.car).length,
@@ -2058,7 +2060,7 @@ async function autobay(run, c) {
     const g = window.__game, T = g.T, L = 3;
     if (g.screen !== 'race') g.startSession('race');
     if (g.race.phase === 'countdown') g.advance(7);
-    const r = g.race, p = r.player;
+    const r = g.race, p = r.car(window.__game.localId);
     r.pit = new r.pit.constructor(r);
     r.squeezeQ.length = 0;
     const put = (car, s, mode, v, side = -1) => Object.assign(car, { u: L * T.L + s, hiU: L * T.L + s, v, change: null, laneSide: side, mode, d: mode === 'pitlane' ? T.pitD(s) : side * T.LANE_HALF, throttle: 0, graceT: 0, recoverT: 0, cutT: 0, pushedT: 0, revMark: null, revOn: false, crossed: L, lapsDone: L - 1, serviced: false, exitReq: false, sgOwed: 0, sgServed: 0, sgServing: false, sgDue: 0, sgDeferred: false, sgCommit: -1, sgLeave: false, sgCtl: false, sgPhase: null, svcBreach: null, pitPlan: false, pitReq: false, fuelReq: false, fuelDue: 0, pitFuel: false, laneOverride: false, routeHold: -1, offences: 0, fuel: 0.6, refuelTarget: 1, penalty: 0, towSvc: false, upPrev: false });
@@ -2086,7 +2088,7 @@ async function autobay(run, c) {
       clearInterval(q.bayT);
       let last = { mode: p.mode, req: false };
       q.bayT = setInterval(() => {
-        const rr = window.__game.race, pp = rr.player;
+        const rr = window.__game.race, pp = rr.car(window.__game.localId);
         q.minV = Math.min(q.minV, pp.v);
         if (pp.mode === 'pitlane' && !pp.serviced) q.maxPast = Math.max(q.maxPast, T.gapS(T.BAYS[pp.bayHome], T.wrapS(pp.u)));
         if (last.mode === 'race' && pp.mode === 'pitlane') q.vIn = +pp.v.toFixed(2);
@@ -2101,8 +2103,8 @@ async function autobay(run, c) {
     }
   }, { labels: LABEL, ...o });
   const until = (page, fn, ms = 30000) => waitFor(page, fn, null, ms).catch(() => null);
-  const inService = (page, ms) => until(page, () => window.__game.race.player.mode === 'service', ms);
-  const handed = (page, ms = 30000) => until(page, () => { const p = window.__game.race.player; return p.mode === 'race' && p.pitStops > 0 && !p.sgCtl; }, ms);
+  const inService = (page, ms) => until(page, () => window.__game.race.car(window.__game.localId).mode === 'service', ms);
+  const handed = (page, ms = 30000) => until(page, () => { const p = window.__game.race.car(window.__game.localId); return p.mode === 'race' && p.pitStops > 0 && !p.sgCtl; }, ms);
   const freeAI = (page) => read(page, () => window.__qa.hold.clear());
 
   // ---- bays painted from their owners, for every livery
@@ -2121,7 +2123,7 @@ async function autobay(run, c) {
   await page.click('#o-start');
   await setup(page, { before: 30, v: 0, fuel: 0.5 });
   // the camera over the bays, the player parked in the through lane beside them
-  await read(page, () => { const g = window.__game, T = g.T, p = g.race.player; Object.assign(p, { u: 3 * T.L + T.BAYS[1] + 1.5, mode: 'pitlane', d: T.PIT_D, v: 0 }); g.zoom(5); g.snapCam(); });
+  await read(page, () => { const g = window.__game, T = g.T, p = g.race.car(window.__game.localId); Object.assign(p, { u: 3 * T.L + T.BAYS[1] + 1.5, mode: 'pitlane', d: T.PIT_D, v: 0 }); g.zoom(5); g.snapCam(); });
   await frames(page, 6);
   await page.screenshot({ path: path.join(run.out, 'autobay-bays-violet.png') });
   await read(page, () => window.__game.showTitle());
@@ -2199,7 +2201,7 @@ async function autobay(run, c) {
   await inService(page);
   await sleep(700);
   await keys.tap('KeyW');
-  await until(page, () => { const p = window.__game.race.player; return p.mode === 'pitlane' && p.pitWait === 'exit' && p.v === 0; }, 15000);
+  await until(page, () => { const p = window.__game.race.car(window.__game.localId); return p.mode === 'pitlane' && p.pitWait === 'exit' && p.v === 0; }, 15000);
   const ex = await st(page);
   c.ok('Keyboard: a car standing at the pit-exit merge holds the player at the exit line, Waiting for clear exit, still automatic', ex.mode === 'pitlane' && ex.wait === 'exit' && ex.phase === 'leaving' && ex.ctl && ex.s < G.PIT_OUT0 && ex.chips.includes(text('hud.qExit')), ex);
   await freeAI(page);
@@ -2293,8 +2295,54 @@ async function perf(run) {
 }
 
 // ------------------------------------------------------------ cli
-const SCENARIOS = { tracks, race, controlled, routing, practice, championship, touch, responsive, touchrace, reverse, service, queue, autosg, autobay };
-const USAGE = 'usage: browser-check.mjs [tracks|race|controlled|routing|practice|championship|touch|responsive|touchrace|reverse|service|queue|autosg ...] | perf | compare <a.json> <b.json>\n'
+
+/**
+ * The local driver in a nonzero grid slot (issue #21): camera, player marker, HUD standings, own bay, audio emphasis, personal
+ * messages and pedals all follow the local driver ID, not car zero. Ends by checking slot 0 again.
+ */
+async function localslot(run, c) {
+  const s = await open(run);
+  const { page, keys } = s;
+  await read(page, () => { window.__game.setLocalSlot(2); window.__game.startSession('race'); });
+  await waitFor(page, () => window.__game.screen === 'race');
+  const setup = await read(page, () => { const g = window.__game, r = g.race, p = r.car(g.localId); return { id: p.id, idx: p.idx, at: r.cars.indexOf(p), human: r.cars.filter((x) => x.human).map((x) => x.id), slot0: { id: r.cars[0].id, name: r.cars[0].name, human: r.cars[0].human }, bayHome: p.bayHome, num: p.num }; });
+  c.ok('Local driver races in slot 2 with that slot\'s number and bay; the rival moved to slot 0 is AI', setup.idx === 2 && setup.at === 2 && setup.bayHome === 2 && setup.human.join() === 'solo' && !setup.slot0.human && setup.slot0.name === 'Blue Arrow', setup);
+  await read(page, () => window.__game.advance(7));
+  // pedals: Throttle held drives the local car
+  await keys.set('KeyW', true); await sleep(900); await keys.set('KeyW', false);
+  const drive = await read(page, () => { const g = window.__game, p = g.race.car(g.localId); return { phase: g.race.phase, u: p.u, v: p.v, throttle: p.throttle, startU: null }; });
+  c.ok('Throttle drives the local car in slot 2', drive.phase === 'racing' && drive.v > 1, drive);
+  // camera follows the local car
+  await read(page, () => { window.__game.zoom(18); window.__game.snapCam(); });
+  await frames(page, 30);
+  const cam = await read(page, () => { const g = window.__game, r = g.race, p = r.car(g.localId), t = g.camTarget, d = (x) => Math.hypot(t.x - x.x, t.z + x.y); return { toMe: d(p), toCar0: d(r.cars[0]), view: g.view }; });
+  c.ok('Follow camera centres on the local car, not car 0', cam.toMe < 1 && cam.toCar0 > cam.toMe + 0.5, cam);
+  // marker over the local car in the full view
+  await read(page, () => window.__game.setView('full'));
+  await frames(page, 40);
+  const mk = await read(page, () => { const g = window.__game, r = g.race, p = r.car(g.localId), m = g.marker, d = (x) => Math.hypot(m.position.x - x.x, m.position.z + x.y); return { visible: m.visible, toMe: d(p), toCar0: d(r.cars[0]) }; });
+  c.ok('Player marker sits on the local car in the full view', mk.visible && mk.toMe < 0.5 && mk.toCar0 > mk.toMe + 0.5, mk);
+  // HUD standings and own bay
+  const hud = await read(page, () => { const g = window.__game, r = g.race, p = r.car(g.localId); const me = [...document.querySelectorAll('#h-stand .me')].map((e) => e.textContent); return { me, pos: document.getElementById('h-pos').textContent, order: r.order().indexOf(p) + 1, bays: g.bays.map((b) => ({ mine: b.mine, tag: b.tag, num: b.num })), fuel: document.getElementById('h-fuelpct').textContent, myFuel: Math.round(p.fuel * 100), mix: g.motorMix }; });
+  c.ok('HUD standings mark exactly one row, the local driver, and the position is the local car\'s', hud.me.length === 1 && hud.me[0].includes(STRINGS['hud.you']) && hud.pos.startsWith(`${hud.order}/`), hud);
+  c.ok('HUD fuel reads the local car', hud.fuel === `${hud.myFuel}%`, { fuel: hud.fuel, myFuel: hud.myFuel });
+  c.ok('Own bay is bay 3 (slot 2), tagged You; no other bay is marked as the player\'s', hud.bays[2].mine && hud.bays[2].tag === STRINGS['hud.you'] && hud.bays.filter((b) => b.mine).length === 1 && hud.bays[0].tag === 'BLUE', hud.bays);
+  c.ok('Audio emphasis: the local car\'s motor is the full-volume one', hud.mix[2] === 1 && hud.mix.filter((v) => v === 1).length === 1, hud.mix);
+  // a personal message reaches this view, and the action only touched the local car
+  await keys.tap('KeyP');
+  await frames(page, 3);
+  const pit = await read(page, () => { const g = window.__game, r = g.race; return { toast: document.getElementById('h-toast').textContent, mine: r.car(g.localId).pitReq, others: r.cars.filter((x) => x.id !== g.localId).map((x) => ({ id: x.id, fuelReq: x.fuelReq })) }; });
+  c.ok('Pit request: the local car is routed, a toast is shown, no other car gets a fuel request', pit.mine && pit.toast.length > 0 && pit.others.every((o) => !o.fuelReq), pit);
+  await page.screenshot({ path: path.join(run.out, 'localslot-full.png') });
+  // back to slot 0: the solo setup is unchanged
+  await read(page, () => { window.__game.setLocalSlot(0); window.__game.startSession('race'); });
+  const back = await read(page, () => { const g = window.__game, r = g.race; return { ids: r.cars.map((x) => x.id), idx: r.car(g.localId).idx, names: r.cars.map((x) => x.name) }; });
+  c.ok('Slot 0 again: the standard solo grid', back.idx === 0 && back.ids.join() === 'solo,ai1,ai2,ai3' && back.names.join() === 'YOU,Red Comet,Blue Arrow,Green Viper', back);
+  return s;
+}
+
+const SCENARIOS = { tracks, race, controlled, routing, practice, championship, touch, responsive, touchrace, reverse, service, queue, autosg, autobay, localslot };
+const USAGE = 'usage: browser-check.mjs [tracks|race|controlled|routing|practice|championship|touch|responsive|touchrace|reverse|service|queue|autosg|autobay|localslot ...] | perf | compare <a.json> <b.json>\n'
   + 'options: --dist <dir> --url <url> --commit <sha> --machine <name> --label <name> --viewport WxH --dpr N --preset low|balanced|high\n'
   + '         --seconds N --headed --channel <chrome|msedge> --out <dir> --max-minutes N';
 

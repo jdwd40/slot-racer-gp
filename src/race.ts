@@ -5,8 +5,8 @@ export const LAPS = 13;
 export const ACC = 30, VMAX = 26, COAST = 9, BRAKE = 30, DRAG = 0.006;
 export const AI_GRIP = 36;   // cornering speeds the AI aims for
 export const GRIP = 52;      // real grip of the slot (well above the AI's target, so cars stick)
-/** fuel per unit distance at nominal throttle (scaled to the active lap length) */
-export function fuelRate(): number { return 1 / (T.L * 7.4); }
+/** fuel per unit distance at nominal throttle (scaled to the lap length, by default the displayed track's) */
+export function fuelRate(L = T.L): number { return 1 / (L * 7.4); }
 export const REFUEL_RATE = 0.2;           // tank per second
 export const LOW_FUEL = 0.2;
 /** burn multiplier the AI plans with: near full throttle (0.5 + 0.7*thr) plus a safety margin */
@@ -33,8 +33,36 @@ export const PEN = {
 export const SERVICE_READY = 0.5;
 /** simulated seconds the field is run on for after the race ends, so every car gets a real result rather than an estimate */
 export const RUN_OUT_MAX = 240;
+/** shown for the last human finish (or terminal result) before the race closes and the rest of the field is run on */
+export const CLOSE_DELAY = 3.2;
+/**
+ * Per-driver race status: `running` is still racing; `finished` is classified; `dq` and `dnf` are terminal and never classified.
+ * Every car ends in exactly one terminal status, set once.
+ */
 export type CarStatus = 'running' | 'finished' | 'dq' | 'dnf';
 export type DqReason = 'deadline' | 'stopGo' | 'fuel';
+/** why a car was not classified: the finish window or race time limit ran out, or the field run-on did */
+export type DnfReason = 'window' | 'timeout' | 'runout';
+/** Stable driver identity for a whole race (a room seat or the solo driver). Never an array position. */
+export type DriverId = string;
+export type Control = 'human' | 'ai';
+/** One race entry. `slot` (0–3) is the grid position, race number and own bay; omitted, the lowest free slot is used. */
+export interface RosterEntry { id: DriverId; control: Control; slot?: number; name?: string; color?: number; persona?: PersonaId; }
+/** Random source in [0, 1). Each race owns one, so seeding one race never couples it to another. */
+export type Rng = () => number;
+/** Small seeded generator (mulberry32) for reproducible races. */
+export function seededRng(seed: number): Rng {
+  let a = seed >>> 0;
+  return () => {
+    a = (a + 0x6d2b79f5) >>> 0;
+    let t = a;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+/** The single-player adapter's driver: the one human in solo races and practice. */
+export const SOLO_ID: DriverId = 'solo';
 /** why Defer is not available now, or null when it is */
 export type DeferBlock = 'phase' | 'none' | 'pit' | 'held' | 'used' | 'final';
 /** where an obligation stands against the lap being raced */
@@ -125,7 +153,12 @@ export type Mode = 'grid' | 'race' | 'pitlane' | 'bayIn' | 'service' | 'bayOut' 
 export interface OffState { x: number; y: number; vx: number; vy: number; yaw: number; spin: number; t: number; z: number; vz: number; u0: number; lane: number; }
 
 export interface Car {
-  idx: number; name: string; color: number; isPlayer: boolean;
+  /** stable driver ID from the roster: events, snapshots, actions and the local view address the car by it */
+  id: DriverId;
+  /** grid slot (0–3), fixed for the race; it is also the car's number in pit reservations */
+  idx: number; name: string; color: number;
+  /** controlled by a person (any of up to four), not the AI. Says nothing about whose screen this is */
+  human: boolean;
   /** race number painted on the car and on its bay's pit board */
   num: number;
   /**
@@ -163,6 +196,7 @@ export interface Car {
   /** terminal result: finished means classified; dq and dnf are never classified */
   status: CarStatus;
   dqReason: DqReason | null;
+  dnfReason: DnfReason | null;
   /** one-switch manual choice of the inside lane while pit routing is active */
   laneOverride: boolean;
   mode: Mode; d: number; yawOff: number;
@@ -192,7 +226,7 @@ export interface Car {
   // render pose (x, y on the mat; z height; roll/pitch from banking and ramps)
   x: number; y: number; h: number; z: number; roll: number; pitch: number;
   bumpT: number;
-  /** reverse gear engaged (player only: AI cars never reverse) */
+  /** reverse gear engaged (human cars only: AI cars never reverse) */
   revOn: boolean;
   /** stationary Brake hold so far towards engaging reverse (simulation seconds) */
   revHoldT: number;
@@ -226,14 +260,18 @@ export interface Car {
   upPrev: boolean;
 }
 
+export type MsgKind = 'info' | 'good' | 'warn' | 'bad';
+/** Race events. `msg` is personal: it is addressed to one human driver (`to`) and only that driver's view shows it. */
 export type RaceEvent =
-  | { type: 'msg'; text: string; kind: 'info' | 'good' | 'warn' | 'bad'; vars?: Record<string, string | number> }
-  | { type: 'bump'; car: Car; power: number }
+  | { type: 'msg'; to: DriverId; text: string; kind: MsgKind; vars?: Record<string, string | number> }
+  | { type: 'bump'; car: Car; other: Car; power: number }
   | { type: 'deslot'; car: Car }
   | { type: 'switch'; car: Car }
   | { type: 'lap'; car: Car; time: number; best: boolean; valid: boolean; lapsDone: number }
   | { type: 'finish'; car: Car; pos: number }
   | { type: 'dq'; car: Car; reason: DqReason }
+  | { type: 'dnf'; car: Car; reason: DnfReason }
+  | { type: 'final' }
   | { type: 'breach'; car: Car; what: 'stopGo' | 'fuel' }
   | { type: 'tow'; car: Car }
   | { type: 'offence'; car: Car; other: Car; n: number; cause: 'rear' | 'cut'; stop: boolean }
@@ -241,13 +279,82 @@ export type RaceEvent =
   | { type: 'go' }
   | { type: 'light'; n: number };
 
+/** An event as it goes over the wire: every car reference is the driver's stable ID. */
+type Wire<E> = { [K in keyof E]: E[K] extends Car ? DriverId : E[K] };
+type Distribute<E> = E extends RaceEvent ? Wire<E> : never;
+export type WireEvent = Distribute<RaceEvent>;
+/** Serializable form of an event: plain data with driver IDs, no object references. */
+export function wireEvent(e: RaceEvent): WireEvent {
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(e)) out[k] = v && typeof v === 'object' && 'id' in v && 'idx' in v ? (v as Car).id : v && typeof v === 'object' ? { ...v } : v;
+  return out as WireEvent;
+}
+
+/** One driver in an authoritative snapshot: plain values keyed by driver ID, nothing a client could not rebuild a view from. */
+export interface CarSnapshot {
+  id: DriverId; slot: number; control: Control; name: string; color: number; num: number; bay: number;
+  status: CarStatus; dqReason: DqReason | null; dnfReason: DnfReason | null; finished: boolean;
+  mode: Mode; u: number; v: number; d: number; laneSide: number; change: { from: number; to: number; s0: number; s1: number } | null;
+  x: number; y: number; z: number; h: number; roll: number; pitch: number; yawOff: number; wobble: number; off: OffState | null;
+  throttle: number; brake: number; fuel: number;
+  crossed: number; lapsDone: number; lastLap: number; bestLap: number; lapStartT: number; lapValid: boolean; finishTime: number; pitStops: number;
+  offences: number; sgOwed: number; sgServed: number; sgServing: boolean; timePen: number; svcBreach: 'stopGo' | 'fuel' | null;
+  laneReq: boolean; pitReq: boolean; fuelReq: boolean; fuelDue: number; sgDue: number; sgDeferred: boolean; routeHold: number; laneOverride: boolean;
+  revOn: boolean; sgPhase: SgPhase; sgCtl: boolean; pitWait: PitWait; exitReq: boolean; bayInUse: number;
+  serviceT: number; penalty: number; towT: number; recoverT: number; bumpT: number;
+}
+/** Authoritative race state: JSON-safe (no cycles, no Infinity or NaN, no browser objects), with driver IDs for every reference. */
+export interface RaceSnapshot {
+  v: 1; track: string; laps: number; practice: boolean;
+  phase: Race['phase']; t: number; raceTime: number; goT: number; lights: number; firstFlagT: number;
+  /** null when unlimited */
+  finishWindow: number | null; timeLimit: number | null;
+  cars: CarSnapshot[];
+  pit: { box: DriverId | null; exit: DriverId | null; bays: (DriverId | null)[]; merges: (DriverId | null)[]; order: DriverId[] };
+  /** highest applied action sequence number per human driver (a null-prototype table: every driver ID is an own key) */
+  lastSeq: Record<DriverId, number>;
+  final: Standing[] | null;
+}
+
+/** Held pedals for one human driver. Missing or released means neutral, for that driver only. */
 export interface Input { up: boolean; down: boolean; }
+/** Held inputs for this step, per human driver. A driver absent from the map is neutral. */
+export type Controls = Readonly<Record<DriverId, Input | undefined>>;
+export const NEUTRAL: Input = Object.freeze({ up: false, down: false });
+/** Sequenced one-shot driver actions (Lane, Pit, Defer). Reverse and bay departure come from the held pedals. */
+export type ActionType = 'lane' | 'pit' | 'defer';
+export interface DriverAction { driver: DriverId; seq: number; type: ActionType; }
+export type ActResult = 'queued' | 'stale' | 'unknown';
 
 export interface RaceOpts {
-  /** practice: player only, unlimited laps, no fuel consumption */
+  /** practice: one driver, unlimited laps, no fuel consumption */
   practice?: boolean;
-  /** player livery colour */
+  /** livery colour of the slot-0 human in the default solo roster */
   playerColor?: number;
+  /** entries (1–4 cars, any mix of human and AI). Default: the solo human in slot 0 and three AI (practice: the solo human only) */
+  roster?: RosterEntry[];
+  /** circuit id or context. Default: the displayed track at construction */
+  track?: string | T.Track;
+  /** random source. Default: Math.random, read at each call */
+  rng?: Rng;
+  /** seed for a private seeded random source (ignored when `rng` is given) */
+  seed?: number;
+  /** seconds after the first car takes the flag before every car still running is terminally classified. Default: unlimited with one human, 90 s with more */
+  finishWindow?: number;
+  /** race-time limit (seconds of racing) after which every car still running is terminally classified. Default: unlimited with one human, 1200 s with more */
+  timeLimit?: number;
+}
+
+/** A terminal, authoritative result row: only cars with a terminal status ever appear, and never an estimated time. */
+export interface Standing {
+  id: DriverId; slot: number; control: Control;
+  /** classified position (1-based) for finishers, null for DQ and DNF */
+  pos: number | null;
+  status: Exclude<CarStatus, 'running'>;
+  /** finish time plus time penalties (seconds), null when not classified */
+  time: number | null;
+  laps: number; bestLap: number; pitStops: number; timePen: number;
+  dqReason: DqReason | null; dnfReason: DnfReason | null;
 }
 
 /** participant slots: the slot is the car's identity (idx), its race number and its own bay (bayHome) */
@@ -260,7 +367,34 @@ export const DRIVERS: { name: string; color: number; persona: PersonaId; num: nu
 
 const STATUS_RANK: Record<CarStatus, number> = { finished: 0, running: 1, dnf: 2, dq: 3 };
 
-function rnd(a: number, b: number): number { return a + Math.random() * (b - a); }
+/** Validate a roster and give every entry its slot. Throws on anything a race cannot be built from. */
+export function resolveRoster(roster: RosterEntry[]): (RosterEntry & { slot: number })[] {
+  if (!Array.isArray(roster) || roster.length < 1 || roster.length > DRIVERS.length) throw new Error(`roster: 1-${DRIVERS.length} entries`);
+  const ids = new Set<string>(), used = new Set<number>();
+  for (const e of roster) {
+    if (typeof e.id !== 'string' || !e.id) throw new Error('roster: every entry needs a driver id');
+    if (ids.has(e.id)) throw new Error(`roster: duplicate driver id ${e.id}`);
+    ids.add(e.id);
+    if (e.control !== 'human' && e.control !== 'ai') throw new Error(`roster: bad control for ${e.id}`);
+    if (e.slot !== undefined) {
+      if (!Number.isInteger(e.slot) || e.slot < 0 || e.slot >= DRIVERS.length || used.has(e.slot)) throw new Error(`roster: bad slot for ${e.id}`);
+      used.add(e.slot);
+    }
+  }
+  return roster.map((e) => {
+    if (e.slot !== undefined) return { ...e, slot: e.slot };
+    let k = 0; while (used.has(k)) k++;
+    used.add(k);
+    return { ...e, slot: k };
+  });
+}
+
+/** The single-player adapter's roster: the solo human in slot 0, AI rivals in the other slots (none in practice). */
+export function soloRoster(practice = false): RosterEntry[] {
+  const r: RosterEntry[] = [{ id: SOLO_ID, control: 'human', slot: 0 }];
+  if (!practice) for (let k = 1; k < DRIVERS.length; k++) r.push({ id: `ai${k}`, control: 'ai', slot: k });
+  return r;
+}
 
 export class Race {
   cars: Car[] = [];
@@ -271,39 +405,62 @@ export class Race {
   /** simulation-owned pit-lane reservations and queue order: the HUD reads this, it never keeps its own */
   pit: PitTraffic = new PitTraffic(this);
   profiles: Record<string, Float32Array> = {};
-  playerDoneT = -1;
+  /** simulation time at which every human driver had a terminal result (-1 while one is still racing) */
+  humansDoneT = -1;
+  /** race time of the first car's arrival at the flag (-1 before) */
+  firstFlagT = -1;
   practice = false;
+  /** this race's own circuit geometry: never the displayed-track globals */
+  readonly T: T.Track;
+  readonly rng: Rng;
+  readonly finishWindow: number;
+  readonly timeLimit: number;
+  /** the final standings, set once when the race closes; null until then */
+  final: readonly Standing[] | null = null;
+  /** highest action sequence number applied, per driver: a null-prototype table, so any string driver ID (even `__proto__`) is an own key */
+  lastSeq: Record<DriverId, number> = Object.create(null) as Record<DriverId, number>;
+  private pending: DriverAction[] = [];
 
   constructor(opts: RaceOpts = {}) {
     this.practice = !!opts.practice;
+    this.T = opts.track instanceof T.Track ? opts.track : opts.track ? T.trackFor(opts.track) : T.ACTIVE;
+    this.rng = opts.rng ?? (opts.seed !== undefined ? seededRng(opts.seed) : () => Math.random());
+    const roster = resolveRoster(opts.roster ?? soloRoster(this.practice));
+    const humans = roster.filter((e) => e.control === 'human').length;
+    this.finishWindow = opts.finishWindow ?? (humans > 1 ? 90 : Infinity);
+    this.timeLimit = opts.timeLimit ?? (humans > 1 ? 1200 : Infinity);
     for (const P of Object.values(PERSONAS)) for (const side of [-1, 1]) {
-      this.profiles[`${P.id}:${side}`] = T.buildProfile(side, AI_GRIP * P.grip, VMAX, P.brake);
-      this.profiles[`${P.id}:${side}:hot`] = T.buildProfile(side, AI_GRIP * P.grip * P.lapseGrip, VMAX, P.brake * P.lapseBrake);
+      this.profiles[`${P.id}:${side}`] = this.T.buildProfile(side, AI_GRIP * P.grip, VMAX, P.brake);
+      this.profiles[`${P.id}:${side}:hot`] = this.T.buildProfile(side, AI_GRIP * P.grip * P.lapseGrip, VMAX, P.brake * P.lapseBrake);
     }
     this.profiles['-1'] = this.profiles['player:-1']; this.profiles['1'] = this.profiles['player:1'];
-    this.goT = this.practice ? 1.6 : 4.0 + rnd(0.5, 1.4);
-    // grid: two rows; player in row 2 on the outside lane
+    this.goT = this.practice ? 1.6 : 4.0 + this.rnd(0.5, 1.4);
+    // grid: two rows, each slot in its fixed place (slot 0, the solo driver's, in row 2)
     const grid = [
       { di: 1, prog: -1.3, side: 1 }, { di: 2, prog: -1.3, side: -1 },
       { di: 3, prog: -3.9, side: 1 }, { di: 0, prog: -3.9, side: -1 },
     ];
     for (const g of grid) {
-      if (this.practice && g.di !== 0) continue;
+      const e = roster.find((x) => x.slot === g.di);
+      if (!e) continue;
       const D = DRIVERS[g.di];
-      const P = PERSONAS[D.persona];
+      const human = e.control === 'human';
+      // humans drive with the player assistance persona; an AI in slot 0 (normally the solo seat) races as a consistent driver
+      const P = PERSONAS[e.persona ?? (human ? 'player' : D.persona === 'player' ? 'consistent' : D.persona)];
+      const color = e.color ?? (g.di === 0 && opts.playerColor !== undefined ? opts.playerColor : D.color);
       const c: Car = {
-        idx: g.di, name: D.name, color: g.di === 0 && opts.playerColor !== undefined ? opts.playerColor : D.color, isPlayer: g.di === 0,
+        id: e.id, idx: g.di, name: e.name ?? D.name, color, human,
         num: D.num, bayHome: g.di,
-        u: T.FINISH_S + g.prog, v: 0, laneSide: g.side, change: null, laneReq: false, pitReq: false, pitPenaltyOnly: false, laneOverride: false,
-        fuelReq: false, fuelDue: 0, sgDue: 0, sgDeferred: false, routeHold: -1, overAppr: -1, hiU: T.FINISH_S + g.prog,
-        svcBreach: null, towSvc: false, towPit: false, status: 'running', dqReason: null,
-        mode: 'grid', d: g.side * T.LANE_HALF, yawOff: 0, throttle: 0, brake: 0,
+        u: this.T.FINISH_S + g.prog, v: 0, laneSide: g.side, change: null, laneReq: false, pitReq: false, pitPenaltyOnly: false, laneOverride: false,
+        fuelReq: false, fuelDue: 0, sgDue: 0, sgDeferred: false, routeHold: -1, overAppr: -1, hiU: this.T.FINISH_S + g.prog,
+        svcBreach: null, towSvc: false, towPit: false, status: 'running', dqReason: null, dnfReason: null,
+        mode: 'grid', d: g.side * this.T.LANE_HALF, yawOff: 0, throttle: 0, brake: 0,
         fuel: 1, slip: 0, latRatio: 0, wobble: 0, off: null, recoverT: 0, towT: 0,
         bay: g.di, bayT: 0, serviceT: 0, penalty: 0, fuelAtBay: 0,
         crossed: 0, lapsDone: 0, lapStart: 0, lastLap: 0, bestLap: 0, lapStartT: 0, lapValid: true, sectors: 0,
         finished: false, finishTime: 0, pitStops: 0,
         squeezeHold: false, yielding: false, waitingClear: false,
-        skill: P.skill, lapse: 0, mistakeT: rnd(P.mistakeEvery[0], P.mistakeEvery[1]), pitPlan: false, refuelTarget: 1, changeCooldown: 0,
+        skill: P.skill, lapse: 0, mistakeT: this.rnd(P.mistakeEvery[0], P.mistakeEvery[1]), pitPlan: false, refuelTarget: 1, changeCooldown: 0,
         lowFuelWarned: false, serviced: false, persona: P,
         offences: 0, sgOwed: 0, sgServed: 0, sgServing: false, timePen: 0,
         graceT: 0, pushedT: 0, cutT: 0,
@@ -319,18 +476,51 @@ export class Race {
     for (const c of this.cars) this.pose(c);
   }
 
-  get player(): Car { return this.cars.find((c) => c.isPlayer) ?? this.cars[0]; }
+  /** The car of a driver, by stable ID. */
+  car(id: DriverId): Car | undefined { return this.cars.find((c) => c.id === id); }
+  /** A human driver's car, or undefined: actions for unknown drivers or AI entries are ignored. */
+  private humanCar(id: DriverId): Car | undefined { const c = this.car(id); return c && c.human ? c : undefined; }
 
-  s(c: Car): number { return T.wrapS(c.u); }
+  rnd(a: number, b: number): number { return a + this.rng() * (b - a); }
+  fuelRate(): number { return fuelRate(this.T.L); }
+
+  s(c: Car): number { return this.T.wrapS(c.u); }
 
   emit(e: RaceEvent): void { this.events.push(e); }
-  pmsg(c: Car, text: string, kind: 'info' | 'good' | 'warn' | 'bad', vars?: Record<string, string | number>): void {
-    if (c.isPlayer) this.emit({ type: 'msg', text, kind, vars });
+  /** a personal message for one human driver: AI cars get none */
+  pmsg(c: Car, text: string, kind: MsgKind, vars?: Record<string, string | number>): void {
+    if (c.human) this.emit(vars ? { type: 'msg', to: c.id, text, kind, vars } : { type: 'msg', to: c.id, text, kind });
   }
 
-  requestLane(): void {
-    const c = this.player;
-    if (c.finished) return;
+  /**
+   * Queue a sequenced one-shot action for a human driver. It is applied once, at the start of the next update, in sequence
+   * order per driver; a sequence number already applied or queued is stale and ignored. Unknown drivers and AI entries are refused.
+   */
+  act(a: DriverAction): ActResult {
+    if (!this.humanCar(a.driver) || (a.type !== 'lane' && a.type !== 'pit' && a.type !== 'defer')) return 'unknown';
+    if (!Number.isInteger(a.seq) || a.seq <= (this.lastSeq[a.driver] ?? 0) || this.pending.some((p) => p.driver === a.driver && p.seq === a.seq)) return 'stale';
+    this.pending.push({ driver: a.driver, seq: a.seq, type: a.type });
+    return 'queued';
+  }
+  /** Apply queued actions: by grid slot, then sequence. Each touches only its own driver's car. */
+  private applyActions(): void {
+    if (!this.pending.length) return;
+    const slot = (id: DriverId): number => this.car(id)?.idx ?? 99;
+    const q = this.pending.sort((a, b) => slot(a.driver) - slot(b.driver) || a.seq - b.seq);
+    this.pending = [];
+    for (const a of q) {
+      if (a.seq <= (this.lastSeq[a.driver] ?? 0)) continue;
+      this.lastSeq[a.driver] = a.seq;
+      if (a.type === 'lane') this.requestLane(a.driver);
+      else if (a.type === 'pit') this.requestPit(a.driver);
+      else this.requestDefer(a.driver);
+    }
+  }
+
+  /** Lane (L, or the touch Lane button) for one human driver. */
+  requestLane(id: DriverId): void {
+    const c = this.humanCar(id);
+    if (!c || c.finished) return;
     // inside the single-file pit lane there is no other lane: nothing moves, and the player is told why
     if (c.mode === 'pitlane' || c.mode === 'bayIn' || c.mode === 'service' || c.mode === 'bayOut') { this.pmsg(c, 'msg.pitSingleFile', 'warn'); return; }
     if (c.mode !== 'race' && c.mode !== 'grid') return;
@@ -353,9 +543,10 @@ export class Race {
     c.laneReq = !c.laneReq;
     this.pmsg(c, c.laneReq ? 'msg.laneReady' : 'msg.laneCancelled', c.laneReq ? 'info' : 'warn');
   }
-  requestPit(): void {
-    const c = this.player;
-    if (c.finished || (c.mode !== 'race' && c.mode !== 'grid')) return;
+  /** Pit (P) for one human driver. */
+  requestPit(id: DriverId): void {
+    const c = this.humanCar(id);
+    if (!c || c.finished || (c.mode !== 'race' && c.mode !== 'grid')) return;
     if (c.routeHold >= 0 && c.routeHold === this.apprLap(c)) {
       // Pit after a deferral: stop on this approach after all. Deadlines and the used deferral are unchanged
       c.routeHold = -1; this.syncRoute(c);
@@ -387,9 +578,9 @@ export class Race {
    * never on the final lap. An optional fuel request becomes a committed fuel stop due next lap; a stop-and-go due on this
    * approach moves to the next lap's. Routing is released for this approach only and re-arms beyond it.
    */
-  requestDefer(): void {
-    const c = this.player;
-    if (c.finished) return;
+  requestDefer(id: DriverId): void {
+    const c = this.humanCar(id);
+    if (!c || c.finished) return;
     const why = this.deferBlock(c);
     if (why) {
       const msg: Record<DeferBlock, string> = { phase: '', none: 'msg.deferNone', pit: 'msg.deferPit', held: 'msg.deferHeld', used: 'msg.deferUsed', final: 'msg.deferFinal' };
@@ -408,7 +599,7 @@ export class Race {
 
   /** Why Defer cannot be used now, or null. Read by the HUD and touch pad as well, so they only offer it when it works. */
   deferBlock(c: Car): DeferBlock | null {
-    if (this.practice || this.phase !== 'racing' || c.finished || !c.isPlayer) return 'phase';
+    if (this.practice || this.phase !== 'racing' || c.finished || !c.human) return 'phase';
     const k = this.apprLap(c);
     const sgNow = c.sgOwed > 0 && c.sgDue <= k;
     const fuelNow = c.fuelDue > 0 && c.fuelDue <= k;
@@ -425,7 +616,7 @@ export class Race {
    * The pit approach the car is heading for, numbered by lap: the entrance on lap n is approach n. Counted from the furthest
    * distance ever reached, so reversing over the entrance, a re-slot behind it or a pause never brings an approach back.
    */
-  apprLap(c: Car): number { return Math.floor((c.hiU - T.PIT_IN0) / T.L) + 1; }
+  apprLap(c: Car): number { return Math.floor((c.hiU - this.T.PIT_IN0) / this.T.L) + 1; }
 
   /** Where an obligation due by the end of lap `due` stands against the lap being raced. */
   dueState(c: Car, due: number): DueState {
@@ -438,21 +629,21 @@ export class Race {
   /** Another car is standing in (or rolling through) the stop-and-go box. */
   boxBusy(c: Car): boolean {
     if (this.pit.box >= 0 && this.pit.box !== c.idx) return true;
-    return this.cars.some((o) => o !== c && o.mode === 'pitlane' && Math.abs(T.gapS(this.s(o), T.PEN_S)) < T.PEN_HALF);
+    return this.cars.some((o) => o !== c && o.mode === 'pitlane' && Math.abs(this.T.gapS(this.s(o), this.T.PEN_S)) < this.T.PEN_HALF);
   }
 
   /** The car whose own bay j is for this race, or null (practice leaves the rivals' bays unowned). Ownership is identity, never colour. */
   bayOwner(j: number): Car | null { return this.cars.find((c) => c.bayHome === j) ?? null; }
 
   /** Pit routing applies: only the player is assisted, the AI makes its own lane decisions. */
-  pitAssist(c: Car): boolean { return c.isPlayer && c.pitReq && !c.finished; }
+  pitAssist(c: Car): boolean { return c.human && c.pitReq && !c.finished; }
 
   /**
    * Player routing from the visit reasons: any owed stop or fuel request routes to the next entrance, except the approach
    * a deferral released. Never clears a debt; an optional request the car still holds keeps routing on.
    */
   syncRoute(c: Car): void {
-    if (!c.isPlayer) return;
+    if (!c.human) return;
     if (c.finished) { c.pitReq = false; c.fuelReq = false; c.pitPenaltyOnly = false; c.laneOverride = false; return; }
     const k = this.apprLap(c);
     if (c.routeHold >= 0 && c.routeHold < k) c.routeHold = -1;
@@ -463,8 +654,8 @@ export class Race {
 
   /** A lane switch still lies ahead of the car before the coming pit entrance. */
   switchBeforeEntry(c: Car): boolean {
-    const s = this.s(c), entry = T.ahead(s, T.PIT_IN0);
-    return T.SWITCHES.some((sw) => { const a = T.ahead(s, sw.s0); return a > 0.05 && a < entry; });
+    const s = this.s(c), entry = this.T.ahead(s, this.T.PIT_IN0);
+    return this.T.SWITCHES.some((sw) => { const a = this.T.ahead(s, sw.s0); return a > 0.05 && a < entry; });
   }
 
   /** Routing state only: debts (stop-and-go, committed fuel stop) are untouched. */
@@ -483,37 +674,97 @@ export class Race {
     return [...this.cars].sort((a, b) => {
       const r = STATUS_RANK[a.status] - STATUS_RANK[b.status];
       if (r) return r;
-      if (a.status === 'finished') return a.finishTime + a.timePen - (b.finishTime + b.timePen);
-      return b.u - a.u;
+      if (a.status === 'finished') return a.finishTime + a.timePen - (b.finishTime + b.timePen) || a.idx - b.idx;
+      return b.u - a.u || a.idx - b.idx;
     });
   }
 
   /**
-   * Once the player is done, run the rest of the field on to the flag (no rendering) so every car gets a real result.
-   * Anything still running after RUN_OUT_MAX is a DNF. Only finish and DQ events are kept from the run.
+   * Once every human is done, run the rest of the field on to the flag (no rendering, every pedal neutral) so every car gets a
+   * real result. Anything still running after RUN_OUT_MAX is terminally classified. Only result events are kept from the run.
    */
   runOut(maxSec = RUN_OUT_MAX): void {
     const keep = this.events.length;
-    const idle: Input = { up: false, down: false };
-    for (let t = 0; t < maxSec && this.cars.some((c) => c.status === 'running'); t += 1 / 120) this.step(1 / 120, idle);
-    for (const c of this.cars) if (c.status === 'running') { c.status = 'dnf'; c.finished = true; }
-    this.events = [...this.events.slice(0, keep), ...this.events.slice(keep).filter((e) => e.type === 'finish' || e.type === 'dq')];
+    for (let t = 0; t < maxSec && this.cars.some((c) => c.status === 'running'); t += 1 / 120) this.step(1 / 120, {});
+    this.classifyRunning('runout');
+    this.events = [...this.events.slice(0, keep), ...this.events.slice(keep).filter((e) => e.type === 'finish' || e.type === 'dq' || e.type === 'dnf')];
+  }
+
+  /**
+   * Terminal classification of every car still running, in a fixed order (furthest first, then grid slot): a latched service
+   * breach is a DQ (as it would have been at the flag), anything else a DNF. Each car is classified once; nothing re-runs it.
+   */
+  classifyRunning(why: DnfReason): void {
+    const run = this.cars.filter((c) => c.status === 'running').sort((a, b) => b.u - a.u || a.idx - b.idx);
+    for (const c of run) {
+      this.endService(c);
+      if (c.svcBreach) {
+        c.status = 'dq'; c.dqReason = 'deadline';
+        this.emit({ type: 'dq', car: c, reason: 'deadline' });
+        this.pmsg(c, 'msg.dq.deadline', 'bad');
+      } else {
+        c.status = 'dnf'; c.dnfReason = why;
+        this.emit({ type: 'dnf', car: c, reason: why });
+      }
+    }
+  }
+
+  /** The car's race is over: routing, automatic service and pit reservations end with it. */
+  private endService(c: Car): void {
+    c.finished = true; c.laneReq = false; c.sgLeave = false; c.sgCtl = false; c.sgPhase = null; this.clearPitIntent(c); c.pitPlan = false; c.routeHold = -1;
+    c.revOn = false; c.revHoldT = 0;
+    this.pit.releaseAll(c, 'terminal');
+  }
+
+  /**
+   * Authoritative standings: every car terminal, classified finishers by time (then grid slot), then DNF, then DQ.
+   * Null while any car is still running, so an estimate can never be read as a result.
+   */
+  standings(): Standing[] | null {
+    if (this.cars.some((c) => c.status === 'running')) return null;
+    let pos = 0;
+    return this.order().map((c) => {
+      const fin = c.status === 'finished';
+      return {
+        id: c.id, slot: c.idx, control: c.human ? 'human' : 'ai', pos: fin ? ++pos : null,
+        status: c.status as Standing['status'], time: fin ? c.finishTime + c.timePen : null,
+        laps: c.lapsDone, bestLap: c.bestLap, pitStops: c.pitStops, timePen: c.timePen, dqReason: c.dqReason, dnfReason: c.dnfReason,
+      };
+    });
+  }
+
+  /** Close the race once: the field is run on, the standings are frozen and a single `final` event is sent. */
+  private close(): void {
+    if (this.phase === 'done') return;
+    this.phase = 'done';
+    this.runOut();
+    this.final = Object.freeze((this.standings() ?? []).map((x) => Object.freeze(x)));
+    this.emit({ type: 'final' });
   }
 
   nextSwitch(c: Car): T.Switch {
     const s = this.s(c);
-    let best = T.SWITCHES[0], bd = 1e9;
-    for (const sw of T.SWITCHES) { const a = T.ahead(s, sw.s0); if (a < bd) { bd = a; best = sw; } }
+    let best = this.T.SWITCHES[0], bd = 1e9;
+    for (const sw of this.T.SWITCHES) { const a = this.T.ahead(s, sw.s0); if (a < bd) { bd = a; best = sw; } }
     return best;
   }
 
-  update(dt: number, input: Input): void {
+  /** Advance by dt with each human driver's held pedals. A driver missing from `inputs` is neutral; AI entries ignore it. */
+  update(dt: number, inputs: Controls = {}): void {
+    this.applyActions();
     const steps = Math.max(1, Math.ceil(dt / (1 / 120)));
     const h = dt / steps;
-    for (let i = 0; i < steps; i++) this.step(h, input);
+    for (let i = 0; i < steps; i++) this.step(h, inputs);
   }
 
-  step(dt: number, input: Input): void {
+  /** The pedals a car drives with this step: its own driver's held input when human, never anyone else's. */
+  inputOf(c: Car, inputs: Controls): Input {
+    if (!c.human) return NEUTRAL;
+    const i = Object.prototype.hasOwnProperty.call(inputs, c.id) ? inputs[c.id] : undefined;
+    return i ? { up: i.up === true, down: i.down === true } : NEUTRAL;
+  }
+
+  step(dt: number, inputs: Controls): void {
     this.t += dt;
     if (this.phase === 'countdown') {
       const n = this.t < this.goT ? Math.min(5, Math.floor(this.t / 0.8)) : 0;
@@ -527,11 +778,20 @@ export class Race {
     }
     // pit traffic is decided from where every car is before any of them moves, so array order never grants priority
     this.pit.update();
-    for (const c of this.cars) this.stepCar(c, dt, input);
+    for (const c of this.cars) this.stepCar(c, dt, this.inputOf(c, inputs));
     this.collide();
     for (const c of this.cars) this.pose(c);
-    if (this.player.finished && this.playerDoneT < 0) this.playerDoneT = this.t;
-    if (this.playerDoneT >= 0 && this.t - this.playerDoneT > 3.2 && this.phase !== 'done') { this.phase = 'done'; this.runOut(); }
+    if (this.phase === 'countdown') return;
+    // bounded end (also during the run-on): after the first car reaches the flag the rest have the finish window, and the
+    // race-time limit caps the whole race
+    if (this.firstFlagT >= 0 && this.raceTime - this.firstFlagT > this.finishWindow) this.classifyRunning('window');
+    if (this.raceTime > this.timeLimit) this.classifyRunning('timeout');
+    if (this.phase !== 'racing') return;
+    // one human finishing never ends anyone else's race: it closes once every human is terminal (with no human, every car)
+    const humans = this.cars.filter((c) => c.human);
+    const done = (humans.length ? humans : this.cars).every((c) => c.status !== 'running');
+    if (done && this.humansDoneT < 0) this.humansDoneT = this.t;
+    if (this.humansDoneT >= 0 && this.t - this.humansDoneT > CLOSE_DELAY) this.close();
   }
 
   // ---------------------------------------------------------------- car step
@@ -541,7 +801,7 @@ export class Race {
     c.changeCooldown = Math.max(0, c.changeCooldown - dt);
     c.graceT = Math.max(0, c.graceT - dt); c.pushedT = Math.max(0, c.pushedT - dt); c.cutT = Math.max(0, c.cutT - dt);
     c.defendCooldown = Math.max(0, c.defendCooldown - dt);
-    if (c.isPlayer) { this.sgUpdate(c); this.reverseControl(c, dt, input); }
+    if (c.human) { this.sgUpdate(c); this.reverseControl(c, dt, input); }
     if (c.mode === 'off') { this.stepOff(c, dt); return; }
     if (c.mode === 'tow') { this.stepTow(c, dt); return; }
     if (c.mode === 'bayIn' || c.mode === 'service' || c.mode === 'bayOut') { this.stepBay(c, dt, input); return; }
@@ -549,19 +809,19 @@ export class Race {
     // ---- control
     let thrIn = 0, brkIn = 0;
     let autoV: number | null = null;
-    if (c.mode !== 'grid' || c.isPlayer) {
+    if (c.mode !== 'grid' || c.human) {
       // braking takes priority: with both held, Throttle does nothing
-      if (c.isPlayer && !c.finished && c.sgCtl) {
+      if (c.human && !c.finished && c.sgCtl) {
         // automatic stop-and-go: the controller owns the pedals, so a held Throttle or Brake changes nothing
         autoV = this.sgTarget(c);
         const err = autoV - c.v;
         if (err > 0.3) thrIn = 1;
         else if (err < -0.05) brkIn = 1;
         else thrIn = (COAST + DRAG * c.v * c.v) / (ACC * Math.max(0.05, 1 - c.v / VMAX) + COAST);
-      } else if (c.isPlayer && !c.finished) { brkIn = input.down ? 1 : 0; thrIn = input.up && !input.down ? 1 : 0; }
+      } else if (c.human && !c.finished) { brkIn = input.down ? 1 : 0; thrIn = input.up && !input.down ? 1 : 0; }
       else if (c.mode !== 'grid') { const a = this.ai(c, dt); thrIn = a.t; brkIn = a.b; }
     }
-    const rise = c.isPlayer ? 4.5 : c.persona.rise, fall = 9;
+    const rise = c.human ? 4.5 : c.persona.rise, fall = 9;
     c.throttle += Math.max(-fall * dt, Math.min(rise * dt, thrIn - c.throttle));
     c.brake = brkIn;
     if (c.mode === 'grid') return;
@@ -589,10 +849,10 @@ export class Race {
     let cap = 1e9;
     c.squeezeHold = false; c.yielding = false;
     if (c.mode === 'pitlane') {
-      cap = T.PIT_SPEED;
+      cap = this.T.PIT_SPEED;
       // the pit exit: wait at the line while the outside lane is not clear or another car is merging
       if (c.exitHold) {
-        const a = T.gapS(s0, T.PIT_OUT0);
+        const a = this.T.gapS(s0, this.T.PIT_OUT0);
         cap = Math.min(cap, Math.sqrt(2 * 25 * Math.max(0, a - 0.4)));
         c.yielding = true;
       }
@@ -602,8 +862,8 @@ export class Race {
     const qi = this.squeezeQ.indexOf(c);
     if (qi > 0) {
       const ah = this.squeezeQ[qi - 1];
-      const gap = T.gapS(s0, this.s(ah));
-      const minGap = T.CAR_LEN + 0.3;
+      const gap = this.T.gapS(s0, this.s(ah));
+      const minGap = this.T.CAR_LEN + 0.3;
       const lim = Math.max(0, ah.v + 3 * (gap - minGap));
       if (gap < minGap + 2.5 && Math.abs(c.d - ah.d) > 0.05) c.squeezeHold = lim < c.v + 1;
       cap = Math.min(cap, lim);
@@ -611,28 +871,28 @@ export class Race {
     if (c.v > cap) c.v = Math.max(cap, c.v - 45 * dt);
 
     // ---- move along slot
-    const k = T.curvature(s0);
+    const k = this.T.curvature(s0);
     let ds = (c.v * dt) / Math.max(0.3, 1 - k * c.d);
     if (ds < 0) ds = this.reverseTravel(c, s0, ds);
     const prevD = c.d;
     const u0 = c.u;
     c.u += ds;
     const s = this.s(c);
-    const crossed = (x: number): boolean => { const g = T.gapS(s0, x); return ds > 0 && g >= 0 && g < ds; };
+    const crossed = (x: number): boolean => { const g = this.T.gapS(s0, x); return ds > 0 && g >= 0 && g < ds; };
     /** crossed on new ground: after backing up, points short of the furthest position already reached are not decided again */
-    const fresh = (x: number): boolean => crossed(x) && (c.revMark === null || u0 + T.gapS(s0, x) >= c.revMark);
+    const fresh = (x: number): boolean => crossed(x) && (c.revMark === null || u0 + this.T.gapS(s0, x) >= c.revMark);
 
     // fuel: burn follows distance travelled in either direction, so backing up can never refill the tank
     // cars on their cool-down lap after the flag no longer burn fuel (they would otherwise run dry and get towed)
-    if (!c.finished && !this.practice) c.fuel = Math.max(0, c.fuel - Math.abs(c.v) * dt * fuelRate() * (0.5 + 0.7 * (revDrive ? 1 : thr)));
-    if (c.isPlayer && !c.lowFuelWarned && c.fuel < LOW_FUEL && !c.finished) { c.lowFuelWarned = true; this.pmsg(c, 'msg.lowFuel', 'bad'); }
+    if (!c.finished && !this.practice) c.fuel = Math.max(0, c.fuel - Math.abs(c.v) * dt * this.fuelRate() * (0.5 + 0.7 * (revDrive ? 1 : thr)));
+    if (c.human && !c.lowFuelWarned && c.fuel < LOW_FUEL && !c.finished) { c.lowFuelWarned = true; this.pmsg(c, 'msg.lowFuel', 'bad'); }
     if (c.fuel > LOW_FUEL + 0.05) c.lowFuelWarned = false;
 
     if (c.mode === 'race') {
       // an owed stop keeps routing on, including after a pit exit or tow that did not serve it; a deferral releases one approach
-      if (c.isPlayer) this.syncRoute(c);
+      if (c.human) this.syncRoute(c);
       // lane switches
-      for (const sw of T.SWITCHES) {
+      for (const sw of this.T.SWITCHES) {
         if (!fresh(sw.s0)) continue;
         const route = this.nextRoute(c);
         if (route) { c.laneReq = !route.stay && !c.change; if (route.override) c.overAppr = this.apprLap(c); c.laneOverride = false; }
@@ -655,15 +915,15 @@ export class Race {
       }
       if (c.change) {
         const len = c.change.s1 - c.change.s0;
-        const p = T.ahead(c.change.s0, s);
+        const p = this.T.ahead(c.change.s0, s);
         if (p >= len && p < len + 20) { c.laneSide = c.change.to; c.change = null; c.cutT = PEN.cutInWindow; }
-        else c.laneSide = c.change.from + (c.change.to - c.change.from) * T.smooth(p / len);
+        else c.laneSide = c.change.from + (c.change.to - c.change.from) * this.T.smooth(p / len);
       }
       // pit entry: a physical forward crossing. Entering clears the routing and an optional request, never a debt
-      if (crossed(T.PIT_IN0)) {
+      if (crossed(this.T.PIT_IN0)) {
         let entered = false;
         // a stop-and-go entrance reached too fast for the controller to take over is not entered: no instant stop, the debt stays
-        const tooFast = c.isPlayer && c.sgOwed > 0 && !c.sgCtl && c.v > T.PIT_SPEED + AUTO.entryTol;
+        const tooFast = c.human && c.sgOwed > 0 && !c.sgCtl && c.v > this.T.PIT_SPEED + AUTO.entryTol;
         if (c.pitReq && tooFast && c.laneSide < 0 && !c.change && !c.finished) this.pmsg(c, 'msg.sgTooLate', 'bad');
         else if (c.pitReq) {
           if (c.laneSide < 0 && !c.change && !c.finished) {
@@ -672,40 +932,40 @@ export class Race {
             this.clearPitIntent(c);
             this.pmsg(c, c.sgOwed > 0 ? 'msg.pitInPen' : 'msg.pitIn', 'info');
           } else {
-            if (!c.isPlayer) c.pitReq = false; // the AI decides again every step; a player's request waits for the next lap
+            if (!c.human) c.pitReq = false; // the AI decides again every step; a player's request waits for the next lap
             this.pmsg(c, 'msg.pitMissed', 'bad');
           }
         }
         // an optional fuel request driven past on a manual override is a deferral: it is now owed by the end of the next lap.
         // Judged once per approach, so backing up and passing again changes nothing
-        if (!entered && c.isPlayer && c.fuelReq && !c.finished && !this.practice && fresh(T.PIT_IN0)) {
-          const k = Math.round((u0 + T.gapS(s0, T.PIT_IN0) - T.PIT_IN0) / T.L);
+        if (!entered && c.human && c.fuelReq && !c.finished && !this.practice && fresh(this.T.PIT_IN0)) {
+          const k = Math.round((u0 + this.T.gapS(s0, this.T.PIT_IN0) - this.T.PIT_IN0) / this.T.L);
           if (c.overAppr === k && k + 1 <= LAPS) { c.fuelReq = false; c.fuelDue = k + 1; this.syncRoute(c); this.pmsg(c, 'msg.fuelOverride', 'bad'); }
         }
       }
       // squeeze priority queue
-      if (crossed(T.SQ_ENTRY) && !this.squeezeQ.includes(c)) this.squeezeQ.push(c);
-      if (crossed(T.SQ_EXIT)) this.leaveSqueeze(c);
-      c.d = c.laneSide * T.laneHalf(s);
+      if (crossed(this.T.SQ_ENTRY) && !this.squeezeQ.includes(c)) this.squeezeQ.push(c);
+      if (crossed(this.T.SQ_EXIT)) this.leaveSqueeze(c);
+      c.d = c.laneSide * this.T.laneHalf(s);
     } else if (c.mode === 'pitlane') {
-      c.d = T.pitD(s);
+      c.d = this.T.pitD(s);
       this.servePenalty(c, s, dt);
-      if (crossed(T.PIT_OUT1)) {
-        c.mode = 'race'; c.laneSide = -1; c.d = -T.LANE_HALF; c.serviced = false; c.graceT = PEN.grace; c.pitFuel = false;
+      if (crossed(this.T.PIT_OUT1)) {
+        c.mode = 'race'; c.laneSide = -1; c.d = -this.T.LANE_HALF; c.serviced = false; c.graceT = PEN.grace; c.pitFuel = false;
         // the handover point: past the pit-exit merge, back in the outside lane, normal control returns
         if (c.sgLeave) { c.sgLeave = false; c.sgCtl = false; c.sgPhase = null; this.pmsg(c, 'msg.sgHandover', 'info'); }
         this.pit.release('exit', c, 'done');
         if (c.sgOwed > 0 && !c.finished) this.pmsg(c, 'msg.penStillOwed', 'bad');
       }
       // automatic fuel visit: brought to rest at the centre of the car's own bay, it turns in (the usual entry animation)
-      else if (c.isPlayer && c.sgCtl && this.autoBay(c, s)) {
-        if (Math.abs(T.gapS(s, T.BAYS[c.bayHome])) < AUTO.bayTol && Math.abs(c.v) < 0.05 && this.bayFree(c.bayHome, c)) this.enterBay(c, c.bayHome);
+      else if (c.human && c.sgCtl && this.autoBay(c, s)) {
+        if (Math.abs(this.T.gapS(s, this.T.BAYS[c.bayHome])) < AUTO.bayTol && Math.abs(c.v) < 0.05 && this.bayFree(c.bayHome, c)) this.enterBay(c, c.bayHome);
       }
       // a bay is only captured nearly stopped: never while reversing past it, nor while the queue holds the car (unless braking there)
-      else if (Math.abs(c.v) < 0.7 && !c.revOn && c.isPlayer && !c.sgCtl && !c.sgLeave && !c.serviced && !c.sgServing && (!c.pitHold || input.down)) this.tryBay(c, s);
-      else if (!c.isPlayer && c.pitPlan) {
+      else if (Math.abs(c.v) < 0.7 && !c.revOn && c.human && !c.sgCtl && !c.sgLeave && !c.serviced && !c.sgServing && (!c.pitHold || input.down)) this.tryBay(c, s);
+      else if (!c.human && c.pitPlan) {
         // only the car's own bay: occupied, it waits short of it (ai()); passed, it goes round again and never takes another team's
-        if (Math.abs(T.gapS(s, T.BAYS[c.bayHome])) < 0.45 && c.v < 1.5 && this.bayFree(c.bayHome, c)) this.enterBay(c, c.bayHome);
+        if (Math.abs(this.T.gapS(s, this.T.BAYS[c.bayHome])) < 0.45 && c.v < 1.5 && this.bayFree(c.bayHome, c)) this.enterBay(c, c.bayHome);
       }
     }
 
@@ -716,10 +976,10 @@ export class Race {
 
     // ---- grip / deslot (racing lanes only)
     if (c.mode === 'race') {
-      const k2 = T.curvature(s);
+      const k2 = this.T.curvature(s);
       const kl = Math.abs(k2 / (1 - k2 * c.d));
       // banked sections (new circuits only) give a modest, predictable grip bonus to everyone
-      const r = (c.v * c.v * kl) / (GRIP * T.gripScale(s));
+      const r = (c.v * c.v * kl) / (GRIP * this.T.gripScale(s));
       c.latRatio = r;
       if (r > 1) c.slip += ((r - 1) * 3 + 0.2) * dt; else c.slip = Math.max(0, c.slip - 2.5 * dt);
       const target = Math.max(0, Math.min(1, (r - 0.8) / 0.2)) * 0.6 + c.slip * 0.8;
@@ -728,7 +988,7 @@ export class Race {
     } else { c.latRatio = 0; c.wobble *= 0.9; c.slip = 0; }
 
     // out of fuel: towed to a bay from the road, or from anywhere in the pit lane except standing in the box to serve the stop
-    const dryPit = c.mode === 'pitlane' && !(c.sgOwed > 0 && this.pit.box === c.idx && Math.abs(T.gapS(s, T.PEN_S)) < T.PEN_HALF);
+    const dryPit = c.mode === 'pitlane' && !(c.sgOwed > 0 && this.pit.box === c.idx && Math.abs(this.T.gapS(s, this.T.PEN_S)) < this.T.PEN_HALF);
     if (c.fuel <= 0 && (c.mode === 'race' || dryPit) && Math.abs(c.v) < 0.4) {
       c.towPit = c.mode === 'pitlane'; c.sgLeave = false; c.sgServing = false;
       c.mode = 'tow'; c.towT = 0; c.lapValid = false; this.leaveSqueeze(c); c.laneReq = false; this.clearPitIntent(c);
@@ -739,7 +999,7 @@ export class Race {
     }
     // ordered sector checkpoints (quarter, half, three-quarter distance from the timing line)
     for (let i = 0; i < 3; i++) {
-      if (fresh(T.wrapS(T.FINISH_S + (T.L * (i + 1)) / 4))) {
+      if (fresh(this.T.wrapS(this.T.FINISH_S + (this.T.L * (i + 1)) / 4))) {
         if (c.sectors === (1 << i) - 1) c.sectors |= 1 << i; else c.lapValid = false;
       }
     }
@@ -758,7 +1018,7 @@ export class Race {
    */
   sgUpdate(c: Car): void {
     c.sgCtl = false; c.sgPhase = null;
-    if (!c.isPlayer || c.finished || c.status !== 'running' || this.phase !== 'racing') return;
+    if (!c.human || c.finished || c.status !== 'running' || this.phase !== 'racing') return;
     const s = this.s(c);
     if (c.mode === 'bayIn' || c.mode === 'service' || c.mode === 'bayOut') {
       // in the bay the pedals never move the car; only a fresh Throttle press once departure is ready asks to leave
@@ -772,7 +1032,7 @@ export class Race {
       if (c.sgLeave) { c.sgCtl = true; c.sgPhase = 'leaving'; return; }
       // in control up to the end of the box; a car beyond it (it can only get there in reverse recovery) is driven by hand
       if (c.sgOwed > 0) {
-        if (T.gapS(s, SG_STOP) > -T.PEN_HALF) { c.sgCtl = true; c.sgPhase = c.sgServing ? 'serving' : c.pitHold ? 'queued' : 'entry'; }
+        if (this.T.gapS(s, SG_STOP) > -this.T.PEN_HALF) { c.sgCtl = true; c.sgPhase = c.sgServing ? 'serving' : c.pitHold ? 'queued' : 'entry'; }
         return;
       }
       if (this.autoBay(c, s)) { c.sgCtl = true; c.sgPhase = c.pitHold ? 'queued' : this.bayFree(c.bayHome, c) ? 'bay' : 'bayWait'; }
@@ -784,14 +1044,14 @@ export class Race {
     const k = this.apprLap(c);
     if (c.routeHold === k) { if (sg) c.sgPhase = 'deferred'; c.sgCommit = -1; return; }
     if (sg) c.sgPhase = 'armed';
-    const dEntry = T.ahead(s, T.PIT_IN0);
+    const dEntry = this.T.ahead(s, this.T.PIT_IN0);
     // an override armed earlier that no switch before the entrance can use any more changes nothing: drop it
     if (c.laneOverride && !this.switchBeforeEntry(c) && (c.change ? c.change.to < 0 : c.laneSide < 0)) c.laneOverride = false;
     if (!this.pitAssist(c) || c.laneOverride || dEntry >= AUTO.window || !this.sgPath(c, s, dEntry)) { c.sgCommit = -1; return; }
     if (c.sgCommit !== k) {
       // too fast for this entrance: no takeover (a stop-and-go is then not entered; a fuel visit is taken over in the pit lane)
-      if (c.v * c.v > T.PIT_SPEED ** 2 + 2 * AUTO.late * dEntry) return;
-      c.sgCommit = k; c.sgVc = Math.max(T.PIT_SPEED, c.v);
+      if (c.v * c.v > this.T.PIT_SPEED ** 2 + 2 * AUTO.late * dEntry) return;
+      c.sgCommit = k; c.sgVc = Math.max(this.T.PIT_SPEED, c.v);
       this.pmsg(c, sg ? 'msg.sgAuto' : 'msg.bayAuto', 'info', { n: this.bayNo(c) });
     }
     c.sgCtl = true; c.sgPhase = c.pitHold ? 'queued' : 'entry';
@@ -802,7 +1062,7 @@ export class Race {
    * A car already past the bay centre (only by hand) is left to the driver: reversing back and releasing captures the bay as usual.
    */
   autoBay(c: Car, s: number): boolean {
-    return c.mode === 'pitlane' && c.pitFuel && !c.serviced && !c.sgLeave && c.sgOwed <= 0 && T.gapS(s, T.BAYS[c.bayHome]) > -AUTO.bayTol;
+    return c.mode === 'pitlane' && c.pitFuel && !c.serviced && !c.sgLeave && c.sgOwed <= 0 && this.T.gapS(s, this.T.BAYS[c.bayHome]) > -AUTO.bayTol;
   }
 
   /** The bay number shown to the driver: 1 for the first bay down the pit lane. */
@@ -818,7 +1078,7 @@ export class Race {
   /** Where automatic control brings the car to rest next: the box centre, its own bay, or short of that bay while it is occupied. */
   autoStopS(c: Car): number {
     if (c.sgOwed > 0) return SG_STOP;
-    const bs = T.BAYS[c.bayHome];
+    const bs = this.T.BAYS[c.bayHome];
     return this.bayFree(c.bayHome, c) ? bs : bs - AUTO.bayWait;
   }
 
@@ -826,7 +1086,7 @@ export class Race {
   sgPath(c: Car, s: number, dEntry: number): boolean {
     if (c.change) return c.change.to < 0;
     if (c.laneSide < 0) return true;
-    return T.SWITCHES.some((sw) => { const a = T.ahead(s, sw.s0); return a > 0.05 && a + T.SWITCH_LEN < dEntry; });
+    return this.T.SWITCHES.some((sw) => { const a = this.T.ahead(s, sw.s0); return a > 0.05 && a + this.T.SWITCH_LEN < dEntry; });
   }
 
   /**
@@ -835,22 +1095,22 @@ export class Race {
    */
   sgTarget(c: Car): number {
     const s = this.s(c);
-    if (c.sgLeave) return T.PIT_SPEED;
+    if (c.sgLeave) return this.T.PIT_SPEED;
     const road = c.mode === 'race';
-    const dEntry = road ? T.ahead(s, T.PIT_IN0) : 0;
+    const dEntry = road ? this.T.ahead(s, this.T.PIT_IN0) : 0;
     const stopS = this.autoStopS(c);
-    const dStop = road ? dEntry + stopS - T.PIT_IN0 : T.gapS(s, stopS);
+    const dStop = road ? dEntry + stopS - this.T.PIT_IN0 : this.T.gapS(s, stopS);
     if (c.sgServing || (!road && dStop <= AUTO.stopTol)) return 0;
-    let v = road ? Math.max(T.PIT_SPEED, c.sgVc) : T.PIT_SPEED;
-    if (road) v = Math.min(v, Math.sqrt(T.PIT_SPEED ** 2 + 2 * AUTO.plan * Math.max(0, dEntry - AUTO.entryLead)), this.sgFollow(c, s), this.sgCorner(c, s));
+    let v = road ? Math.max(this.T.PIT_SPEED, c.sgVc) : this.T.PIT_SPEED;
+    if (road) v = Math.min(v, Math.sqrt(this.T.PIT_SPEED ** 2 + 2 * AUTO.plan * Math.max(0, dEntry - AUTO.entryLead)), this.sgFollow(c, s), this.sgCorner(c, s));
     return Math.min(v, Math.sqrt(2 * AUTO.box * Math.max(0, dStop)), c.pitCap);
   }
 
   /** The player's planned cornering speed here and just ahead, on every lane the car may use: a takeover mid-corner never holds a speed the slot cannot. */
   sgCorner(c: Car, s: number): number {
     const n = this.profiles['-1'].length;
-    const i0 = Math.floor(T.wrapS(s) / T.PROFILE_STEP) % n;
-    const i1 = Math.floor(T.wrapS(s + c.v * c.persona.look) / T.PROFILE_STEP) % n;
+    const i0 = Math.floor(this.T.wrapS(s) / this.T.PROFILE_STEP) % n;
+    const i1 = Math.floor(this.T.wrapS(s + c.v * c.persona.look) / this.T.PROFILE_STEP) % n;
     const sides = c.change || c.laneSide > 0 ? ['-1', '1'] : ['-1'];
     return Math.min(...sides.map((k) => Math.min(this.profiles[k][i0], this.profiles[k][i1])));
   }
@@ -858,12 +1118,12 @@ export class Race {
   /** A stopping gap behind any car ahead on the car's lane or the outside lane it is heading for (road only). */
   sgFollow(c: Car, s: number): number {
     let cap = 1e9;
-    const paths = [c.d, -T.laneHalf(s)];
+    const paths = [c.d, -this.T.laneHalf(s)];
     for (const o of this.cars) {
       if (o === c || (o.mode !== 'race' && o.mode !== 'pitlane' && o.mode !== 'grid')) continue;
-      const g = T.gapS(s, this.s(o));
-      if (g <= 1e-6 || g > PIT_Q.look || !paths.some((d) => Math.abs(d - o.d) < T.CAR_W)) continue;
-      const room = g - T.CAR_LEN - PIT_Q.gap + (o.v > 0 ? (o.v * o.v) / (2 * PIT_Q.leadBrake) : o.v * 0.5);
+      const g = this.T.gapS(s, this.s(o));
+      if (g <= 1e-6 || g > PIT_Q.look || !paths.some((d) => Math.abs(d - o.d) < this.T.CAR_W)) continue;
+      const room = g - this.T.CAR_LEN - PIT_Q.gap + (o.v > 0 ? (o.v * o.v) / (2 * PIT_Q.leadBrake) : o.v * 0.5);
       cap = Math.min(cap, Math.sqrt(2 * PIT_Q.decel * Math.max(0, room)));
     }
     return cap;
@@ -879,7 +1139,7 @@ export class Race {
     if (c.change) return 'change';
     if (c.fuel <= 0) return 'fuel';
     // standing (or arriving) in the penalty box with a stop owed is service: Brake must keep the car still for all of it
-    if (c.mode === 'pitlane' && c.sgOwed > 0 && Math.abs(T.gapS(this.s(c), T.PEN_S)) < T.PEN_HALF) return 'service';
+    if (c.mode === 'pitlane' && c.sgOwed > 0 && Math.abs(this.T.gapS(this.s(c), this.T.PEN_S)) < this.T.PEN_HALF) return 'service';
     return null;
   }
 
@@ -913,7 +1173,7 @@ export class Race {
   /** One step of backward travel: a pit-lane car stops at the upstream end of the pit path. Backing up leaves the squeeze queue and voids the lap. */
   reverseTravel(c: Car, s0: number, ds: number): number {
     if (c.mode === 'pitlane') {
-      const room = Math.max(0, T.gapS(REV_PIT_MIN, s0));
+      const room = Math.max(0, this.T.gapS(REV_PIT_MIN, s0));
       if (-ds >= room) { ds = -room; c.v = 0; }
     }
     if (ds < 0) {
@@ -926,13 +1186,13 @@ export class Race {
 
   /** Lap counting. dt/ds/s0 describe the step just taken so the crossing time can be interpolated to sub-step precision. */
   laps(c: Car, dt = 0, ds = 0, s0 = 0): void {
-    const prog = c.u - T.FINISH_S;
-    const cr = prog >= 0 ? Math.floor(prog / T.L) + 1 : 0;
+    const prog = c.u - this.T.FINISH_S;
+    const cr = prog >= 0 ? Math.floor(prog / this.T.L) + 1 : 0;
     while (c.crossed < cr) {
       c.crossed++;
       // precise crossing time: fraction of this step travelled before the line
       let tCross = this.raceTime;
-      if (ds > 1e-6 && dt > 0) { const frac = Math.max(0, Math.min(1, T.ahead(s0, T.FINISH_S) / ds)); tCross = this.raceTime - dt * (1 - frac); }
+      if (ds > 1e-6 && dt > 0) { const frac = Math.max(0, Math.min(1, this.T.ahead(s0, this.T.FINISH_S) / ds)); tCross = this.raceTime - dt * (1 - frac); }
       const valid = c.lapValid && c.sectors === 7 && c.crossed >= 2;
       if (c.crossed >= 2 && !c.finished) {
         const lt = tCross - c.lapStartT;
@@ -947,7 +1207,7 @@ export class Race {
         const flag = c.lapsDone >= LAPS && !this.practice;
         this.serviceDeadline(c, flag);
         if (flag) this.finishCar(c, tCross, prior);
-        else if (c.isPlayer && c.lapsDone === LAPS - 1 && !this.practice) this.pmsg(c, 'msg.finalLap', 'good');
+        else if (c.human && c.lapsDone === LAPS - 1 && !this.practice) this.pmsg(c, 'msg.finalLap', 'good');
       }
       c.lapStartT = tCross; c.lapValid = true; c.sectors = 0;
     }
@@ -965,9 +1225,9 @@ export class Race {
     const s = this.s(c);
     for (const o of this.cars) {
       if (o === c || !this.occupies(o, to)) continue;
-      const g = T.gapS(s, this.s(o));
-      const front = T.CAR_LEN + 0.5 + Math.max(0, c.v - o.v) * 0.45;
-      const back = T.CAR_LEN + 0.5 + Math.max(0, o.v - c.v) * 0.55;
+      const g = this.T.gapS(s, this.s(o));
+      const front = this.T.CAR_LEN + 0.5 + Math.max(0, c.v - o.v) * 0.45;
+      const back = this.T.CAR_LEN + 0.5 + Math.max(0, o.v - c.v) * 0.55;
       if (g < front && g > -back) return false;
     }
     return true;
@@ -979,15 +1239,15 @@ export class Race {
    */
   mergeBlocked(c: Car): boolean {
     const s = this.s(c);
-    const zone = T.PIT_OUT1 - T.PIT_OUT0 + T.CAR_LEN + 2;
+    const zone = this.T.PIT_OUT1 - this.T.PIT_OUT0 + this.T.CAR_LEN + 2;
     for (const o of this.cars) {
       if (o === c || o.mode !== 'race') continue;
       if (!(o.change || o.laneSide < 0)) continue;
-      const z = T.gapS(T.PIT_OUT0, this.s(o));
+      const z = this.T.gapS(this.T.PIT_OUT0, this.s(o));
       if (o.v < 1 && z > 1.5 && z < zone + Math.max(0, -o.v) * 1.5) return true;
       // a car backing up counts however slow: it is coming towards the merge from ahead
       if (o.v >= 0 && o.v < 1) continue;
-      const g = T.gapS(s, this.s(o));
+      const g = this.T.gapS(s, this.s(o));
       if (g < 2.5 + Math.max(0, -o.v) * 1.5 && g > -(3 + Math.max(0, o.v) * 0.75)) return true;
     }
     return false;
@@ -999,13 +1259,13 @@ export class Race {
   /** A car stopped by hand alongside its own bay turns in, if the bay is free. Another team's bay never captures it. */
   tryBay(c: Car, s: number): void {
     const j = c.bayHome;
-    if (j >= 0 && j < T.BAYS.length && Math.abs(T.gapS(s, T.BAYS[j])) < T.BAY_HALF && this.bayFree(j, c)) this.enterBay(c, j);
+    if (j >= 0 && j < this.T.BAYS.length && Math.abs(this.T.gapS(s, this.T.BAYS[j])) < this.T.BAY_HALF && this.bayFree(j, c)) this.enterBay(c, j);
   }
 
   /** fuel the AI needs to reach the flag from here, planned at a realistic burn rate */
   fuelToFinish(c: Car, s: number): number {
     const lapsLeft = LAPS - c.lapsDone;
-    return (lapsLeft * T.L - T.ahead(T.FINISH_S, s)) * fuelRate() * PLAN_BURN;
+    return (lapsLeft * this.T.L - this.T.ahead(this.T.FINISH_S, s)) * this.fuelRate() * PLAN_BURN;
   }
 
   enterBay(c: Car, j: number): void {
@@ -1013,7 +1273,7 @@ export class Race {
     // Throttle counts as held until the bay sees it released: a pedal held on arrival never asks to leave
     c.mode = 'bayIn'; c.bay = j; c.bayT = 0; c.v = 0; c.serviceT = 0; c.fuelAtBay = c.fuel; c.towSvc = false; c.exitReq = false; c.upPrev = true;
     c.pitStops++;
-    if (!c.isPlayer) c.refuelTarget = Math.min(1, Math.max(0.3, this.fuelToFinish(c, this.s(c)) + rnd(0.06, 0.2)));
+    if (!c.human) c.refuelTarget = Math.min(1, Math.max(0.3, this.fuelToFinish(c, this.s(c)) + this.rnd(0.06, 0.2)));
   }
 
   /** The car's bay reservation is bay j: a reservation it held for another bay moves here. */
@@ -1025,18 +1285,18 @@ export class Race {
   }
 
   stepBay(c: Car, dt: number, input: Input): void {
-    const bs = T.BAYS[c.bay];
+    const bs = this.T.BAYS[c.bay];
     const s = this.s(c);
     c.v = 0; c.yawOff *= 0.8; c.wobble *= 0.9;
-    if (!c.isPlayer || c.finished) c.throttle = 0; else c.throttle += ((input.up ? 1 : 0) - c.throttle) * Math.min(1, dt * 6);
+    if (!c.human || c.finished) c.throttle = 0; else c.throttle += ((input.up ? 1 : 0) - c.throttle) * Math.min(1, dt * 6);
     // a Throttle held while turning in is still the arrival's: it has to be released before a press can ask to leave
-    if (c.isPlayer && c.mode === 'bayIn') c.upPrev = c.upPrev && input.up;
+    if (c.human && c.mode === 'bayIn') c.upPrev = c.upPrev && input.up;
     if (c.mode === 'bayIn') {
       c.bayT = Math.min(1, c.bayT + dt / 0.45);
-      c.u += T.gapS(s, bs) * Math.min(1, dt * 10);
-      c.d = T.PIT_D + (T.BAY_D - T.PIT_D) * T.smooth(c.bayT);
+      c.u += this.T.gapS(s, bs) * Math.min(1, dt * 10);
+      c.d = this.T.PIT_D + (this.T.BAY_D - this.T.PIT_D) * this.T.smooth(c.bayT);
       c.yawOff = -Math.sin(c.bayT * Math.PI) * 0.5;
-      if (c.bayT >= 1) { c.mode = 'service'; c.serviceT = 0; if (c.isPlayer) this.pmsg(c, 'msg.refuelling', 'info'); }
+      if (c.bayT >= 1) { c.mode = 'service'; c.serviceT = 0; if (c.human) this.pmsg(c, 'msg.refuelling', 'info'); }
     } else if (c.mode === 'service') {
       c.serviceT += dt;
       c.penalty = Math.max(0, c.penalty - dt);
@@ -1046,7 +1306,7 @@ export class Race {
       if (c.fuelDue > 0 && !c.towSvc && c.serviceT > SERVICE_READY) { c.fuelDue = 0; this.pmsg(c, 'msg.fuelDone', 'good'); }
       // a departure request is latched: it waits in the bay for a safe merge and then goes, once, without pressing again.
       // The player asks with a fresh Throttle press once departure is ready; a full tank never leaves by itself
-      if (c.isPlayer && !c.finished) {
+      if (c.human && !c.finished) {
         const press = input.up && !c.upPrev;
         c.upPrev = input.up;
         if (press && !c.exitReq) {
@@ -1059,12 +1319,12 @@ export class Race {
       if (c.exitReq && this.pit.merges[c.bay] === c.idx) { c.mode = 'bayOut'; c.bayT = 0; c.pitPlan = false; c.waitingClear = false; }
     } else {
       c.bayT = Math.min(1, c.bayT + dt / 0.4);
-      c.d = T.BAY_D + (T.PIT_D - T.BAY_D) * T.smooth(c.bayT);
+      c.d = this.T.BAY_D + (this.T.PIT_D - this.T.BAY_D) * this.T.smooth(c.bayT);
       c.yawOff = Math.sin(c.bayT * Math.PI) * 0.5;
       if (c.bayT >= 1) {
-        c.mode = 'pitlane'; c.v = 0; c.d = T.PIT_D; c.yawOff = 0; c.serviced = true; c.exitReq = false;
+        c.mode = 'pitlane'; c.v = 0; c.d = this.T.PIT_D; c.yawOff = 0; c.serviced = true; c.exitReq = false;
         // the player is driven on along the pit lane, through the exit yield, and handed back past the merge
-        if (c.isPlayer && !c.finished) c.sgLeave = true;
+        if (c.human && !c.finished) c.sgLeave = true;
         // back in the through lane: the merge and the bay are released, once
         this.pit.release(`merge${c.bay}`, c, 'done'); this.pit.release(`bay${c.bay}`, c, 'done');
       }
@@ -1073,13 +1333,13 @@ export class Race {
 
   deslot(c: Car): void {
     const s = this.s(c);
-    const p = T.point(s, c.d);
-    const k = T.curvature(s);
+    const p = this.T.point(s, c.d);
+    const k = this.T.curvature(s);
     const hd = p.h + c.yawOff;
     const outx = Math.sin(p.h) * Math.sign(k || 1), outy = -Math.cos(p.h) * Math.sign(k || 1);
     c.off = {
       x: p.x, y: p.y,
-      z: T.surfZ(s, c.d), vz: 2.5 + c.v * 0.12,
+      z: this.T.surfZ(s, c.d), vz: 2.5 + c.v * 0.12,
       vx: Math.cos(hd) * c.v * 0.5 + outx * c.v * 0.25,
       vy: Math.sin(hd) * c.v * 0.5 + outy * c.v * 0.25,
       yaw: hd, spin: -(Math.sign(k) || 1) * (5 + c.v * 0.35), t: 0,
@@ -1105,12 +1365,12 @@ export class Race {
     if (o.t > 1.7) {
       // marshal returns the car to the slot just behind where it left
       const u = o.u0 - 1.6;
-      const s = T.wrapS(u);
-      const d = o.lane * T.laneHalf(s);
-      const busy = this.cars.some((x) => x !== c && (x.mode === 'race' || x.mode === 'pitlane') && Math.abs(T.gapS(s, this.s(x))) < 2.4 && Math.abs(x.d - d) < T.CAR_W);
+      const s = this.T.wrapS(u);
+      const d = o.lane * this.T.laneHalf(s);
+      const busy = this.cars.some((x) => x !== c && (x.mode === 'race' || x.mode === 'pitlane') && Math.abs(this.T.gapS(s, this.s(x))) < 2.4 && Math.abs(x.d - d) < this.T.CAR_W);
       if (!busy) {
         c.u = u; c.laneSide = o.lane; c.d = d; c.mode = 'race'; c.off = null; c.v = 0; c.recoverT = 1.0; c.graceT = PEN.grace; c.yawOff = 0; c.wobble = 0;
-        if (c.isPlayer) this.pmsg(c, 'msg.backOn', 'info');
+        if (c.human) this.pmsg(c, 'msg.backOn', 'info');
       }
     }
   }
@@ -1122,18 +1382,18 @@ export class Race {
     // always to the car's own bay; while it is occupied the tow waits. From the pit lane it moves ahead or back, never round a lap
     const j = c.bayHome;
     if (!this.bayFree(j, c)) return;
-    const dist = c.towPit ? T.gapS(s, T.BAYS[j]) : T.ahead(s, T.BAYS[j]);
+    const dist = c.towPit ? this.T.gapS(s, this.T.BAYS[j]) : this.T.ahead(s, this.T.BAYS[j]);
     // pulled back up the pit lane: points already passed (the timing line among them) are not decided again
     const mark = dist < 0 ? Math.max(c.revMark ?? -Infinity, c.u) : null;
     c.u += dist;
     this.holdBay(c, j);
-    c.bay = j; c.mode = 'service'; c.serviceT = 0; c.d = T.BAY_D; c.laneSide = -1; c.yawOff = 0; c.revMark = null; c.towSvc = true; c.exitReq = false; c.upPrev = true;
+    c.bay = j; c.mode = 'service'; c.serviceT = 0; c.d = this.T.BAY_D; c.laneSide = -1; c.yawOff = 0; c.revMark = null; c.towSvc = true; c.exitReq = false; c.upPrev = true;
     if (mark !== null) c.revMark = mark;
     c.towPit = false;
     if (c.u > c.hiU) c.hiU = c.u;
     c.penalty = 8 + Math.abs(dist) / 11; c.pitStops++;
     c.refuelTarget = Math.max(c.refuelTarget, 0.75);
-    if (c.isPlayer) this.pmsg(c, 'msg.towPenalty', 'bad', { n: Math.round(c.penalty) });
+    if (c.human) this.pmsg(c, 'msg.towPenalty', 'bad', { n: Math.round(c.penalty) });
     this.laps(c);
   }
 
@@ -1144,26 +1404,26 @@ export class Race {
     // lapses of concentration: for a while the driver brakes later and carries more speed into corners
     // (how much is rolled per lapse; an aggressive driver's lapse can exceed the real grip limit)
     c.mistakeT -= dt;
-    if (c.mistakeT < 0 && c.lapse === 0) c.lapse = rnd(P.lapseMix[0], P.lapseMix[1]);
-    if (c.mistakeT < -P.mistakeDur) { c.mistakeT = rnd(P.mistakeEvery[0], P.mistakeEvery[1]); c.lapse = 0; }
+    if (c.mistakeT < 0 && c.lapse === 0) c.lapse = this.rnd(P.lapseMix[0], P.lapseMix[1]);
+    if (c.mistakeT < -P.mistakeDur) { c.mistakeT = this.rnd(P.mistakeEvery[0], P.mistakeEvery[1]); c.lapse = 0; }
     let target: number;
     if (c.mode === 'pitlane') {
-      target = T.PIT_SPEED;
+      target = this.T.PIT_SPEED;
       if (c.sgOwed > 0) {
         // stop-and-go first: roll to a halt inside the penalty box and wait there
-        const a = T.gapS(s, T.PEN_S);
-        if (a > -T.PEN_HALF) target = Math.min(target, Math.sqrt(2 * 16 * Math.max(0, a)));
+        const a = this.T.gapS(s, this.T.PEN_S);
+        if (a > -this.T.PEN_HALF) target = Math.min(target, Math.sqrt(2 * 16 * Math.max(0, a)));
       } else if (c.pitPlan) {
         // its own bay; while that is occupied it waits short of it, clear of the occupant's merge
-        const a = T.gapS(s, T.BAYS[c.bayHome]);
+        const a = this.T.gapS(s, this.T.BAYS[c.bayHome]);
         const free = this.bayFree(c.bayHome, c);
         if (a > -0.3) target = Math.min(target, Math.sqrt(2 * 16 * Math.max(0, a - (free ? 0 : AUTO.bayWait))) + (free ? 0.4 : 0));
       }
     } else {
       const look = s + c.v * P.look;
       const n = this.profiles['1'].length;
-      const i0 = Math.floor(T.wrapS(s) / T.PROFILE_STEP) % n;
-      const i1 = Math.floor(T.wrapS(look) / T.PROFILE_STEP) % n;
+      const i0 = Math.floor(this.T.wrapS(s) / this.T.PROFILE_STEP) % n;
+      const i1 = Math.floor(this.T.wrapS(look) / this.T.PROFILE_STEP) % n;
       const prof = (side: number): number => {
         const pr = this.profiles[`${P.id}:${side}`];
         const a = Math.min(pr[i0], pr[i1]);
@@ -1179,26 +1439,26 @@ export class Race {
     let nearest: Car | null = null, ng = 1e9;
     for (const o of this.cars) {
       if (o === c || o.mode === 'off' || o.mode === 'tow' || o.mode === 'grid') continue;
-      if (Math.abs(o.d - c.d) > T.CAR_W) continue;
-      const g = T.gapS(s, this.s(o));
+      if (Math.abs(o.d - c.d) > this.T.CAR_W) continue;
+      const g = this.T.gapS(s, this.s(o));
       if (g > 0 && g < ng) { ng = g; nearest = o; }
     }
-    if (nearest && ng < 9) target = Math.min(target, nearest.v + P.followGain * (ng - T.CAR_LEN - 0.5) + c.lapse * P.lapsePush);
+    if (nearest && ng < 9) target = Math.min(target, nearest.v + P.followGain * (ng - this.T.CAR_LEN - 0.5) + c.lapse * P.lapsePush);
 
     // strategy: fuel + lane choice
     if (!c.finished && c.mode === 'race') {
-      const lapFuel = T.L * fuelRate() * PLAN_BURN;
+      const lapFuel = this.T.L * this.fuelRate() * PLAN_BURN;
       const needFinish = this.fuelToFinish(c, s);
       // plan the stop with two laps of fuel in hand (time to find a switch and reach the pit),
       // and in any case before the last lap's worth is gone
       if (!c.pitPlan && c.fuel < needFinish && (c.fuel < lapFuel * 2.2 || c.fuel < lapFuel * 1.2 + 0.02)) {
         c.pitPlan = true;
-        c.refuelTarget = Math.min(1, Math.max(0.3, needFinish + rnd(0.06, 0.2)));
+        c.refuelTarget = Math.min(1, Math.max(0.3, needFinish + this.rnd(0.06, 0.2)));
       }
       // a tactical driver who will have to stop anyway pits early to escape traffic (never an extra stop)
       if (P.pitEarly && !c.pitPlan && c.fuel < needFinish && c.fuel < lapFuel * 3.4 && nearest && ng < 6 && nearest.v < c.v + 1) {
         c.pitPlan = true;
-        c.refuelTarget = Math.min(1, Math.max(0.3, needFinish + rnd(0.06, 0.2)));
+        c.refuelTarget = Math.min(1, Math.max(0.3, needFinish + this.rnd(0.06, 0.2)));
       }
       const mustPit = c.pitPlan || c.sgOwed > 0;
       c.pitReq = mustPit;
@@ -1224,7 +1484,7 @@ export class Race {
     let threat: Car | null = null, tg = 1e9;
     for (const o of this.cars) {
       if (o === c || o.mode !== 'race' || o.finished) continue;
-      const g = T.gapS(this.s(o), s); // how far o is behind us
+      const g = this.T.gapS(this.s(o), s); // how far o is behind us
       if (g <= 0 || g > DEF.look || g >= tg) continue;
       if (o.v - c.v < DEF.closing) continue;
       tg = g; threat = o;
@@ -1232,17 +1492,17 @@ export class Race {
     if (!threat) { c.threatIdx = -1; return; }
     if (threat.idx !== c.threatIdx) {
       // new threat: decide whether to defend at all, and how quickly we notice
-      c.threatIdx = threat.idx; c.reactT = rnd(P.react[0], P.react[1]); c.defendOk = Math.random() < P.defendProb;
+      c.threatIdx = threat.idx; c.reactT = this.rnd(P.react[0], P.react[1]); c.defendOk = this.rng() < P.defendProb;
     }
     c.reactT -= dt;
     if (c.reactT > 0 || !c.defendOk || c.defendCooldown > 0 || c.change || c.laneReq) return;
     const theirLane = threat.change ? threat.change.to : Math.sign(threat.laneSide) || 1;
     const myLane = Math.sign(c.laneSide) || 1;
     if (theirLane === myLane) return;                       // already covering their lane: hold it
-    if (tg < T.CAR_LEN + DEF.alongside) return;              // alongside: never cut across
+    if (tg < this.T.CAR_LEN + DEF.alongside) return;              // alongside: never cut across
     const sw = this.nextSwitch(c);
     if (sw.s0 === c.defendSw) return;                        // one defensive move per straight
-    if (T.ahead(s, sw.s0) > 25) return;                      // no switch soon: nothing to decide yet
+    if (this.T.ahead(s, sw.s0) > 25) return;                      // no switch soon: nothing to decide yet
     c.laneReq = true; c.defendPending = true;
   }
 
@@ -1250,15 +1510,15 @@ export class Race {
   defendSafe(c: Car, to: number, sw: T.Switch): boolean {
     const s = this.s(c);
     // never block inside the squeeze or the pit-entry approach
-    if (T.inRange(sw.s0, T.SQ_ENTRY - 2, T.SQ_EXIT) || T.inRange(sw.s1, T.SQ_ENTRY - 2, T.SQ_EXIT)) return false;
-    if (to < 0 && T.ahead(sw.s1, T.PIT_IN0) < 10) return false;
+    if (this.T.inRange(sw.s0, this.T.SQ_ENTRY - 2, this.T.SQ_EXIT) || this.T.inRange(sw.s1, this.T.SQ_ENTRY - 2, this.T.SQ_EXIT)) return false;
+    if (to < 0 && this.T.ahead(sw.s1, this.T.PIT_IN0) < 10) return false;
     for (const o of this.cars) {
       if (o === c || o.mode !== 'race') continue;
-      const g = T.gapS(this.s(o), s); // o behind us by g
-      if (g > 0 && g < 30 && o.pitReq && to < 0 && T.ahead(s, T.PIT_IN0) < 40) return false;
+      const g = this.T.gapS(this.s(o), s); // o behind us by g
+      if (g > 0 && g < 30 && o.pitReq && to < 0 && this.T.ahead(s, this.T.PIT_IN0) < 40) return false;
       if (!this.occupies(o, to) && !(o.change && o.change.to === to)) continue;
-      if (Math.abs(g) < T.CAR_LEN + DEF.alongside) return false;
-      if (g > 0 && g < T.CAR_LEN + DEF.clearance + Math.max(0, o.v - c.v) * DEF.reactMargin + o.v * 0.08) return false;
+      if (Math.abs(g) < this.T.CAR_LEN + DEF.alongside) return false;
+      if (g > 0 && g < this.T.CAR_LEN + DEF.clearance + Math.max(0, o.v - c.v) * DEF.reactMargin + o.v * 0.08) return false;
     }
     return true;
   }
@@ -1268,7 +1528,7 @@ export class Race {
   servePenalty(c: Car, s: number, dt: number): void {
     if (c.sgOwed <= 0) { c.sgServing = false; return; }
     // only the box's reservation holder serves: a car that stops in it behind another, without the grant, accumulates nothing
-    const inBox = this.pit.box === c.idx && Math.abs(T.gapS(s, T.PEN_S)) < T.PEN_HALF;
+    const inBox = this.pit.box === c.idx && Math.abs(this.T.gapS(s, this.T.PEN_S)) < this.T.PEN_HALF;
     if (inBox && Math.abs(c.v) < REV.still) {
       c.sgServing = true;
       c.sgServed += dt;
@@ -1276,7 +1536,7 @@ export class Race {
         c.sgOwed = 0; c.sgServed = 0; c.sgServing = false; c.sgDue = 0; c.sgDeferred = false;
         this.endPenaltyRoute(c);
         // a penalty-only visit is driven on to the pit exit; a fuel visit is handed back here, at the box, for its bay
-        if (c.isPlayer) c.sgLeave = !c.pitFuel;
+        if (c.human) c.sgLeave = !c.pitFuel;
         this.emit({ type: 'served', car: c });
         this.pmsg(c, 'msg.penServed', 'good');
       }
@@ -1294,19 +1554,19 @@ export class Race {
    * out of reach), never earlier than its current approach, so reversing back over an entrance gains no lap.
    */
   firstReachableAppr(c: Car): number {
-    const next = Math.round((c.u + T.ahead(this.s(c), T.PIT_IN0) - T.PIT_IN0) / T.L);
+    const next = Math.round((c.u + this.T.ahead(this.s(c), this.T.PIT_IN0) - this.T.PIT_IN0) / this.T.L);
     return Math.max(this.apprLap(c), this.reachablePitEntry(c) ? next : next + 1);
   }
 
   /** can this car still make the upcoming pit entrance (outside lane, or a switch to it, with room to spare)? */
   reachablePitEntry(c: Car): boolean {
     const s = this.s(c);
-    const dist = T.ahead(s, T.PIT_IN0);
+    const dist = this.T.ahead(s, this.T.PIT_IN0);
     const outside = c.change ? c.change.to < 0 : c.laneSide < 0;
     // the player's entry is driven automatically, so it must also be possible to brake to the pit limit in time
-    const late = c.isPlayer ? Math.max(0, c.v * c.v - T.PIT_SPEED ** 2) / (2 * AUTO.late) : 0;
+    const late = c.human ? Math.max(0, c.v * c.v - this.T.PIT_SPEED ** 2) / (2 * AUTO.late) : 0;
     if (outside) return dist > Math.max(PEN.minEntryDist, late);
-    return late < dist && T.SWITCHES.some((sw) => { const a = T.ahead(s, sw.s0); return a > 1.5 && a + T.SWITCH_LEN + 3 < dist; });
+    return late < dist && this.T.SWITCHES.some((sw) => { const a = this.T.ahead(s, sw.s0); return a > 1.5 && a + this.T.SWITCH_LEN + 3 < dist; });
   }
 
   /**
@@ -1338,7 +1598,9 @@ export class Race {
    * disqualifies it, once. Otherwise it is classified on finish time plus any time penalties it already carries.
    */
   finishCar(c: Car, tCross: number, prior: 'stopGo' | 'fuel' | null): void {
+    if (c.status !== 'running') return;
     c.finished = true; c.finishTime = tCross; c.laneReq = false; c.sgLeave = false; c.sgCtl = false; c.sgPhase = null; this.clearPitIntent(c); c.pitPlan = false; c.routeHold = -1;
+    if (this.firstFlagT < 0) this.firstFlagT = tCross;
     const reason: DqReason | null = prior ? 'deadline' : c.sgOwed > 0 ? 'stopGo' : c.fuelDue > 0 ? 'fuel' : c.svcBreach ? 'deadline' : null;
     if (reason) {
       c.status = 'dq'; c.dqReason = reason;
@@ -1360,7 +1622,7 @@ export class Race {
       const first = c.sgOwed <= 0;
       if (first) { c.sgDue = this.firstReachableAppr(c); c.sgDeferred = false; c.sgServed = 0; }
       c.sgOwed += PEN.stopSeconds;
-      if (c.isPlayer) {
+      if (c.human) {
         if (first) c.routeHold = -1;
         this.syncRoute(c);
         // awarded after the last entrance it could be served at: still owed, and the consequence is shown now
@@ -1395,14 +1657,14 @@ export class Race {
     for (let i = 0; i < act.length; i++) for (let j = i + 1; j < act.length; j++) {
       const a = act[i], b = act[j];
       const key = Math.min(a.idx, b.idx) * 4 + Math.max(a.idx, b.idx);
-      const g = T.gapS(this.s(a), this.s(b));
-      if (Math.abs(a.d - b.d) >= T.CAR_W || Math.abs(g) >= T.CAR_LEN + PEN.separateGap) { this.touching[key] = false; continue; }
-      if (Math.abs(g) >= T.CAR_LEN) continue;
+      const g = this.T.gapS(this.s(a), this.s(b));
+      if (Math.abs(a.d - b.d) >= this.T.CAR_W || Math.abs(g) >= this.T.CAR_LEN + PEN.separateGap) { this.touching[key] = false; continue; }
+      if (Math.abs(g) >= this.T.CAR_LEN) continue;
       let front = g > 0 ? b : a, rear = g > 0 ? a : b;
       const qa = this.squeezeQ.indexOf(a), qb = this.squeezeQ.indexOf(b);
       if (qa >= 0 && qb >= 0) { front = qa < qb ? a : b; rear = front === a ? b : a; }
-      const gap = T.gapS(this.s(rear), this.s(front));
-      const overlap = T.CAR_LEN - gap;
+      const gap = this.T.gapS(this.s(rear), this.s(front));
+      const overlap = this.T.CAR_LEN - gap;
       if (overlap <= 0) continue;
       // a car backing into the one behind takes the whole correction, so no car is ever shoved backwards by it
       if (front.v < 0) front.u += overlap;
@@ -1422,7 +1684,7 @@ export class Race {
         front.slip += rel * 0.015; rear.slip += rel * 0.01;
         if (rel > 0.8 && rear.bumpT <= 0) {
           rear.bumpT = 0.25; front.bumpT = 0.25;
-          this.emit({ type: 'bump', car: rear.isPlayer || front.isPlayer ? this.player : rear, power: Math.min(1, rel / 8) });
+          this.emit({ type: 'bump', car: rear, other: front, power: Math.min(1, rel / 8) });
         }
       }
     }
@@ -1431,11 +1693,50 @@ export class Race {
   pose(c: Car): void {
     if (c.mode === 'off' && c.off) { c.x = c.off.x; c.y = c.off.y; c.h = c.off.yaw; c.z = c.off.z; c.roll *= 0.9; c.pitch *= 0.9; return; }
     const s = this.s(c);
-    const p = T.point3(s, c.d);
+    const p = this.T.point3(s, c.d);
     const wob = c.wobble > 0.02 ? Math.sin(this.t * 38 + c.idx) * c.wobble * 0.2 : 0;
     const jig = c.bumpT > 0 ? Math.sin(this.t * 70) * c.bumpT * 0.3 : 0;
     c.x = p.x; c.y = p.y; c.h = p.h + c.yawOff + wob + jig; c.z = p.z;
-    c.roll = T.rollAt(s); c.pitch = Math.atan(T.slopeZ(s));
+    c.roll = this.T.rollAt(s); c.pitch = Math.atan(this.T.slopeZ(s));
+  }
+
+  /** Authoritative snapshot of the whole race (see RaceSnapshot). */
+  snapshot(): RaceSnapshot {
+    const idOf = (slot: number): DriverId | null => (slot < 0 ? null : this.cars.find((c) => c.idx === slot)?.id ?? null);
+    const fin = (x: number): number | null => (Number.isFinite(x) ? x : null);
+    return {
+      v: 1, track: this.T.DEF.id, laps: LAPS, practice: this.practice,
+      phase: this.phase, t: this.t, raceTime: this.raceTime, goT: this.goT, lights: this.lights, firstFlagT: this.firstFlagT,
+      finishWindow: fin(this.finishWindow), timeLimit: fin(this.timeLimit),
+      cars: this.cars.map((c) => ({
+        id: c.id, slot: c.idx, control: c.human ? 'human' : 'ai', name: c.name, color: c.color, num: c.num, bay: c.bayHome,
+        status: c.status, dqReason: c.dqReason, dnfReason: c.dnfReason, finished: c.finished,
+        mode: c.mode, u: c.u, v: c.v, d: c.d, laneSide: c.laneSide, change: c.change ? { ...c.change } : null,
+        x: c.x, y: c.y, z: c.z, h: c.h, roll: c.roll, pitch: c.pitch, yawOff: c.yawOff, wobble: c.wobble, off: c.off ? { ...c.off } : null,
+        throttle: c.throttle, brake: c.brake, fuel: c.fuel,
+        crossed: c.crossed, lapsDone: c.lapsDone, lastLap: c.lastLap, bestLap: c.bestLap, lapStartT: c.lapStartT, lapValid: c.lapValid,
+        finishTime: c.finishTime, pitStops: c.pitStops,
+        offences: c.offences, sgOwed: c.sgOwed, sgServed: c.sgServed, sgServing: c.sgServing, timePen: c.timePen, svcBreach: c.svcBreach,
+        laneReq: c.laneReq, pitReq: c.pitReq, fuelReq: c.fuelReq, fuelDue: c.fuelDue, sgDue: c.sgDue, sgDeferred: c.sgDeferred,
+        routeHold: c.routeHold, laneOverride: c.laneOverride,
+        revOn: c.revOn, sgPhase: c.sgPhase, sgCtl: c.sgCtl, pitWait: c.pitWait, exitReq: c.exitReq, bayInUse: c.bay,
+        serviceT: c.serviceT, penalty: c.penalty, towT: c.towT, recoverT: c.recoverT, bumpT: c.bumpT,
+      })),
+      pit: {
+        box: idOf(this.pit.box), exit: idOf(this.pit.exit),
+        bays: this.pit.bays.map(idOf), merges: this.pit.merges.map(idOf),
+        order: this.pit.order.map(idOf).filter((x): x is DriverId => x !== null),
+      },
+      lastSeq: Object.assign(Object.create(null) as Record<DriverId, number>, this.lastSeq),
+      final: this.final ? this.final.map((x) => ({ ...x })) : null,
+    };
+  }
+
+  /** Take this step's events in wire form (and clear them). */
+  drainEvents(): WireEvent[] {
+    const out = this.events.map(wireEvent);
+    this.events.length = 0;
+    return out;
   }
 
   /**
@@ -1446,8 +1747,8 @@ export class Race {
     return this.order().map((c) => {
       if (c.status === 'finished') return { car: c, time: c.finishTime + c.timePen, est: false, status: c.status };
       if (c.status !== 'running') return { car: c, time: NaN, est: false, status: c.status };
-      const prog = Math.max(1, c.u - T.FINISH_S);
-      const remain = LAPS * T.L - prog;
+      const prog = Math.max(1, c.u - this.T.FINISH_S);
+      const remain = LAPS * this.T.L - prog;
       const avg = prog / Math.max(1, this.raceTime);
       return { car: c, time: this.raceTime + remain / Math.max(4, avg) + c.timePen, est: true, status: c.status };
     });

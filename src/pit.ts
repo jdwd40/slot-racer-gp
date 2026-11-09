@@ -40,6 +40,8 @@ export class PitTraffic {
   log: ResEntry[] = [];
 
   constructor(private r: Race) {}
+  /** the race's own track context */
+  private get T(): T.Track { return this.r.T; }
 
   holder(z: Zone): number {
     if (z === 'box') return this.box;
@@ -89,27 +91,27 @@ export class PitTraffic {
   /** Routed into the pit at the coming entrance: on the outside lane, no change running, within the approach. */
   approaching(c: Car): boolean {
     if (c.mode !== 'race' || !c.pitReq || c.status !== 'running' || c.finished || c.change || c.laneSide >= 0) return false;
-    if (c.isPlayer && c.laneOverride) return false;     // heading for the inside lane at the next switch
-    return T.ahead(this.r.s(c), T.PIT_IN0) < PIT_Q.approach;
+    if (c.human && c.laneOverride) return false;     // heading for the inside lane at the next switch
+    return this.T.ahead(this.r.s(c), this.T.PIT_IN0) < PIT_Q.approach;
   }
   /** Pit traffic: on the approach, in the pit lane or in a bay. */
   member(c: Car): boolean { return c.mode === 'pitlane' || inBay(c) || this.approaching(c); }
   /** Progress along the pit path from the entrance: negative on the approach. Only meaningful for members. */
   progress(c: Car): number {
-    if (inBay(c)) return T.gapS(T.PIT_IN0, T.BAYS[c.bay]);
-    if (c.mode === 'pitlane') return T.gapS(T.PIT_IN0, this.r.s(c));
-    return -T.ahead(this.r.s(c), T.PIT_IN0);
+    if (inBay(c)) return this.T.gapS(this.T.PIT_IN0, this.T.BAYS[c.bay]);
+    if (c.mode === 'pitlane') return this.T.gapS(this.T.PIT_IN0, this.r.s(c));
+    return -this.T.ahead(this.r.s(c), this.T.PIT_IN0);
   }
   /** Lateral position the car's path will have at track position s. */
-  pathD(c: Car, member: boolean, s: number): number { return member ? T.pitD(s) : c.laneSide * T.laneHalf(s); }
+  pathD(c: Car, member: boolean, s: number): number { return member ? this.T.pitD(s) : c.laneSide * this.T.laneHalf(s); }
   /** A car on the through lane at its bay, or about to be: bay merges in progress or granted. */
   merging(o: Car): boolean { return o.mode === 'bayOut' || (o.mode === 'service' && this.merges[o.bay] === o.idx); }
   /** Lateral position a car takes up for traffic: a merging bay car already counts as in the lane. */
-  laneD(o: Car): number { return this.merging(o) ? T.PIT_D : o.d; }
+  laneD(o: Car): number { return this.merging(o) ? this.T.PIT_D : o.d; }
   /** A fuel visit wanted on this approach, or still to be made in the pit lane. */
   wantsBay(c: Car): boolean {
     if (c.serviced || c.status !== 'running' || c.finished) return false;
-    if (!c.isPlayer) return c.pitPlan;
+    if (!c.human) return c.pitPlan;
     return c.mode === 'pitlane' ? c.pitFuel : c.fuelReq || c.fuelDue > 0;
   }
   /** A bay can be taken by this car: nobody else is in it or has reserved it. */
@@ -149,7 +151,7 @@ export class PitTraffic {
     for (const c of cars) if (mem.has(c) && (c.mode === 'race' || c.mode === 'pitlane')) assist(c, true, null);
     // road followers nearest the entrance first: one braking for the queue joins it, so the car behind brakes for it in turn
     const queue = new Set(cars.filter((c) => c.pitHold));
-    const toEntry = (c: Car): number => T.ahead(r.s(c), T.PIT_IN0);
+    const toEntry = (c: Car): number => this.T.ahead(r.s(c), this.T.PIT_IN0);
     const road = cars.filter((c) => !mem.has(c) && c.mode === 'race' && !c.change && c.laneSide < 0 && toEntry(c) < PIT_Q.approach)
       .sort((a, b) => (toEntry(a) - toEntry(b)) || a.idx - b.idx);
     for (const c of road) {
@@ -170,18 +172,18 @@ export class PitTraffic {
       if (!counts) continue;
       if (onlyHeld && !onlyHeld.has(o)) continue;     // a road car only brakes for the held queue, not ordinary racing traffic
       const so = r.s(o);
-      const g = T.ahead(s, so);
+      const g = this.T.ahead(s, so);
       if (g <= 1e-6 || g > PIT_Q.look) continue;
-      if (Math.abs(this.pathD(c, isMem, so) - this.laneD(o)) >= T.CAR_W) continue;
+      if (Math.abs(this.pathD(c, isMem, so) - this.laneD(o)) >= this.T.CAR_W) continue;
       const vl = inBay(o) ? 0 : o.v;
-      const room = g - T.CAR_LEN - PIT_Q.gap + (vl > 0 ? (vl * vl) / (2 * PIT_Q.leadBrake) : vl * 0.5);
+      const room = g - this.T.CAR_LEN - PIT_Q.gap + (vl > 0 ? (vl * vl) / (2 * PIT_Q.leadBrake) : vl * 0.5);
       const cap = Math.sqrt(2 * PIT_Q.decel * Math.max(0, room));
       // held: the cap stops the car, or it already stands at the stopping gap behind something standing still
       const held = cap < PIT_Q.hold || (Math.abs(vl) < 0.05 && room < 0.3);
       if (!best || cap < best.cap) best = { cap, bay: inBay(o), held };
     }
     // the stop-and-go box is exclusive: while another car stands in it, a car on the pit path stops short of its entry line
-    const g = T.gapS(s, T.PEN_S - T.PEN_HALF);
+    const g = this.T.gapS(s, this.T.PEN_S - this.T.PEN_HALF);
     if (isMem && !onlyHeld && g > 0 && g <= PIT_Q.look && this.boxTaken(c)) {
       const room = Math.max(0, g - PIT_Q.boxMargin);
       const cap = Math.sqrt(2 * PIT_Q.decel * room);
@@ -195,12 +197,12 @@ export class PitTraffic {
   boxTaken(c: Car): boolean {
     if (this.box < 0 || this.box === c.idx) return false;
     const h = this.r.cars.find((o) => o.idx === this.box);
-    return !!h && h.mode === 'pitlane' && Math.abs(T.gapS(this.r.s(h), T.PEN_S)) < T.PEN_HALF;
+    return !!h && h.mode === 'pitlane' && Math.abs(this.T.gapS(this.r.s(h), this.T.PEN_S)) < this.T.PEN_HALF;
   }
 
   /** The single stop-and-go box goes to the foremost car that owes a stop and has not passed it. */
   updateBox(byOrder: Car[], mem: Map<Car, number>): void {
-    const end = T.gapS(T.PIT_IN0, T.PEN_S + T.PEN_HALF);
+    const end = this.T.gapS(this.T.PIT_IN0, this.T.PEN_S + this.T.PEN_HALF);
     const wants = (c: Car): boolean => mem.has(c) && !inBay(c) && c.sgOwed > 0 && c.status === 'running' && !c.finished && (mem.get(c)! <= end || c.sgServing);
     const desired = byOrder.find(wants) ?? null;
     const h = this.box >= 0 ? this.r.cars.find((c) => c.idx === this.box) ?? null : null;
@@ -223,15 +225,15 @@ export class PitTraffic {
       if (h.mode === 'off' || h.mode === 'tow' || h.status !== 'running' || h.finished) why = 'terminal';
       else if (!this.member(h)) why = 'route';
       else if (!this.wantsBay(h)) why = h.serviced ? 'done' : 'route';
-      else if (h.mode === 'pitlane' && T.gapS(r.s(h), T.BAYS[j]) < -T.BAY_HALF) why = 'passed';
+      else if (h.mode === 'pitlane' && this.T.gapS(r.s(h), this.T.BAYS[j]) < -this.T.BAY_HALF) why = 'passed';
       if (why) this.release(`bay${j}`, h, why);
     });
     for (const c of byOrder) {
       if (inBay(c) || this.bayOf(c) >= 0 || !this.wantsBay(c)) continue;
       // only the car's own bay, ever: while it is occupied the car waits for it, it never takes another team's bay
       const j = c.bayHome;
-      if (j < 0 || j >= T.BAYS.length) continue;
-      if (c.mode === 'pitlane' && T.gapS(r.s(c), T.BAYS[j]) <= -0.45) continue;
+      if (j < 0 || j >= this.T.BAYS.length) continue;
+      if (c.mode === 'pitlane' && this.T.gapS(r.s(c), this.T.BAYS[j]) <= -0.45) continue;
       if (this.bayAvail(j, c) && this.grant(`bay${j}`, c)) c.bay = j;
     }
   }
@@ -247,7 +249,7 @@ export class PitTraffic {
       if (!ok) this.release(`merge${j}`, h, h.mode === 'pitlane' ? 'done' : h.mode === 'tow' || h.mode === 'off' ? 'terminal' : 'route');
     });
     const req = r.cars.filter((c) => c.mode === 'service' && c.exitReq && this.merges[c.bay] !== c.idx)
-      .sort((a, b) => (T.BAYS[b.bay] - T.BAYS[a.bay]) || a.idx - b.idx);
+      .sort((a, b) => (this.T.BAYS[b.bay] - this.T.BAYS[a.bay]) || a.idx - b.idx);
     for (const c of req) if (this.mergeSafe(c)) this.grant(`merge${c.bay}`, c);
   }
 
@@ -258,17 +260,17 @@ export class PitTraffic {
    */
   mergeSafe(c: Car): boolean {
     const r = this.r;
-    const sb = T.BAYS[c.bay];
+    const sb = this.T.BAYS[c.bay];
     for (let k = 0; k < this.merges.length; k++) {
       const h = this.merges[k];
-      if (h >= 0 && h !== c.idx && Math.abs(T.BAYS[k] - sb) < PIT_Q.mergeSpacing) return false;
+      if (h >= 0 && h !== c.idx && Math.abs(this.T.BAYS[k] - sb) < PIT_Q.mergeSpacing) return false;
     }
-    const need = T.CAR_LEN + PIT_Q.gap;
+    const need = this.T.CAR_LEN + PIT_Q.gap;
     for (const o of r.cars) {
       if (o === c) continue;
-      const onLane = o.mode === 'pitlane' || this.merging(o) || (o.mode === 'bayIn' && Math.abs(o.d - T.PIT_D) < T.CAR_W);
+      const onLane = o.mode === 'pitlane' || this.merging(o) || (o.mode === 'bayIn' && Math.abs(o.d - this.T.PIT_D) < this.T.CAR_W);
       if (!onLane) continue;
-      const g = T.gapS(sb, r.s(o));
+      const g = this.T.gapS(sb, r.s(o));
       const v = inBay(o) ? 0 : o.v;
       if (g >= 0) { if (g + Math.min(0, v) * PIT_Q.mergeTime < need) return false; }
       else if (-g < need + (Math.max(0, v) ** 2) / (2 * PIT_Q.decel) + Math.max(0, v) * 0.05) return false;
@@ -284,14 +286,14 @@ export class PitTraffic {
       const h = r.cars.find((c) => c.idx === this.exit);
       if (!h) this.exit = -1;
       else if (h.mode !== 'pitlane') this.release('exit', h, h.mode === 'race' ? 'done' : 'terminal');
-      else if (T.gapS(r.s(h), T.PIT_OUT0) >= PIT_Q.exitWin) this.release('exit', h, 'passed');
+      else if (this.T.gapS(r.s(h), this.T.PIT_OUT0) >= PIT_Q.exitWin) this.release('exit', h, 'passed');
     }
     // only the foremost car at the exit can take it: a car further back never goes first because its own view looked clear
     let first = true;
     for (const c of byOrder) {
       if (c.mode !== 'pitlane') continue;
-      const a = T.gapS(r.s(c), T.PIT_OUT0);
-      if (a >= PIT_Q.exitWin || T.gapS(r.s(c), T.PIT_OUT1) <= 0) continue;
+      const a = this.T.gapS(r.s(c), this.T.PIT_OUT0);
+      if (a >= PIT_Q.exitWin || this.T.gapS(r.s(c), this.T.PIT_OUT1) <= 0) continue;
       const lead = first; first = false;
       if (!lead && this.exit === c.idx && a > 0) this.release('exit', c, 'reorder');
       const blocked = r.mergeBlocked(c);

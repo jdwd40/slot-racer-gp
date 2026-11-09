@@ -1,10 +1,11 @@
 import * as T from './track';
-import { Race, LAPS, LOW_FUEL, Car, SERVICE_READY } from './race';
+import { Race, LAPS, LOW_FUEL, Car, SERVICE_READY, DriverId, SOLO_ID } from './race';
 import { t } from './i18n';
 import { fmtMs } from './records';
 import { laneCue, pitCue } from './input';
 
-export interface HudExtra { mode: 'race' | 'practice' | 'champ'; pbMs: number; round: string; }
+/** `me` is the local driver: the HUD shows that car's state, whatever its grid slot. */
+export interface HudExtra { mode: 'race' | 'practice' | 'champ'; pbMs: number; round: string; me: DriverId; }
 
 export function fmt(sec: number): string {
   if (!isFinite(sec) || sec <= 0) return '–:––.–';
@@ -152,8 +153,8 @@ export class Hud {
     const e = this.el['h-go']; e.textContent = text; e.classList.remove('show'); void e.offsetWidth; e.classList.add('show');
   }
 
-  update(race: Race, dt: number, time: number, x: HudExtra = { mode: 'race', pbMs: 0, round: '' }): void {
-    const p = race.player;
+  update(race: Race, dt: number, time: number, x: HudExtra = { mode: 'race', pbMs: 0, round: '', me: SOLO_ID }): void {
+    const p = race.car(x.me) ?? race.cars[0];
     const order = race.order();
     const pos = order.indexOf(p) + 1;
     const practice = x.mode === 'practice';
@@ -173,7 +174,7 @@ export class Hud {
       this.set('h-bestlbl', t('hud.best'));
       this.el['h-stand'].style.display = '';
     }
-    const stand = order.map((c, i) => `<div class="${c.isPlayer ? 'me' : ''}"><b>${i + 1}</b><i style="background:${hex(c.color)}"></i>${c.isPlayer ? t('hud.you') : c.name}${flags(c)}${c.mode === 'service' || c.mode === 'bayIn' ? ' ⛽' : ''}${c.status === 'finished' ? ' 🏁' : ''}</div>`).join('');
+    const stand = order.map((c, i) => `<div class="${c === p ? 'me' : ''}"><b>${i + 1}</b><i style="background:${hex(c.color)}"></i>${carLabel(c, p.id)}${flags(c)}${c.mode === 'service' || c.mode === 'bayIn' ? ' ⛽' : ''}${c.status === 'finished' ? ' 🏁' : ''}</div>`).join('');
     this.set('h-stand', stand, true);
     if (!practice) {
       const cur = race.phase === 'countdown' ? 0 : p.finished ? p.finishTime : race.raceTime;
@@ -287,10 +288,10 @@ export class Hud {
     for (let i = 0; i < 5; i++) (kids[i] as HTMLElement).className = i < n ? 'on' : '';
 
     if (this.toastT > 0) { this.toastT -= dt; if (this.toastT <= 0) this.el['h-toast'].classList.remove('show'); }
-    this.drawMini(race, time);
+    this.drawMini(race, time, p.id);
   }
 
-  drawMini(race: Race, time: number): void {
+  drawMini(race: Race, time: number, me: DriverId): void {
     const g = this.mctx;
     g.clearRect(0, 0, this.mW, this.mH);
     g.fillStyle = 'rgba(10,14,20,0.72)';
@@ -332,11 +333,12 @@ export class Hud {
     g.fillStyle = '#22d3ee'; g.beginPath(); g.arc(pe.x, pe.y + 6, 7, 0, Math.PI * 2); g.fill();
     g.fillStyle = '#062a33'; g.font = 'bold 10px sans-serif'; g.textAlign = 'center'; g.textBaseline = 'middle'; g.fillText('P', pe.x, pe.y + 6.5);
     // cars
-    const cars = [...race.cars].sort((a) => (a.isPlayer ? 1 : -1));
+    // the local driver's dot is drawn last, on top
+    const cars = [...race.cars].sort((a, b) => (a.id === me ? 1 : 0) - (b.id === me ? 1 : 0));
     for (const c of cars) {
       if (c.mode === 'tow') continue;
       const p = this.mp({ x: c.x, y: c.y });
-      if (c.isPlayer) {
+      if (c.id === me) {
         const pulse = 7 + Math.sin(time * 6) * 2;
         g.strokeStyle = 'rgba(255,224,102,0.9)'; g.lineWidth = 2; g.beginPath(); g.arc(p.x, p.y, pulse + 2, 0, Math.PI * 2); g.stroke();
         g.fillStyle = hex(c.color); g.strokeStyle = '#fff'; g.lineWidth = 2;
@@ -352,7 +354,8 @@ export class Hud {
 /** The player is in reverse gear, or still rolling backwards after leaving it. */
 export function reversing(c: { revOn: boolean; v: number }): boolean { return c.revOn || c.v < -0.05; }
 
-export function carLabel(c: Car): string { return c.isPlayer ? t('hud.you') : c.name; }
+/** "You" for the local driver's car, the driver's name for everyone else (other humans included). */
+export function carLabel(c: Car, me: DriverId): string { return c.id === me ? t('hud.you') : c.name; }
 
 /** warning flags, outstanding stop-and-go and time penalty markers shown beside a driver's name */
 export function flags(c: Car): string {

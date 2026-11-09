@@ -7,7 +7,7 @@ import { AUTO, Car, DRIVERS, Input, LAPS, PEN, REFUEL_RATE, Race, SERVICE_READY,
 import { DrivingInput } from '../src/input';
 import * as R from '../src/records';
 import type { RaceEvent } from '../src/race';
-import { DT, NONE, UP, fresh, msgs, place, seedRandom } from './helpers';
+import { DT, NONE, UP, fresh, msgs, place, seedRandom, all, me } from './helpers';
 
 beforeEach(() => seedRandom(23));
 afterEach(() => vi.restoreAllMocks());
@@ -20,7 +20,7 @@ function setup(track = 'circuit-1', n = 1): { r: Race; P: Car; rival: Car } {
   const r = fresh(track);
   const rival = r.cars[r.cars.length - 1];
   r.cars.splice(n);
-  r.cars[0].isPlayer = true;
+  r.cars[0].human = true;
   for (const c of r.cars) { c.crossed = LAP; c.lapsDone = LAP - 1; c.sectors = 0; }
   return { r, P: r.cars[0], rival };
 }
@@ -40,7 +40,7 @@ function inBay(r: Race, c: Car, j: number, t = SERVICE_READY + 0.1): void {
 /** Throttle only, below the cornering profile, until automatic control has the car; then `held`. */
 function driver(held: Input): (r: Race) => Input {
   return (r) => {
-    const P = r.player;
+    const P = me(r);
     if (P.sgCtl || P.sgLeave) return held;
     const prof = r.profiles['-1'];
     return { up: P.v < prof[Math.floor(r.s(P) / T.PROFILE_STEP) % prof.length] * 0.97, down: false };
@@ -60,7 +60,7 @@ function overlaps(r: Race): number {
   return n;
 }
 function run(r: Race, input: Input | ((r: Race) => Input), sec: number, stop?: (r: Race) => boolean, dt = DT): Trace {
-  const P = r.player;
+  const P = me(r);
   const tr: Trace = { events: [], msgs: [], phases: [], brakeAfterTakeover: false, vIn: -1, maxS: -1e9, overlaps: 0, offences: 0, maxFuel: 0, minV: 0, handoverS: -1 };
   let took = false;
   for (let t = 0; t < sec; t += dt) {
@@ -68,7 +68,7 @@ function run(r: Race, input: Input | ((r: Race) => Input), sec: number, stop?: (
     if (P.sgCtl) took = true;
     if (took && inp.down) tr.brakeAfterTakeover = true;
     const m = P.mode;
-    r.update(dt, inp);
+    r.update(dt, all(r, inp));
     for (const e of r.events) { tr.events.push(e); if (e.type === 'offence') tr.offences++; }
     tr.msgs.push(...msgs(r.events));
     r.events.length = 0;
@@ -83,8 +83,8 @@ function run(r: Race, input: Input | ((r: Race) => Input), sec: number, stop?: (
   }
   return tr;
 }
-const inService = (r: Race) => r.player.mode === 'service';
-const backOut = (r: Race) => r.player.mode === 'race' && r.player.serviced === false && r.player.pitStops > 0;
+const inService = (r: Race) => me(r).mode === 'service';
+const backOut = (r: Race) => me(r).mode === 'race' && me(r).serviced === false && me(r).pitStops > 0;
 /** Release Throttle for a step, then hold it: one fresh press. */
 function press(r: Race, sec = 0.1): Trace { run(r, NONE, DT); return run(r, UP, sec); }
 const bayGrants = (r: Race) => r.pit.log.filter((e) => e.zone.startsWith('bay') && e.op === 'grant');
@@ -109,7 +109,7 @@ describe('bay ownership', () => {
     expect(r.bayOwner(0)?.idx).toBe(0); expect(r.cars[2].bayHome).toBe(2);
     // practice: only the player, so the rivals' bays have no owner
     const p = new Race({ practice: true });
-    expect(p.bayOwner(0)?.isPlayer).toBe(true);
+    expect(p.bayOwner(0)?.human).toBe(true);
     expect([1, 2, 3].map((j) => p.bayOwner(j))).toEqual([null, null, null]);
   });
 
@@ -145,7 +145,7 @@ describe('automatic fuel visit: every circuit, both lanes, no Brake', () => {
       P.color = liv.color;
       approach(r, P, 120, side, 15);
       P.fuel = 0.35;
-      r.requestPit();
+      r.requestPit(me(r).id);
       const tr = run(r, driver(held), 40, inService);
       expect(P.mode).toBe('service');
       expect(P.bay).toBe(P.bayHome); expect(r.bayOwner(P.bay)!.color).toBe(liv.color);
@@ -203,7 +203,7 @@ describe('the departure press', () => {
     tr = run(r, NONE, 0.2);
     expect(P.sgPhase).toBe('ready');
     let outs = 0, prev = P.mode;
-    const count = (r2: Race) => { if (P.mode === 'bayOut' && prev !== 'bayOut') outs++; prev = P.mode; return r2.player.mode === 'race'; };
+    const count = (r2: Race) => { if (P.mode === 'bayOut' && prev !== 'bayOut') outs++; prev = P.mode; return me(r2).mode === 'race'; };
     tr = run(r, UP, DT, count);
     expect(P.exitReq || P.mode !== 'service').toBe(true);
     // repeated presses add nothing; the car leaves once
@@ -256,7 +256,7 @@ describe('the departure press', () => {
     // a committed car in the through lane keeps the merge blocked for a while
     const L = r.cars.length;
     const A = fresh('circuit-1').cars[1];
-    r.cars.push(A); A.isPlayer = false; A.idx = 1; A.crossed = LAP; A.lapsDone = LAP - 1;
+    r.cars.push(A); A.human = false; A.idx = 1; A.crossed = LAP; A.lapsDone = LAP - 1;
     inPit(A, T.BAYS[0] - 1.2, 0); A.pitFuel = false;
     r.ai = () => ({ t: 0, b: 1 });                             // A stands in the lane behind the bay, in the merge zone
     run(r, NONE, 1);
@@ -330,7 +330,7 @@ describe('conflicts', () => {
   it('an AI car whose bay is occupied waits for it and never takes another team\'s', () => {
     const { r } = setup('circuit-1', 3);
     const [P, A, B] = r.cars;
-    P.isPlayer = false; place(P, 100, 1, 0);
+    P.human = false; place(P, 100, 1, 0);
     inBay(r, B, A.bayHome); B.fuel = 0.3; B.refuelTarget = 0.6;
     inPit(A, T.PIT_IN1, 6); A.pitPlan = true; A.pitFuel = true; A.fuel = 0.3; A.refuelTarget = 0.5;
     const tr = run(r, NONE, 12, () => A.mode === 'service');
@@ -346,7 +346,7 @@ describe('conflicts', () => {
       place(D, 200, 1, 0);
       approach(r, B, 4, -1, 8); B.pitPlan = true; B.pitReq = true; B.fuel = 0.3; B.refuelTarget = 0.5;
       approach(r, A, 7, -1, 8); A.pitPlan = true; A.pitReq = true; A.fuel = 0.3; A.refuelTarget = 0.5;
-      approach(r, P, 10.5, -1, 8); P.fuel = 0.3; r.requestPit();
+      approach(r, P, 10.5, -1, 8); P.fuel = 0.3; r.requestPit(me(r).id);
       if (rev) r.cars.reverse();
       const tr = run(r, UP, 20, () => [P, A, B].every((c) => c.mode === 'service' || c.serviced), dt);
       for (const c of [P, A, B]) expect(c.pitStops, `car ${c.idx}`).toBe(1);
@@ -384,7 +384,7 @@ describe('conflicts', () => {
     expect(P.mode).toBe('pitlane'); expect(P.pitWait).toBe('exit'); expect(P.sgPhase).toBe('leaving');
     expect(T.gapS(r.s(P), T.PIT_OUT0)).toBeGreaterThan(0);
     hold = false;
-    const t2 = run(r, NONE, 10, (r2) => r2.player.mode === 'race');
+    const t2 = run(r, NONE, 10, (r2) => me(r2).mode === 'race');
     expect(P.mode).toBe('race'); expect(t2.msgs).toContain('msg.sgHandover');
     expect(tr.overlaps + t2.overlaps).toBe(0); expect(tr.offences + t2.offences).toBe(0);
   });
@@ -397,7 +397,7 @@ describe('combined visits and obligations', () => {
     const { r, P, rival } = setup();
     approach(r, P, 80, -1, 14);
     P.fuel = 0.4;
-    r.requestPit(); r.requestDefer();                          // the fuel stop is now committed for next lap
+    r.requestPit(me(r).id); r.requestDefer(me(r).id);                          // the fuel stop is now committed for next lap
     approach(r, P, 60, -1, 14, LAP + 1);
     award(r, P, rival);
     const tr = run(r, driver(UP), 30, inService);
@@ -422,7 +422,7 @@ describe('combined visits and obligations', () => {
     const { r, P, rival } = setup();
     approach(r, P, 60, -1, 14); P.fuel = 0.4;
     award(r, P, rival);
-    const tr = run(r, driver(UP), 30, (r2) => r2.player.sgOwed === 0 && r2.player.mode === 'race');
+    const tr = run(r, driver(UP), 30, (r2) => me(r2).sgOwed === 0 && me(r2).mode === 'race');
     expect(P.pitStops).toBe(0); expect(bayGrants(r)).toHaveLength(0);
     expect(tr.phases).not.toContain('bay');
   });
@@ -436,7 +436,7 @@ describe('combined visits and obligations', () => {
     run(r, NONE, 1);
     expect(P.fuelDue).toBe(0);
     press(r);
-    run(r, NONE, 10, (r2) => r2.player.finished);
+    run(r, NONE, 10, (r2) => me(r2).finished);
     expect(P.status).toBe('finished'); expect(P.svcBreach).toBe(null);
   });
 
@@ -445,10 +445,10 @@ describe('combined visits and obligations', () => {
     const sw = [...T.SWITCHES].sort((a, b) => T.ahead(a.s0, T.PIT_IN0) - T.ahead(b.s0, T.PIT_IN0))[0];
     const before = T.ahead(sw.s0, T.PIT_IN0) + 6;
     approach(r, P, before, -1, 10);
-    P.fuel = 0.5; r.requestPit();
-    r.requestLane();                                            // override: the inside lane at the next switch
+    P.fuel = 0.5; r.requestPit(me(r).id);
+    r.requestLane(me(r).id);                                            // override: the inside lane at the next switch
     expect(P.laneOverride).toBe(true);
-    const tr = run(r, driver(NONE), 12, (r2) => T.gapS(T.PIT_IN0, r2.s(P)) > 3 && r2.player.mode === 'race');
+    const tr = run(r, driver(NONE), 12, (r2) => T.gapS(T.PIT_IN0, r2.s(P)) > 3 && me(r2).mode === 'race');
     expect(tr.msgs).toContain('msg.fuelOverride');
     expect(P.fuelDue).toBe(LAP + 1); expect(P.mode).toBe('race');
     approach(r, P, 120, -1, 15, LAP + 1);
@@ -466,10 +466,10 @@ describe('combined visits and obligations', () => {
 
   it('Space with no switch left during a fuel takeover is refused and the car still stops in its bay', () => {
     const { r, P } = setup();
-    approach(r, P, 20, -1, 12); P.fuel = 0.4; r.requestPit();
+    approach(r, P, 20, -1, 12); P.fuel = 0.4; r.requestPit(me(r).id);
     run(r, NONE, DT);
     expect(P.sgCtl).toBe(true);
-    const ev: RaceEvent[] = []; r.requestLane(); ev.push(...r.events); r.events.length = 0;
+    const ev: RaceEvent[] = []; r.requestLane(me(r).id); ev.push(...r.events); r.events.length = 0;
     expect(msgs(ev)).toEqual(['msg.fuelNoSwitch']); expect(P.laneOverride).toBe(false);
     run(r, NONE, 10, inService);
     expect([P.mode, P.bay]).toEqual(['service', P.bayHome]);
@@ -477,10 +477,10 @@ describe('combined visits and obligations', () => {
 
   it('cancelling an optional stop with Pit during the takeover hands the car back on the road', () => {
     const { r, P } = setup();
-    approach(r, P, 30, -1, 12); P.fuel = 0.4; r.requestPit();
+    approach(r, P, 30, -1, 12); P.fuel = 0.4; r.requestPit(me(r).id);
     run(r, NONE, DT);
     expect(P.sgCtl).toBe(true);
-    r.requestPit();
+    r.requestPit(me(r).id);
     run(r, UP, DT);
     expect(P.sgCtl).toBe(false); expect(P.pitReq).toBe(false);
     run(r, UP, 3);
@@ -494,7 +494,7 @@ describe('combined visits and obligations', () => {
     expect(P.mode).toBe('pitlane');
     while (!P.revOn) run(r, BRAKE, DT);
     run(r, BRAKE, 8, (r2) => T.gapS(T.BAYS[0], r2.s(P)) < 0.3);
-    run(r, NONE, 1.5, (r2) => r2.player.mode === 'bayIn');
+    run(r, NONE, 1.5, (r2) => me(r2).mode === 'bayIn');
     expect([P.mode, P.bay]).toEqual(['bayIn', P.bayHome]);
   });
 });
@@ -527,7 +527,7 @@ describe('frame rate', () => {
     const at: number[] = [];
     for (const dt of [1 / 24, 1 / 60, 1 / 144]) {
       const { r, P } = setup();
-      approach(r, P, 60, -1, 14); P.fuel = 0.4; r.requestPit();
+      approach(r, P, 60, -1, 14); P.fuel = 0.4; r.requestPit(me(r).id);
       let s = -1;
       run(r, UP, 20, (r2) => { if (P.mode === 'bayIn' && s < 0) s = T.gapS(T.BAYS[0], r2.s(P)); return s >= 0; }, dt);
       at.push(s);

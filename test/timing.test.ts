@@ -6,7 +6,7 @@ import { Race, RaceEvent, PEN } from '../src/race';
 import { fmt } from '../src/hud';
 import { GhostRecorder, GhostPlayer } from '../src/ghost';
 import { FixedStepper, STEP, MAX_GAP, MAX_STEPS, blendPose, Pose } from '../src/timing';
-import { seedRandom, memStorage, fresh, park, place, msgs } from './helpers';
+import { seedRandom, memStorage, fresh, park, place, msgs, all, me } from './helpers';
 
 const RATES = [60, 30, 20, 15, 10];
 const ROUNDING = 0.05; // the HUD clock shows tenths
@@ -34,13 +34,13 @@ class Session {
   tick = (dt: number): void => {
     const r = this.race;
     this.seen.push(this.keys.up);
-    r.update(dt, { ...this.keys });
+    r.update(dt, all(r, { ...this.keys }));
     for (const e of r.events) {
       this.raw.push(e); this.events.push({ t: r.t, type: e.type });
-      if (e.type === 'lap' && e.car === r.player) this.pending = e;
+      if (e.type === 'lap' && e.car === me(r)) this.pending = e;
     }
     r.events.length = 0;
-    const p = r.player;
+    const p = me(r);
     if (p.crossed !== this.lastCrossed) {
       this.lastCrossed = p.crossed;
       if (this.ghosting) {
@@ -260,7 +260,7 @@ describe('race clock against wall time', () => {
       vi.restoreAllMocks(); seedRandom(3);
       const r = fresh('circuit-1', { practice: true });
       const c = r.cars[0];
-      for (let i = 0; c.lapsDone < 2 && i < 60000; i++) r.update(dts[i % dts.length], { up: false, down: false });
+      for (let i = 0; c.lapsDone < 2 && i < 60000; i++) r.update(dts[i % dts.length], all(r, { up: false, down: false }));
       return c.lastLap;
     };
     const fixed = lapWith([STEP]);
@@ -324,7 +324,7 @@ describe('bounded recovery in a live race', () => {
     const s = new Session(fresh());
     const r = s.race;
     s.frame(0);
-    r.player.finished = true; r.playerDoneT = r.t - 3.19;
+    for (const c of r.cars) { c.finished = true; c.status = "finished"; } r.humansDoneT = r.t - 3.19;
     expect(s.frame(100)).toBe(1); // six were owed; a championship result must read the race as it ended
     expect(r.phase).toBe('done');
     expect(s.screen).toBe('champ');
@@ -346,11 +346,11 @@ describe('bookkeeping and input on every step', () => {
   it('held controls apply to every step of a slow frame and act the same as at 60 FPS', () => {
     const drive = (fps: number): number => {
       vi.restoreAllMocks(); seedRandom(5);
-      const r = fresh('circuit-1', { practice: true }); r.player.isPlayer = true;
+      const r = fresh('circuit-1', { practice: true }); me(r).human = true;
       const s = new Session(r);
       s.keys.up = true;
       let v = -1;
-      s.onStep = () => { if (s.steps === 90) v = r.player.v; };
+      s.onStep = () => { if (s.steps === 90) v = me(r).v; };
       play(s, fps, 2);
       expect(s.seen.every(Boolean)).toBe(true);
       return v;
@@ -361,25 +361,25 @@ describe('bookkeeping and input on every step', () => {
   });
 
   it('a key held into a blur does not stick: the throttle drops after resume', () => {
-    const r = fresh('circuit-1', { practice: true }); r.player.isPlayer = true;
+    const r = fresh('circuit-1', { practice: true }); me(r).human = true;
     const s = new Session(r);
     s.keys.up = true;
     const end = play(s, 10, 2);
-    expect(r.player.throttle).toBeGreaterThan(0.9);
+    expect(me(r).throttle).toBeGreaterThan(0.9);
     s.suspend(); s.resume();
     play(s, 10, 1, end + 1000);
     expect(s.seen.at(-1)).toBe(false);
-    expect(r.player.throttle).toBe(0);
+    expect(me(r).throttle).toBe(0);
   });
 
   it('a lane request made once is consumed once across multi-step frames', () => {
     const r = fresh(); park(r);
-    const c = r.cars[0]; c.isPlayer = true;
+    const c = r.cars[0]; c.human = true;
     const sw = T.SWITCHES[0];
     place(c, sw.s0 - 3, 1, 15);
     const s = new Session(r);
     s.keys.up = true;
-    r.requestLane();
+    r.requestLane(me(r).id);
     expect(c.laneReq).toBe(true);
     const end = play(s, 10, 1.5);
     expect(s.raw.filter((e) => e.type === 'switch' && e.car === c).length).toBe(1);
@@ -392,10 +392,10 @@ describe('bookkeeping and input on every step', () => {
 
   it('a pit request made once is consumed once across multi-step frames', () => {
     const r = fresh(); park(r);
-    const c = r.cars[0]; c.isPlayer = true;
+    const c = r.cars[0]; c.human = true;
     place(c, T.PIT_IN0 - 3, -1, 15);
     const s = new Session(r);
-    r.requestPit();
+    r.requestPit(me(r).id);
     play(s, 10, 0.6);
     expect(c.mode).toBe('pitlane');
     expect(c.pitReq).toBe(false);
@@ -404,7 +404,7 @@ describe('bookkeeping and input on every step', () => {
 
   it('a stop-and-go costs its full seconds of wall time at 10 FPS, not double', () => {
     const r = fresh(); park(r);
-    const c = r.cars[0]; c.isPlayer = true;
+    const c = r.cars[0]; c.human = true;
     place(c, T.PEN_S, -1, 0);
     c.mode = 'pitlane'; c.d = T.pitD(T.PEN_S); c.sgOwed = PEN.stopSeconds; c.sgDue = 2;
     const s = new Session(r);
@@ -428,7 +428,7 @@ describe('practice ghosts and saves', () => {
     s.ghosting = true;
     const path: { t: number; x: number; y: number }[] = [];
     s.onStep = () => {
-      const p = s.race.player;
+      const p = me(s.race);
       if (s.recorder.active && !s.ghosts.length) path.push({ t: s.race.raceTime - s.recorder.t0, x: p.x, y: p.y });
     };
     for (let i = 0; !s.ghosts.length && i < fps * 120; i++) s.frame((i * 1000) / fps);
