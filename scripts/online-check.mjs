@@ -74,7 +74,7 @@ const VIEWS = {
 async function openPage(run, url, view = 'laptop', { touch = false, name = view } = {}) {
   const context = await run.browser.newContext({ ...VIEWS[view] });
   const page = await context.newPage();
-  page.setDefaultTimeout(20000);
+  page.setDefaultTimeout(60000);
   const errors = [];
   page.on('pageerror', (e) => errors.push(`pageerror: ${e.message}`));
   page.on('console', (m) => { if (m.type() === 'error' && !/WebSocket|ERR_CONNECTION|Failed to load resource|net::/.test(m.text())) errors.push(`console: ${m.text()}`); });
@@ -103,7 +103,7 @@ async function openPage(run, url, view = 'laptop', { touch = false, name = view 
     raf(tick);
   });
   await page.goto(url);
-  await waitFor(page, () => window.__game && window.__game.screen === 'title');
+  await waitFor(page, () => window.__game && window.__game.screen === 'title', undefined, 120000);
   const low = page.locator('[data-preset="low"]');
   if (await low.count()) await low.click();
   let keys = new Keys(page);
@@ -200,7 +200,6 @@ async function lobby(run, c) {
   const phone = await openPage(run, url, 'phoneLo', { touch: true, name: 'phone' });
   const tablet = await openPage(run, url, 'tabletLo', { touch: true, name: 'tablet' });
   const desk = await openPage(run, url, 'small', { name: 'desk' });
-  const fifth = await openPage(run, url, 'phoneLandLo', { touch: true, name: 'fifth' });
   const all = [host, phone, tablet, desk];
   const code = await createRoom(host, 'Host Ana');
   c.ok('Create room: a 6-character code is shown as text in the lobby', /^[A-Z2-9]{6}$/.test(code) && (await host.page.locator('#l-code').textContent()) === code, code);
@@ -213,11 +212,14 @@ async function lobby(run, c) {
   c.ok('Lobby lists every driver with number, name and state; a name containing markup renders as text', lob.rows.length === 4 && lob.rows.some((r) => r.includes('<img src=x')) && lob.imgs === 0 && !lob.xss && !xssPhone.xss && xssPhone.imgs === 0, lob);
   await snapshotOf(phone.page, 'lobby-phone-portrait.png'); await snapshotOf(tablet.page, 'lobby-tablet.png'); await snapshotOf(host.page, 'lobby-laptop.png');
   for (const s of [phone, tablet, host]) c.ok(`Lobby layout (${s.view}): card fits the width, no sideways scroll`, (await layoutFacts(s.page)).fitsWidth && !(await layoutFacts(s.page)).docScrollX, await layoutFacts(s.page));
-  // fifth human
+  // fifth human (opened only now: every open page renders, and SwiftShader shares four cores)
+  const fifth = await openPage(run, url, 'phoneLandLo', { touch: true, name: 'fifth' });
   await joinRoom(fifth, 'Fifth', code);
   await waitFor(fifth.page, () => document.getElementById('n-msg')?.textContent.length > 0 && !document.getElementById('n-msg').textContent.includes('Connecting'));
   const full = await read(fifth.page, () => ({ screen: window.__game.screen, msg: document.getElementById('n-msg').textContent, net: window.__game.net }));
   c.ok('A fifth driver is refused with "room is full" and stays on a usable menu', full.screen === 'online' && full.msg === STRINGS['net.err.full'] && full.net === null, full);
+  c.ok('No page errors (fifth)', fifth.errors.length === 0, fifth.errors);
+  await fifth.context.close();
   // readiness and permissions
   const start0 = await read(host.page, () => document.getElementById('l-start')?.getAttribute('aria-disabled'));
   await host.page.click('#l-start');
@@ -312,7 +314,7 @@ async function lobby(run, c) {
   run.evidence.race2 = res2[0].classification.map((x) => `${x.pos ?? '-'}:${x.status}${x.dnfReason ? '/' + x.dnfReason : ''}`);
   void mid;
   for (const s of [phone, tablet]) { const b = s.page.locator('#r-leave'); if (await b.count()) await b.tap(); }
-  return [host, phone, tablet, desk, fifth];
+  return [host, phone, tablet, desk];
 }
 
 /** One representative race: queue at the box, automatic stop-and-go, own-bay refuelling with a fresh Throttle, override and Defer, final-lap DQ. */

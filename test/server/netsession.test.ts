@@ -171,6 +171,24 @@ describe('NetSession against the real server', () => {
     for (const p of ps) p.s.leave();
   }, 90000);
 
+  it('2- and 3-browser rooms race at the same time; each room\'s clients agree on their own standings', async () => {
+    const rooms = [[player(), player(new MemKV(), 0.95)], [player(), player(new MemKV(), 0.96), player(new MemKV(), 0.92)]];
+    for (const [k, ps] of rooms.entries()) {
+      await ps[0].s.create(`Host${k}`, 'multiplayer', { track: k ? 'circuit-3' : 'circuit-5' });
+      for (const p of ps.slice(1)) { await p.s.join(ps[0].s.room!.code, 'G'); p.s.ready(true); }
+      await until(() => ps[0].s.room!.participants.every((x) => x.host || x.ready));
+      ps[0].s.start();
+    }
+    await until(() => rooms.flat().every((p) => p.results.length > 0), 60000);
+    for (const ps of rooms) {
+      expect(new Set(ps.map((p) => p.results[0].r.digest)).size).toBe(1);
+      expect(ps[0].results[0].r.classification).toHaveLength(ps.length);
+      expect(ps.map((p) => p.s.me).every((id) => ps[0].results[0].r.classification!.some((x) => x.id === id))).toBe(true);
+    }
+    expect(rooms[0][0].results[0].r.raceId).not.toBe(rooms[1][0].results[0].r.raceId);
+    for (const p of rooms.flat()) p.s.leave();
+  }, 90000);
+
   it('reconnect before expiry restores the same car and progress; after expiry the seat is gone and cannot be re-joined', async () => {
     const a = player(), b = player();
     await a.s.create('A', 'multiplayer', { track: 'circuit-1' });

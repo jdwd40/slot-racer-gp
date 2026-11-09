@@ -767,7 +767,8 @@ function handle(e: RaceEvent): void {
       if (e.best && p.lapsDone > 1 && !p.finished) hud.toast(t('msg.bestLap', { time: fmt(e.time) }), 'good');
       break;
     case 'finish':
-      if (e.car === p) { sfx.fanfare(); hud.goFlash(`P${e.pos}`); }
+      // online, the order at the flag is not the classification (penalties and DQs are settled by the server at the end)
+      if (e.car === p) { sfx.fanfare(); hud.goFlash(mode === 'online' ? '🏁' : `P${e.pos}`); }
       break;
   }
 }
