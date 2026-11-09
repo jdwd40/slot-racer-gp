@@ -262,6 +262,42 @@ describe('AccountClient', () => {
     expect(await tab1.rename('Alice Two')).toMatchObject({ ok: true, account: { displayName: 'Alice Two' } });
   });
 
+  it('a cross-tab refresh keeps the shown identity until answered, and one that arrives mid-request is not dropped', async () => {
+    const srv = fakeServer();
+    // tab 1's requests can be held at the network, to look inside the in-flight window
+    let hold: Promise<void> | null = null;
+    const gated: typeof fetch = async (...a) => { if (hold) await hold; return srv.fetchFn(...a); };
+    const local = new MemStore();
+    const tab1 = new AccountClient(gated, 'https://slotrush.example', local, new MemStore());
+    const tab2 = new AccountClient(srv.fetchFn, 'https://slotrush.example', local, new MemStore());
+    await tab1.register('alice_1', 'alice password 1', 'Alice');
+    await tab2.restore();
+    const aliceId = tab1.account!.id;
+    // finding 1: while the refresh is in flight the page still sends Alice's id, so the server can refuse a stale seat
+    await tab2.logout();
+    let release!: () => void;
+    hold = new Promise((r) => { release = r; });
+    const sync = tab1.syncFromOtherTab(OWNER_KEY);
+    await Promise.resolve();
+    expect(tab1.auth.state).toBe('signed-in');
+    expect(tab1.expected).toBe(aliceId);
+    hold = null; release();
+    expect(await sync).toEqual({ state: 'guest', expired: false });
+    expect(tab1.expected).toBe('');
+    // finding 2: Alice signs back in on tab 1 and saves her name; meanwhile tab 2 signs out and in as Bob
+    await tab1.login('alice_1', 'alice password 1');
+    hold = new Promise((r) => { release = r; });
+    const save = tab1.rename('Alice Two');
+    expect(tab1.busy).toBe(true);
+    const late = tab1.syncFromOtherTab(OWNER_KEY);   // the storage event arrives while the save is in flight
+    await tab2.logout();
+    await tab2.register('bob_1', 'bob password 1', 'Bob');
+    hold = null; release();
+    await save;
+    expect(await late).toMatchObject({ state: 'signed-in', account: { username: 'bob_1' } });
+    expect(tab1.account).toEqual(tab2.account);
+  });
+
   it('clearAccountState removes only account-scoped keys', () => {
     const local = new MemStore(), session = new MemStore();
     for (const [k, v] of Object.entries(LOCAL_SAVES)) local.setItem(k, v);

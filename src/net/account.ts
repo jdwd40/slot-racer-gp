@@ -61,6 +61,10 @@ export class AccountClient {
   onChange: ((a: AuthState) => void) | null = null;
   /** the identity this tab last held ('' guest, an account id), kept through `loading`: this tab's seat belongs to it */
   private owner: string | null = null;
+  /** callers waiting for the request in flight to finish (a cross-tab change that arrived meanwhile) */
+  private idleWaiters: (() => void)[] = [];
+  /** bumped by every restore: only the newest answer from the server is applied */
+  private restoreSeq = 0;
 
   constructor(private fetchFn: typeof fetch, private origin: string, private local: Store | null, private session: Store | null) {}
 
@@ -78,8 +82,20 @@ export class AccountClient {
    */
   async syncFromOtherTab(key: string | null): Promise<AuthState | null> {
     if (key !== null && key !== OWNER_KEY) return null;
-    if (this.auth.state === 'off' || this.busy) return null;
-    return this.restore();
+    if (this.auth.state === 'off') return null;
+    // a request in flight: refresh once it is done rather than drop the change (its result may already be stale)
+    if (this.busy) await new Promise<void>((res) => this.idleWaiters.push(res));
+    if ((this.auth as AuthState).state === 'off') return null;   // accounts may have been switched off meanwhile
+    // keep showing (and sending, via `expected`) the identity on screen until the server answers: the server then refuses
+    // work done under it if it is stale, instead of the page entering a room with no identity at all
+    return this.restore({ keep: true });
+  }
+
+  /** The request in flight finished: wake any cross-tab refresh that was waiting for it. */
+  private idle(): void {
+    this.busy = false;
+    const w = this.idleWaiters.splice(0);
+    for (const f of w) f();
   }
 
   private set(a: AuthState): void {
@@ -131,9 +147,12 @@ export class AccountClient {
   }
 
   /** Session restoration on page load (or on return): who the server says this browser is. */
-  async restore(): Promise<AuthState> {
-    this.set({ state: 'loading' });
+  async restore(opts: { keep?: boolean } = {}): Promise<AuthState> {
+    const seq = ++this.restoreSeq;
+    // `keep`: a refresh of a known identity (another tab changed the shared sign-in) keeps the current state until answered
+    if (!opts.keep || (this.auth.state !== 'signed-in' && this.auth.state !== 'guest')) this.set({ state: 'loading' });
     const r = await this.call('/api/auth/me');
+    if (seq !== this.restoreSeq) return this.auth; // a newer refresh started: its answer wins
     if (!r || r.status !== 200) { this.set({ state: 'unavailable' }); return this.auth; }
     const v = AccountClient.view(r.data);
     this.set(v ? { state: 'signed-in', account: v } : { state: 'guest', expired: r.data.session === 'expired' });
@@ -151,7 +170,7 @@ export class AccountClient {
       if (!v) return { ok: false, ...AccountClient.error(r.status, r.data) };
       this.set({ state: 'signed-in', account: v });
       return { ok: true, account: v };
-    } finally { this.busy = false; this.onChange?.(this.auth); }
+    } finally { this.idle(); this.onChange?.(this.auth); }
   }
 
   /** Create an account (the driver name is optional and defaults to the username) and sign in to it. */
@@ -171,11 +190,11 @@ export class AccountClient {
     this.onChange?.(this.auth);
     let r: { status: number; data: Json } | null = null;
     try { r = await this.call('/api/auth/logout', {}); } finally {
-      this.busy = false;
       clearAccountState(this.local, this.session);
     }
-    if (r && r.status === 200 && r.data.ok === true) { this.set({ state: 'guest', expired: false }); return { ok: true }; }
+    if (r && r.status === 200 && r.data.ok === true) { this.set({ state: 'guest', expired: false }); this.idle(); return { ok: true }; }
     // still signed in as far as the server is concerned: say so, and let the driver try again
+    this.idle();
     this.onChange?.(this.auth);
     return { ok: false, error: r ? AccountClient.error(r.status, r.data).error : 'unreachable' };
   }
@@ -198,7 +217,7 @@ export class AccountClient {
         // the session ended (elsewhere, by expiry or an owner reset): this browser is a guest again
         if (e.error === 'session_expired' || e.error === 'signed_out') { clearAccountState(this.local, this.session); this.set({ state: 'guest', expired: true }); }
         // another identity holds the cookie now: find out which, so this tab stops showing the old one
-        if (e.error === 'identity_changed') { this.busy = false; await this.restore(); }
+        if (e.error === 'identity_changed') { this.idle(); await this.restore({ keep: true }); }
         return { ok: false, ...e };
       }
       const p = r.data.profile as Json | undefined;
@@ -206,6 +225,6 @@ export class AccountClient {
       // a sign-out or switch while this was in flight wins
       if (this.account?.id === cur.id) this.set({ state: 'signed-in', account: acct });
       return { ok: true, account: acct };
-    } finally { this.busy = false; this.onChange?.(this.auth); }
+    } finally { this.idle(); this.onChange?.(this.auth); }
   }
 }
