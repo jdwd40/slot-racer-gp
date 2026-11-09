@@ -279,6 +279,43 @@ export type RaceEvent =
   | { type: 'go' }
   | { type: 'light'; n: number };
 
+/** An event as it goes over the wire: every car reference is the driver's stable ID. */
+type Wire<E> = { [K in keyof E]: E[K] extends Car ? DriverId : E[K] };
+type Distribute<E> = E extends RaceEvent ? Wire<E> : never;
+export type WireEvent = Distribute<RaceEvent>;
+/** Serializable form of an event: plain data with driver IDs, no object references. */
+export function wireEvent(e: RaceEvent): WireEvent {
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(e)) out[k] = v && typeof v === 'object' && 'id' in v && 'idx' in v ? (v as Car).id : v && typeof v === 'object' ? { ...v } : v;
+  return out as WireEvent;
+}
+
+/** One driver in an authoritative snapshot: plain values keyed by driver ID, nothing a client could not rebuild a view from. */
+export interface CarSnapshot {
+  id: DriverId; slot: number; control: Control; name: string; color: number; num: number; bay: number;
+  status: CarStatus; dqReason: DqReason | null; dnfReason: DnfReason | null; finished: boolean;
+  mode: Mode; u: number; v: number; d: number; laneSide: number; change: { from: number; to: number; s0: number; s1: number } | null;
+  x: number; y: number; z: number; h: number; roll: number; pitch: number; yawOff: number; wobble: number; off: OffState | null;
+  throttle: number; brake: number; fuel: number;
+  crossed: number; lapsDone: number; lastLap: number; bestLap: number; lapStartT: number; lapValid: boolean; finishTime: number; pitStops: number;
+  offences: number; sgOwed: number; sgServed: number; sgServing: boolean; timePen: number; svcBreach: 'stopGo' | 'fuel' | null;
+  laneReq: boolean; pitReq: boolean; fuelReq: boolean; fuelDue: number; sgDue: number; sgDeferred: boolean; routeHold: number; laneOverride: boolean;
+  revOn: boolean; sgPhase: SgPhase; sgCtl: boolean; pitWait: PitWait; exitReq: boolean; bayInUse: number;
+  serviceT: number; penalty: number; towT: number; recoverT: number; bumpT: number;
+}
+/** Authoritative race state: JSON-safe (no cycles, no Infinity or NaN, no browser objects), with driver IDs for every reference. */
+export interface RaceSnapshot {
+  v: 1; track: string; laps: number; practice: boolean;
+  phase: Race['phase']; t: number; raceTime: number; goT: number; lights: number; firstFlagT: number;
+  /** null when unlimited */
+  finishWindow: number | null; timeLimit: number | null;
+  cars: CarSnapshot[];
+  pit: { box: DriverId | null; exit: DriverId | null; bays: (DriverId | null)[]; merges: (DriverId | null)[]; order: DriverId[] };
+  /** highest applied action sequence number per human driver */
+  lastSeq: Record<DriverId, number>;
+  final: Standing[] | null;
+}
+
 /** Held pedals for one human driver. Missing or released means neutral, for that driver only. */
 export interface Input { up: boolean; down: boolean; }
 /** Held inputs for this step, per human driver. A driver absent from the map is neutral. */
@@ -1661,6 +1698,45 @@ export class Race {
     const jig = c.bumpT > 0 ? Math.sin(this.t * 70) * c.bumpT * 0.3 : 0;
     c.x = p.x; c.y = p.y; c.h = p.h + c.yawOff + wob + jig; c.z = p.z;
     c.roll = this.T.rollAt(s); c.pitch = Math.atan(this.T.slopeZ(s));
+  }
+
+  /** Authoritative snapshot of the whole race (see RaceSnapshot). */
+  snapshot(): RaceSnapshot {
+    const idOf = (slot: number): DriverId | null => (slot < 0 ? null : this.cars.find((c) => c.idx === slot)?.id ?? null);
+    const fin = (x: number): number | null => (Number.isFinite(x) ? x : null);
+    return {
+      v: 1, track: this.T.DEF.id, laps: LAPS, practice: this.practice,
+      phase: this.phase, t: this.t, raceTime: this.raceTime, goT: this.goT, lights: this.lights, firstFlagT: this.firstFlagT,
+      finishWindow: fin(this.finishWindow), timeLimit: fin(this.timeLimit),
+      cars: this.cars.map((c) => ({
+        id: c.id, slot: c.idx, control: c.human ? 'human' : 'ai', name: c.name, color: c.color, num: c.num, bay: c.bayHome,
+        status: c.status, dqReason: c.dqReason, dnfReason: c.dnfReason, finished: c.finished,
+        mode: c.mode, u: c.u, v: c.v, d: c.d, laneSide: c.laneSide, change: c.change ? { ...c.change } : null,
+        x: c.x, y: c.y, z: c.z, h: c.h, roll: c.roll, pitch: c.pitch, yawOff: c.yawOff, wobble: c.wobble, off: c.off ? { ...c.off } : null,
+        throttle: c.throttle, brake: c.brake, fuel: c.fuel,
+        crossed: c.crossed, lapsDone: c.lapsDone, lastLap: c.lastLap, bestLap: c.bestLap, lapStartT: c.lapStartT, lapValid: c.lapValid,
+        finishTime: c.finishTime, pitStops: c.pitStops,
+        offences: c.offences, sgOwed: c.sgOwed, sgServed: c.sgServed, sgServing: c.sgServing, timePen: c.timePen, svcBreach: c.svcBreach,
+        laneReq: c.laneReq, pitReq: c.pitReq, fuelReq: c.fuelReq, fuelDue: c.fuelDue, sgDue: c.sgDue, sgDeferred: c.sgDeferred,
+        routeHold: c.routeHold, laneOverride: c.laneOverride,
+        revOn: c.revOn, sgPhase: c.sgPhase, sgCtl: c.sgCtl, pitWait: c.pitWait, exitReq: c.exitReq, bayInUse: c.bay,
+        serviceT: c.serviceT, penalty: c.penalty, towT: c.towT, recoverT: c.recoverT, bumpT: c.bumpT,
+      })),
+      pit: {
+        box: idOf(this.pit.box), exit: idOf(this.pit.exit),
+        bays: this.pit.bays.map(idOf), merges: this.pit.merges.map(idOf),
+        order: this.pit.order.map(idOf).filter((x): x is DriverId => x !== null),
+      },
+      lastSeq: { ...this.lastSeq },
+      final: this.final ? this.final.map((x) => ({ ...x })) : null,
+    };
+  }
+
+  /** Take this step's events in wire form (and clear them). */
+  drainEvents(): WireEvent[] {
+    const out = this.events.map(wireEvent);
+    this.events.length = 0;
+    return out;
   }
 
   /**
