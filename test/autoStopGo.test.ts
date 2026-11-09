@@ -383,6 +383,59 @@ describe('deferral and overrides', () => {
   });
 });
 
+describe('out of fuel in the pit lane', () => {
+  it('running dry after a penalty-only stop hands back control, so the car is captured by the bay it stops beside and refuelled', () => {
+    const { r, P } = setup();
+    inPit(P, T.PEN_S); P.sgOwed = PEN.stopSeconds; P.sgDue = LAP; P.fuel = 0.0015;
+    const tr = run(r, UP, 10, () => P.mode === 'service');
+    expect(served(tr)).toEqual([P.idx]);
+    expect(tr.msgs).toContain('msg.sgDry');
+    expect([P.sgCtl, P.sgLeave]).toEqual([false, false]);
+    expect(P.mode).toBe('service');
+    expect(T.BAYS[P.bay]).toBe(15.5);
+    run(r, NONE, 2);
+    expect(P.fuel).toBeGreaterThan(0.0015);
+    expect(P.towSvc).toBe(false);
+  });
+
+  it('standing in the box with no fuel, the stop is served in full before the tow takes the car to a bay', () => {
+    const { r, P } = setup();
+    inPit(P, T.PEN_S); P.sgOwed = PEN.stopSeconds; P.sgDue = LAP; P.fuel = 0;
+    const tr = run(r, NONE, 10, () => P.mode === 'service');
+    const iServed = tr.events.findIndex((e) => e.type === 'served');
+    const iTow = tr.events.findIndex((e) => e.type === 'tow');
+    expect(iServed).toBeGreaterThanOrEqual(0);
+    expect(iTow).toBeGreaterThan(iServed);
+    expect(P.sgOwed).toBe(0);
+    expect([P.mode, P.towSvc]).toEqual(['service', true]);
+    expect(P.crossed).toBe(LAP);
+  });
+
+  it('running dry on the entry short of the box is towed rather than stuck, and the stop stays owed', () => {
+    const { r, P } = setup();
+    inPit(P, T.PIT_IN0 + 2); P.sgOwed = PEN.stopSeconds; P.sgDue = LAP; P.fuel = 0;
+    const tr = run(r, UP, 6, () => P.mode === 'service');
+    expect(tr.events.some((e) => e.type === 'tow')).toBe(true);
+    expect([P.mode, P.towSvc]).toEqual(['service', true]);
+    expect(P.sgOwed).toBe(PEN.stopSeconds);
+    expect(P.crossed).toBe(LAP);
+  });
+
+  it('a tow from beyond the last bay pulls the car back up the pit lane, never round a lap, and the timing line is not counted twice', () => {
+    const { r, P } = setup();
+    inPit(P, T.FINISH_S + 1.5); P.fuel = 0;
+    const crossed = P.crossed, laps = P.lapsDone, u = P.u, hi = P.hiU;
+    run(r, NONE, 3, () => P.mode === 'service');
+    expect(P.mode).toBe('service');
+    expect(T.BAYS[P.bay]).toBe(T.BAYS[T.BAYS.length - 1]);
+    expect(P.u).toBeCloseTo(u - (T.FINISH_S + 1.5 - T.BAYS[P.bay]), 6);
+    expect(P.hiU).toBe(hi);
+    run(r, UP, 20, () => P.mode === 'race');
+    expect(P.mode).toBe('race');
+    expect([P.crossed, P.lapsDone]).toEqual([crossed, laps]);
+  });
+});
+
 describe('combined fuel visit', () => {
   it('an optional fuel request survives the penalty: control returns at the box with the bay still reserved', () => {
     const { r, P, rival } = setup();

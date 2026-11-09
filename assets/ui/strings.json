@@ -259,6 +259,7 @@
     { "id": "pen.flashBreach", "text": "DEADLINE MISSED" },
     { "id": "msg.sgTooLate", "text": "Too fast for this pit entrance — the stop-and-go stays owed" },
     { "id": "msg.sgHandover", "text": "Out of the pits — you have control" },
+    { "id": "msg.sgDry", "text": "Out of fuel in the pit lane — stop in a service bay or wait for the tow" },
     { "id": "msg.sgAuto", "text": "Auto entry — the car brakes, stops and serves by itself" },
     { "id": "hud.sgA.armed", "text": "STOP-AND-GO ARMED" },
     { "id": "hud.sgA.entry", "text": "AUTO ENTRY" },

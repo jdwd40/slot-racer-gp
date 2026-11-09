@@ -141,6 +141,8 @@ export interface Car {
   svcBreach: 'stopGo' | 'fuel' | null;
   /** the bay service in progress came from a tow, which is recovery, not a pit visit */
   towSvc: boolean;
+  /** the tow in progress started in the pit lane: the car is moved to the nearest free bay, never round a lap */
+  towPit: boolean;
   /** terminal result: finished means classified; dq and dnf are never classified */
   status: CarStatus;
   dqReason: DqReason | null;
@@ -273,7 +275,7 @@ export class Race {
         idx: g.di, name: D.name, color: g.di === 0 && opts.playerColor !== undefined ? opts.playerColor : D.color, isPlayer: g.di === 0,
         u: T.FINISH_S + g.prog, v: 0, laneSide: g.side, change: null, laneReq: false, pitReq: false, pitPenaltyOnly: false, laneOverride: false,
         fuelReq: false, fuelDue: 0, sgDue: 0, sgDeferred: false, routeHold: -1, overAppr: -1, hiU: T.FINISH_S + g.prog,
-        svcBreach: null, towSvc: false, status: 'running', dqReason: null,
+        svcBreach: null, towSvc: false, towPit: false, status: 'running', dqReason: null,
         mode: 'grid', d: g.side * T.LANE_HALF, yawOff: 0, throttle: 0, brake: 0,
         fuel: 1, slip: 0, latRatio: 0, wobble: 0, off: null, recoverT: 0, towT: 0,
         bay: g.di, bayT: 0, serviceT: 0, penalty: 0, fuelAtBay: 0,
@@ -697,8 +699,10 @@ export class Race {
       if (c.slip >= 1) this.deslot(c);
     } else { c.latRatio = 0; c.wobble *= 0.9; c.slip = 0; }
 
-    // out of fuel
-    if (c.fuel <= 0 && c.mode === 'race' && Math.abs(c.v) < 0.4) {
+    // out of fuel: towed to a bay from the road, or from anywhere in the pit lane except standing in the box to serve the stop
+    const dryPit = c.mode === 'pitlane' && !(c.sgOwed > 0 && this.pit.box === c.idx && Math.abs(T.gapS(s, T.PEN_S)) < T.PEN_HALF);
+    if (c.fuel <= 0 && (c.mode === 'race' || dryPit) && Math.abs(c.v) < 0.4) {
+      c.towPit = c.mode === 'pitlane'; c.sgLeave = false; c.sgServing = false;
       c.mode = 'tow'; c.towT = 0; c.lapValid = false; this.leaveSqueeze(c); c.laneReq = false; this.clearPitIntent(c);
       this.pit.releaseAll(c, 'terminal');
       if (c.change) { c.laneSide = c.change.to; c.change = null; }
@@ -728,6 +732,8 @@ export class Race {
     if (!c.isPlayer || c.finished || c.status !== 'running' || this.phase !== 'racing') return;
     const s = this.s(c);
     if (c.mode === 'pitlane') {
+      // run dry on the way out: the controller cannot drive the car on, so it hands back and a bay or the tow takes over
+      if (c.sgLeave && c.fuel <= 0) { c.sgLeave = false; this.pmsg(c, 'msg.sgDry', 'bad'); }
       if (c.sgLeave) { c.sgCtl = true; c.sgPhase = 'leaving'; return; }
       // in control up to the end of the box; a car beyond it (it can only get there in reverse recovery) is driven by hand
       if (c.sgOwed > 0 && T.gapS(s, SG_STOP) > -T.PEN_HALF) { c.sgCtl = true; c.sgPhase = c.sgServing ? 'serving' : c.pitHold ? 'queued' : 'entry'; }
@@ -1040,16 +1046,26 @@ export class Race {
   stepTow(c: Car, dt: number): void {
     c.towT += dt; c.v = 0;
     if (c.towT < 1.6) return;
-    let j = this.bayFree(c.bay, c) ? c.bay : -1;
-    for (let i = 0; i < T.BAYS.length && j < 0; i++) if (this.bayFree(i, c)) j = i;
-    if (j < 0) return;
     const s = this.s(c);
-    const dist = T.ahead(s, T.BAYS[j]);
+    let j = -1;
+    if (c.towPit) {
+      // already in the pit lane: the nearest free bay, ahead or behind, never round a lap
+      for (let i = 0; i < T.BAYS.length; i++) if (this.bayFree(i, c) && (j < 0 || Math.abs(T.gapS(s, T.BAYS[i])) < Math.abs(T.gapS(s, T.BAYS[j])))) j = i;
+    } else {
+      j = this.bayFree(c.bay, c) ? c.bay : -1;
+      for (let i = 0; i < T.BAYS.length && j < 0; i++) if (this.bayFree(i, c)) j = i;
+    }
+    if (j < 0) return;
+    const dist = c.towPit ? T.gapS(s, T.BAYS[j]) : T.ahead(s, T.BAYS[j]);
+    // pulled back up the pit lane: points already passed (the timing line among them) are not decided again
+    const mark = dist < 0 ? Math.max(c.revMark ?? -Infinity, c.u) : null;
     c.u += dist;
     this.holdBay(c, j);
     c.bay = j; c.mode = 'service'; c.serviceT = 0; c.d = T.BAY_D; c.laneSide = -1; c.yawOff = 0; c.revMark = null; c.towSvc = true; c.exitReq = false;
+    if (mark !== null) c.revMark = mark;
+    c.towPit = false;
     if (c.u > c.hiU) c.hiU = c.u;
-    c.penalty = 8 + dist / 11; c.pitStops++;
+    c.penalty = 8 + Math.abs(dist) / 11; c.pitStops++;
     c.refuelTarget = Math.max(c.refuelTarget, 0.75);
     if (c.isPlayer) this.pmsg(c, 'msg.towPenalty', 'bad', { n: Math.round(c.penalty) });
     this.laps(c);
