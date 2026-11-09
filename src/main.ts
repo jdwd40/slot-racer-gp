@@ -916,6 +916,8 @@ function onlineEntryHtml(): string {
 /** The online menu: create a multiplayer room, join one by code, or start a connected solo race with AI. */
 function showOnline(): void {
   if (online.state !== 'available') { showTitle(); return; }
+  // a re-render of this menu (the sign-in check answered, another tab switched identity) keeps a room code being typed
+  const typedCode = screen === 'online' ? overlay.querySelector<HTMLInputElement>('#n-code')?.value : undefined;
   enter('online');
   overlay.className = 'overlay show';
   const liv = netLivery();
@@ -949,28 +951,37 @@ function showOnline(): void {
     name.addEventListener('input', () => { try { localStorage.setItem(NAME_KEY, name.value); } catch { /* ignore */ } });
   }
   const code = overlay.querySelector<HTMLInputElement>('#n-code')!;
-  code.value = hashCode();
+  code.value = typedCode ?? hashCode();
   for (const f of [name, code]) f.addEventListener('keydown', (e) => { e.stopPropagation(); if (e.key === 'Enter') { f.blur(); if (f === code) join(); } });
   overlay.querySelector('#n-msg')!.textContent = netNotice;
+  // until the sign-in check answers, the page cannot say who would take the seat: room entry waits for it
+  onlinePending = entryIdentity() === null;
+  if (onlinePending) {
+    for (const id of ['#n-create', '#n-join', '#n-solo']) overlay.querySelector<HTMLButtonElement>(id)!.disabled = true;
+    if (!netNotice) overlay.querySelector('#n-msg')!.textContent = t('acct.loading');
+  }
   overlay.querySelectorAll<HTMLElement>('[data-nlivery]').forEach((b) => b.addEventListener('click', () => {
     try { localStorage.setItem(NLIV_KEY, b.dataset.nlivery!); } catch { /* ignore */ }
     overlay.querySelectorAll('[data-nlivery]').forEach((x) => x.classList.toggle('sel', x === b));
   }));
-  const who = (): string | null => {
-    if (accounts.account) return accounts.account.displayName;
+  /** The name and identity a room is entered under, both as the page shows them now; null when entry must wait. */
+  const who = (): { n: string; expect: string | undefined } | null => {
+    const expect = entryIdentity();
+    if (expect === null) { say(t('acct.loading')); return null; }
+    if (accounts.account) return { n: accounts.account.displayName, expect };
     const n = name.value.trim();
     if (!n) { say(t('net.err.name')); name.focus(); return null; }
-    return n;
+    return { n, expect };
   };
   const join = (): void => {
-    const n = who(); if (!n) return;
+    const w = who(); if (!w) return;
     const c = code.value.trim().toUpperCase();
     if (c.length !== LIMITS.codeLength) { say(t('net.err.code')); code.focus(); return; }
-    void netBegin((s) => s.join(c, n, netLivery(), accounts.expected));
+    void netBegin((s) => s.join(c, w.n, netLivery(), w.expect));
   };
-  overlay.querySelector('#n-create')!.addEventListener('click', () => { const n = who(); if (n) void netBegin((s) => s.create(n, 'multiplayer', { track: T.DEF.id, aiFill: overlay.querySelector<HTMLInputElement>('#n-ai')!.checked }, netLivery(), accounts.expected)); });
+  overlay.querySelector('#n-create')!.addEventListener('click', () => { const w = who(); if (w) void netBegin((s) => s.create(w.n, 'multiplayer', { track: T.DEF.id, aiFill: overlay.querySelector<HTMLInputElement>('#n-ai')!.checked }, netLivery(), w.expect)); });
   overlay.querySelector('#n-join')!.addEventListener('click', join);
-  overlay.querySelector('#n-solo')!.addEventListener('click', () => { const n = who(); if (n) void netBegin((s) => s.create(n, 'solo', { track: T.DEF.id }, netLivery(), accounts.expected)); });
+  overlay.querySelector('#n-solo')!.addEventListener('click', () => { const w = who(); if (w) void netBegin((s) => s.create(w.n, 'solo', { track: T.DEF.id }, netLivery(), w.expect)); });
   overlay.querySelector('#n-back')!.addEventListener('click', () => { netNotice = ''; showTitle(); });
 }
 // ------------------------------------------------------------ accounts (docs/accounts.md)
@@ -981,8 +992,23 @@ let acctNotice = '';
 accounts.onChange = (a: AuthState) => {
   if (a.state === 'guest' && a.expired) acctNotice = t('acct.expired');
   if (screen === 'title' && !accounts.busy) showTitle();
+  // the online menu was waiting for the sign-in check: show the identity it found and open room entry
+  else if (screen === 'online' && !net && onlinePending && entryIdentity() !== null) showOnline();
 };
 const accountsOn = (): boolean => online.state === 'available' && online.accounts;
+/** the online menu on screen was drawn with room entry held back until the sign-in check answers */
+let onlinePending = false;
+/**
+ * The identity a room is entered under, sent so the server refuses a socket that holds another (server/app.ts):
+ * undefined when the server has no accounts; null while the sign-in check has not answered (the page shows a guest name
+ * it cannot vouch for, and the browser may hold a live session), so entry waits; and when the account service could not
+ * be reached, '' for the guest the page shows, so a signed-in socket is refused rather than seated under its account.
+ */
+function entryIdentity(): string | undefined | null {
+  if (!accountsOn()) return undefined;
+  if (accounts.auth.state === 'off' || accounts.auth.state === 'loading') return null;
+  return accounts.expected ?? '';
+}
 // another tab signed in, out or switched: the cookie is shared, so this tab follows rather than keep showing the old identity
 window.addEventListener('storage', (e) => {
   if (e.storageArea && e.storageArea !== localStore()) return;
