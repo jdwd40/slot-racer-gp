@@ -63,8 +63,11 @@ export class AccountClient {
   private owner: string | null = null;
   /** callers waiting for the request in flight to finish (a cross-tab change that arrived meanwhile) */
   private idleWaiters: (() => void)[] = [];
-  /** bumped by every restore: only the newest answer from the server is applied */
-  private restoreSeq = 0;
+  /**
+   * Bumped by every restore and by every sign-in, sign-out or profile change this tab applies: a restore applies its answer
+   * only if nothing newer happened since it was sent (a /me sent before a sign-out must not sign the tab back in).
+   */
+  private gen = 0;
 
   constructor(private fetchFn: typeof fetch, private origin: string, private local: Store | null, private session: Store | null) {}
 
@@ -114,6 +117,12 @@ export class AccountClient {
     this.onChange?.(a);
   }
 
+  /** An authentication change the server confirmed: newer than any restore still in flight. */
+  private apply(a: AuthState): void {
+    this.gen++;
+    this.set(a);
+  }
+
   private async call(path: string, body?: Json): Promise<{ status: number; data: Json } | null> {
     const ctl = new AbortController();
     const timer = setTimeout(() => ctl.abort(), TIMEOUT_MS);
@@ -148,11 +157,11 @@ export class AccountClient {
 
   /** Session restoration on page load (or on return): who the server says this browser is. */
   async restore(opts: { keep?: boolean } = {}): Promise<AuthState> {
-    const seq = ++this.restoreSeq;
+    const seq = ++this.gen;
     // `keep`: a refresh of a known identity (another tab changed the shared sign-in) keeps the current state until answered
     if (!opts.keep || (this.auth.state !== 'signed-in' && this.auth.state !== 'guest')) this.set({ state: 'loading' });
     const r = await this.call('/api/auth/me');
-    if (seq !== this.restoreSeq) return this.auth; // a newer refresh started: its answer wins
+    if (seq !== this.gen) return this.auth; // a newer refresh or authentication change happened: it wins
     if (!r || r.status !== 200) { this.set({ state: 'unavailable' }); return this.auth; }
     const v = AccountClient.view(r.data);
     this.set(v ? { state: 'signed-in', account: v } : { state: 'guest', expired: r.data.session === 'expired' });
@@ -168,7 +177,7 @@ export class AccountClient {
       if (!r) return { ok: false, error: 'unreachable' };
       const v = r.status === 200 || r.status === 201 ? AccountClient.view(r.data) : null;
       if (!v) return { ok: false, ...AccountClient.error(r.status, r.data) };
-      this.set({ state: 'signed-in', account: v });
+      this.apply({ state: 'signed-in', account: v });
       return { ok: true, account: v };
     } finally { this.idle(); this.onChange?.(this.auth); }
   }
@@ -192,7 +201,7 @@ export class AccountClient {
     try { r = await this.call('/api/auth/logout', {}); } finally {
       clearAccountState(this.local, this.session);
     }
-    if (r && r.status === 200 && r.data.ok === true) { this.set({ state: 'guest', expired: false }); this.idle(); return { ok: true }; }
+    if (r && r.status === 200 && r.data.ok === true) { this.apply({ state: 'guest', expired: false }); this.idle(); return { ok: true }; }
     // still signed in as far as the server is concerned: say so, and let the driver try again
     this.idle();
     this.onChange?.(this.auth);
@@ -215,7 +224,7 @@ export class AccountClient {
       if (r.status !== 200) {
         const e = AccountClient.error(r.status, r.data);
         // the session ended (elsewhere, by expiry or an owner reset): this browser is a guest again
-        if (e.error === 'session_expired' || e.error === 'signed_out') { clearAccountState(this.local, this.session); this.set({ state: 'guest', expired: true }); }
+        if (e.error === 'session_expired' || e.error === 'signed_out') { clearAccountState(this.local, this.session); this.apply({ state: 'guest', expired: true }); }
         // another identity holds the cookie now: find out which, so this tab stops showing the old one
         if (e.error === 'identity_changed') { this.idle(); await this.restore({ keep: true }); }
         return { ok: false, ...e };
@@ -223,7 +232,7 @@ export class AccountClient {
       const p = r.data.profile as Json | undefined;
       const acct = { ...cur, displayName: typeof p?.displayName === 'string' ? p.displayName : d.name };
       // a sign-out or switch while this was in flight wins
-      if (this.account?.id === cur.id) this.set({ state: 'signed-in', account: acct });
+      if (this.account?.id === cur.id) this.apply({ state: 'signed-in', account: acct });
       return { ok: true, account: acct };
     } finally { this.idle(); this.onChange?.(this.auth); }
   }

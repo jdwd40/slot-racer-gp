@@ -298,6 +298,54 @@ describe('AccountClient', () => {
     expect(tab1.account).toEqual(tab2.account);
   });
 
+  it('a /me answered before a sign-out, sign-in or rename but delivered after it never replaces the newer state', async () => {
+    const srv = fakeServer();
+    // /me is answered by the server at once, but its response can be held in the network
+    let hold: Promise<void> | null = null;
+    const late: typeof fetch = async (url, init) => {
+      const r = await srv.fetchFn(url, init);
+      if (hold && new URL(String(url)).pathname === '/api/auth/me') await hold;
+      return r;
+    };
+    const local = new MemStore(), session = new MemStore();
+    const c = new AccountClient(late, 'https://slotrush.example', local, session);
+    await c.register('alice_1', 'alice password 1', 'Alice');
+    let release!: () => void;
+    const gate = () => { hold = new Promise((r) => { release = r; }); };
+
+    // sign-out: the server revoked the session, so the earlier "signed in" answer is stale
+    gate();
+    const sync = c.syncFromOtherTab(OWNER_KEY);
+    await Promise.resolve();
+    expect(await c.logout()).toEqual({ ok: true });
+    hold = null; release();
+    expect(await sync).toEqual({ state: 'guest', expired: false });
+    expect(c.auth).toEqual({ state: 'guest', expired: false });
+    expect(local.getItem(OWNER_KEY)).toBe('');
+
+    // sign-in: the earlier "guest" answer must not sign the tab out (or clear the new driver's state)
+    gate();
+    const sync2 = c.restore({ keep: true });
+    await Promise.resolve();
+    expect((await c.login('alice_1', 'alice password 1')).ok).toBe(true);
+    local.setItem(accountKey(c.account!.id, 'pending'), '{}');
+    hold = null; release();
+    expect(await sync2).toMatchObject({ state: 'signed-in', account: { username: 'alice_1' } });
+    expect(local.getItem(accountKey(c.account!.id, 'pending'))).toBe('{}');
+
+    // rename: the earlier answer carries the old name
+    gate();
+    const sync3 = c.restore({ keep: true });
+    await Promise.resolve();
+    expect((await c.rename('Alice Two')).ok).toBe(true);
+    hold = null; release();
+    await sync3;
+    expect(c.account?.displayName).toBe('Alice Two');
+
+    // with nothing newer in between, a restore's answer still applies
+    expect(await c.restore()).toMatchObject({ state: 'signed-in', account: { displayName: 'Alice Two' } });
+  });
+
   it('clearAccountState removes only account-scoped keys', () => {
     const local = new MemStore(), session = new MemStore();
     for (const [k, v] of Object.entries(LOCAL_SAVES)) local.setItem(k, v);
