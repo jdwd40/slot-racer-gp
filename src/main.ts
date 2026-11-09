@@ -1080,7 +1080,7 @@ function showAccount(tab: 'login' | 'register' = 'login'): void {
   acctNotice = '';
   const say2 = (text: string, kind: 'err' | 'ok' | 'busy'): void => { msg.textContent = text; msg.dataset.kind = kind; };
   overlay.querySelector('#a-back')!.addEventListener('click', () => { if (!accounts.busy) showTitle(); });
-  overlay.querySelector('#a-retry')?.addEventListener('click', () => { void accounts.restore().then(() => showAccount()); showAccount(); });
+  overlay.querySelector('#a-retry')?.addEventListener('click', () => { void accounts.restore().then(() => { if (screen === 'account') showAccount(); }); showAccount(); });
   overlay.querySelector('#a-tab-login')?.addEventListener('click', () => showAccount('login'));
   overlay.querySelector('#a-tab-register')?.addEventListener('click', () => showAccount('register'));
   const form = overlay.querySelector<HTMLFormElement>('#a-form');
