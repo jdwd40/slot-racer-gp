@@ -1196,7 +1196,6 @@ export class Race {
         if (c.isPlayer) c.sgLeave = !c.pitFuel;
         this.emit({ type: 'served', car: c });
         this.pmsg(c, 'msg.penServed', 'good');
-        if (c.isPlayer && !c.finished) this.pmsg(c, c.sgLeave ? 'msg.sgLeaving' : 'msg.penFuelNext', 'info');
       }
     } else if (c.sgServing && Math.abs(c.v) > 0.3) {
       c.sgServing = false; c.sgServed = 0;

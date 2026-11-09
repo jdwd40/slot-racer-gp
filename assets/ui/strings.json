@@ -260,8 +260,6 @@
     { "id": "msg.sgTooLate", "text": "Too fast for this pit entrance — the stop-and-go stays owed" },
     { "id": "msg.sgHandover", "text": "Out of the pits — you have control" },
     { "id": "msg.sgAuto", "text": "Auto entry — the car brakes, stops and serves by itself" },
-    { "id": "msg.sgLeaving", "text": "Leaving the pits automatically — control returns at the exit" },
-    { "id": "msg.penFuelNext", "text": "Fuel stop next — your control: brake into your bay" },
     { "id": "hud.sgA.armed", "text": "STOP-AND-GO ARMED" },
     { "id": "hud.sgA.entry", "text": "AUTO ENTRY" },
     { "id": "hud.sgA.queued", "text": "QUEUED" },

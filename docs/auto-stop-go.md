@@ -38,7 +38,7 @@ The shared queue's `pitCap` and the pit limiter apply on top of this. The car co
 ## Fuel visits
 
 - **Penalty only** (`pitFuel` false at the entrance). The controller drives on through the pit lane after the stop and never captures a bay, even with Brake held next to one. Fuel never increases, no pit stop is counted, and the lap is counted once at the timing line.
-- **Combined** (an optional or committed fuel stop, so `pitFuel` is true). The fuel reason is kept. After the stop the controller hands back at the box ("Fuel stop next — your control: brake into your bay"), and the bay reserved for the car on the approach stays reserved. The assigned-bay controller is the next task. Until it lands, the player brakes into the bay as before. The two debts clear independently.
+- **Combined** (an optional or committed fuel stop, so `pitFuel` is true). The fuel reason is kept. After the stop the controller hands back at the box (the status line then reads "Brake to stop in a service bay"), and the bay reserved for the car on the approach stays reserved. The assigned-bay controller is the next task. Until it lands, the player brakes into the bay as before. The two debts clear independently.
 
 ## Brake, reverse, pause
 
