@@ -31,6 +31,8 @@ export class OnlineClient {
   private waiters: { pred: (m: ServerMsg) => boolean; res: (m: ServerMsg) => void; rej: (e: Error) => void; timer: ReturnType<typeof setTimeout> }[] = [];
   private hb: ReturnType<typeof setInterval> | null = null;
   onMessage: ((m: ServerMsg) => void) | null = null;
+  /** the open socket closed (after a completed connect) */
+  onClose: ((e: { code: number; reason: string }) => void) | null = null;
 
   constructor(private url: string, private Ctor: SocketCtor, private opts?: unknown) {}
 
@@ -44,11 +46,14 @@ export class OnlineClient {
       ws.onerror = () => rej(new Error('connect failed'));
       ws.onclose = (e) => rej(new Error(`closed ${e.code}`));
     });
-    ws.onmessage = (ev) => this.receive(String(ev.data));
+    // a replaced socket (a reconnect) is ignored from here on: its late close or messages never touch the new connection
+    ws.onmessage = (ev) => { if (this.ws === ws) this.receive(String(ev.data)); };
     ws.onclose = (e) => {
+      if (this.ws !== ws) return;
       this.closed = { code: e.code, reason: e.reason };
       this.stopHeartbeat();
       for (const w of this.waiters.splice(0)) { clearTimeout(w.timer); w.rej(new Error(`closed ${e.code}`)); }
+      this.onClose?.(e);
     };
     ws.onerror = () => undefined;
     this.send({ t: 'hello', v: version, proto: PROTOCOL_NAME });

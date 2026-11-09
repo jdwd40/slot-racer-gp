@@ -303,6 +303,8 @@ export interface CarSnapshot {
   laneReq: boolean; pitReq: boolean; fuelReq: boolean; fuelDue: number; sgDue: number; sgDeferred: boolean; routeHold: number; laneOverride: boolean;
   revOn: boolean; sgPhase: SgPhase; sgCtl: boolean; pitWait: PitWait; exitReq: boolean; bayInUse: number;
   serviceT: number; penalty: number; towT: number; recoverT: number; bumpT: number;
+  /** view state a client's HUD and arrows read (approach numbering, queue holds, bay targeting, fresh-throttle cue) */
+  hiU: number; squeezeHold: boolean; pitHold: boolean; towSvc: boolean; pitFuel: boolean; serviced: boolean; upPrev: boolean;
 }
 /** Authoritative race state: JSON-safe (no cycles, no Infinity or NaN, no browser objects), with driver IDs for every reference. */
 export interface RaceSnapshot {
@@ -1749,6 +1751,7 @@ export class Race {
         routeHold: c.routeHold, laneOverride: c.laneOverride,
         revOn: c.revOn, sgPhase: c.sgPhase, sgCtl: c.sgCtl, pitWait: c.pitWait, exitReq: c.exitReq, bayInUse: c.bay,
         serviceT: c.serviceT, penalty: c.penalty, towT: c.towT, recoverT: c.recoverT, bumpT: c.bumpT,
+        hiU: c.hiU, squeezeHold: c.squeezeHold, pitHold: c.pitHold, towSvc: c.towSvc, pitFuel: c.pitFuel, serviced: c.serviced, upPrev: c.upPrev,
       })),
       pit: {
         box: idOf(this.pit.box), exit: idOf(this.pit.exit),
