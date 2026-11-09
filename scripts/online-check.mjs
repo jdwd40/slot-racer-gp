@@ -73,6 +73,7 @@ const VIEWS = {
 /** A throwaway browser context on the low preset, with the shared in-page driver and a key or touch "Keys". */
 async function openPage(run, url, view = 'laptop', { touch = false, name = view, fpsCap = 0 } = {}) {
   const context = await run.browser.newContext({ ...VIEWS[view] });
+  run.contexts.add(context);
   const page = await context.newPage();
   page.setDefaultTimeout(60000);
   const errors = [];
@@ -635,7 +636,7 @@ async function main() {
   const dead = 'http://127.0.0.1:9';   // nothing listens: the service is "down"
   const pv = [await startPreview(4181, fast.url), await startPreview(4182, `http://127.0.0.1:${proxy.port}`), await startPreview(4183, dead)];
   const browser = await chromium.launch({ headless: true });
-  const run = { qa: await import(pathToFileURL(qaFile).href), browser, fast, real, proxy, fastUrl: pv[0].url, realUrl: pv[1].url, deadUrl: pv[2].url, evidence: {} };
+  const run = { contexts: new Set(), qa: await import(pathToFileURL(qaFile).href), browser, fast, real, proxy, fastUrl: pv[0].url, realUrl: pv[1].url, deadUrl: pv[2].url, evidence: {} };
   console.log(`Chromium ${browser.version()}; fast server :${fast.port} (time x2), real-time server :${real.port} behind proxy :${proxy.port}`);
   const report = { commit: execFileSync('git', ['rev-parse', 'HEAD'], { cwd: ROOT, encoding: 'utf8' }).trim(), browser: `chromium ${browser.version()}`, scenarios: [] };
   let failed = false;
@@ -651,6 +652,9 @@ async function main() {
         if (!report.environment) report.environment = await environment({ machine: 'build host', commit: report.commit, revision: null, url: run.fastUrl, browser, headed: false }, s.page).catch(() => null);
         await s.context.close().catch(() => null);
       }
+      // a scenario that stopped early must not leave pages rendering into the next one
+      for (const ctx of run.contexts) await ctx.close().catch(() => null);
+      run.contexts.clear();
       const status = c.list.some((x) => x.status === 'failed') ? 'failed' : 'passed';
       failed ||= status === 'failed';
       report.scenarios.push({ name, status, seconds: Math.round((Date.now() - t0) / 1000), checks: c.list });
