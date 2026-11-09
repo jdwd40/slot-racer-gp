@@ -1320,7 +1320,9 @@ function onNetAwards(a: AwardsView): void {
 
 /** The server's career points for this race, with whether they are stored yet. Nothing here is computed by the browser. */
 function awardsHtml(r: ResultView, a: AwardsView | null): string {
-  if (!a || a.raceId !== r.raceId) return accountsOn() ? `<p class="sync" data-sync="none"><small>${t('career.waiting')}</small></p>` : '';
+  // a server without accounts records no careers: nothing to say
+  if (!accountsOn() && !a?.rows.some((x) => x.credit)) return '';
+  if (!a || a.raceId !== r.raceId) return `<p class="sync" data-sync="none"><small>${t('career.waiting')}</small></p>`;
   if (!a.eligible) return `<p class="sync" data-sync="none"><small>${t(a.reason === 'practice' ? 'career.practice' : 'career.incomplete')}</small></p>`;
   const byId = new Map(r.participants.map((x) => [x.id, x]));
   const rows = a.rows.filter((x) => x.credit).map((x) => {
@@ -1331,8 +1333,10 @@ function awardsHtml(r: ResultView, a: AwardsView | null): string {
   const mine = a.rows.find((x) => x.participant === localId);
   const guestNote = mine && !mine.credit ? `<p><small>${t(accountsOn() ? 'career.youGuest' : 'career.noAccounts')}</small></p>` : '';
   const others = a.rows.some((x) => !x.credit) ? `<p><small>${t('career.noCredit')}</small></p>` : '';
+  // nobody signed in: no accounts to save to, so no sync state either
+  if (!rows) return guestNote;
   return `<div class="lbl2">${t('career.racePoints')}</div>
-    ${rows ? `<div class="tscroll"><table><thead><tr><th>${t('res.driver')}</th><th>#</th><th>${t('champ.points')}</th></tr></thead><tbody>${rows}</tbody></table></div>` : ''}
+    <div class="tscroll"><table><thead><tr><th>${t('res.driver')}</th><th>#</th><th>${t('champ.points')}</th></tr></thead><tbody>${rows}</tbody></table></div>
     ${guestNote}${others}
     <p class="sync" data-sync="${a.sync}" role="status">${t(`career.sync.${a.sync}`)}</p>`;
 }

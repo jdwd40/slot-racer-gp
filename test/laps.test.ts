@@ -10,6 +10,24 @@ afterEach(() => vi.restoreAllMocks());
 const laps = (ev: RaceEvent[]) => ev.filter((e): e is Extract<RaceEvent, { type: 'lap' }> => e.type === 'lap');
 
 describe('lap counting', () => {
+  it('the final race lap is a valid lap event emitted in the same step as the finish (#25: a handler must not drop it for `finished`)', () => {
+    const r = fresh(); park(r);
+    const P = me(r); P.human = true;
+    P.crossed = LAPS; P.lapsDone = LAPS - 1; P.lapStartT = r.raceTime - 8; P.sectors = 7; P.lapValid = true;
+    place(P, T.FINISH_S + LAPS * T.L - 0.3, 1, 10);
+    let lap: Extract<RaceEvent, { type: 'lap' }> | undefined;
+    for (let i = 0; i < 10 && !lap; i++) {
+      const ev = stepEvents(r, 1, UP);
+      lap = laps(ev)[0];
+      // when the step's events are handled, the car already reads as finished: the final lap must still be recorded
+      if (lap) { expect(P.finished).toBe(true); expect(ev.some((e) => e.type === 'finish' && e.car === P)).toBe(true); }
+    }
+    expect(lap).toMatchObject({ lapsDone: LAPS, valid: true });
+    expect(lap!.time).toBeGreaterThan(7);
+    // no lap event ever follows the finish
+    expect(laps(stepEvents(r, 120, UP))).toHaveLength(0);
+  });
+
   it('emits exactly one lap event per timing-line crossing', () => {
     const r = fresh(); park(r);
     const P = me(r); P.human = true;

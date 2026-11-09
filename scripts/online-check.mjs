@@ -847,7 +847,11 @@ async function career(run, c) {
   for (const car of r.cars) if (car.id !== me) r.retire(car.id);
   const car = r.car(me);
   car.crossed = LAPS; car.lapsDone = LAPS - 1; car.sectors = 7; car.lapValid = true; car.lapStartT = r.raceTime - 8.4; car.revMark = null;
-  car.u = r.T.FINISH_S + LAPS * r.T.L - 2; car.hiU = car.u; car.v = 12; car.mode = 'race'; car.change = null;
+  car.u = r.T.FINISH_S + LAPS * r.T.L + 0.3; car.hiU = car.u; car.v = 12; car.mode = 'race'; car.change = null;
+  // the race core's own lap counting for this position: the final-lap event and the finish, exactly as a crossing makes them
+  r.laps(car);
+  const fin = { status: car.status, lapsDone: car.lapsDone };
+  c.ok('Seeded finish: the server classified the driver as finished on lap 13', fin.status === 'finished' && fin.lapsDone === LAPS, fin);
   await waitFor(a.page, () => window.__game.screen === 'netres', undefined, 60000);
   await waitFor(a.page, () => document.querySelector('#r-awards .sync')?.dataset.sync === 'pending', undefined, 15000);
   const pend = await read(a.page, () => ({ sync: document.querySelector('#r-awards .sync').textContent, pts: [...document.querySelectorAll('#r-awards tr[data-pts]')].map((x) => x.dataset.pts), place: document.querySelector('.netres .place')?.textContent }));
