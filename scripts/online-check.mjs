@@ -128,6 +128,8 @@ const waitOnline = (page) => waitFor(page, () => window.__game.online.state !== 
 /** Through the menus: Online, a name, then create (multiplayer or solo) or join by typing the code. */
 async function goOnline(s, name) {
   await waitOnline(s.page);
+  // under four software-rendered pages the one health probe can time out: that page then (correctly) offers no Online, so reload once
+  if (!(await s.page.locator('#o-online').count())) { s.probeRetries = (s.probeRetries ?? 0) + 1; await s.page.reload(); await waitFor(s.page, () => window.__game && window.__game.screen === 'title', undefined, 120000); await waitOnline(s.page); }
   await s.page.click('#o-online');
   await s.page.fill('#n-name', name);
 }
