@@ -1,6 +1,6 @@
 # Slot Rush GP
 
-A tabletop slot-car racing game: TypeScript, Three.js and Vite. It runs entirely in the browser with no backend; leaderboards, practice ghosts and championship progress are stored in the browser's `localStorage`.
+A tabletop slot-car racing game: TypeScript, Three.js and Vite. The game runs entirely in the browser; leaderboards, practice ghosts and championship progress are stored in the browser's `localStorage`. An optional authoritative online room server (`server/`, Node + WebSocket + PostgreSQL) hosts private rooms for 2–4 players; it is built and tested here but not yet activated in production, and the deployed client keeps online play off ([online server](docs/online-server.md)).
 
 Originally exported from Tesana on 2026-10-26; the Tesana play-service integration has since been removed so the game is self-hosted.
 
@@ -13,6 +13,7 @@ npm ci             # install exactly the locked dependencies
 npm run dev        # http://localhost:5173
 npm run build      # static site in dist/
 npm run preview    # serve dist/ locally
+npm run build:server && npm run server   # optional room server on 127.0.0.1:8787 (dev/preview proxy /api and /ws to it)
 ```
 
 ## Checks
@@ -21,18 +22,23 @@ npm run preview    # serve dist/ locally
 npm run typecheck  # tsc --noEmit over src/ and test/
 npm test           # vitest run: the regression suite, once, no watch mode
 npm run check:browser  # bounded real-browser checks, about 11 minutes; not part of CI
+npm run test:db    # database tests against a private local PostgreSQL (.local-pg/); CI runs them on PostgreSQL 17
+npm run server:smoke -- http://127.0.0.1:8787   # health and connection check of a running room server
 ```
 
 The same checks plus `npm run build` run in GitHub Actions (`.github/workflows/ci.yml`) on pull requests and pushes to `main`. Successful pushes to `main` then deploy that exact checked build artifact to the static VPS site; PRs never deploy. See [deployment and rollback](docs/deployment.md).
 
-The tests cover the simulation and graphics preset logic only (`src/race.ts`, `src/pit.ts`, `src/track.ts`, `src/records.ts`, `src/timing.ts`, `src/graphics.ts`, `src/input.ts`): collision penalties, lap counting, lane changes, leaderboards and championship scoring, fixed-step timing, graphics preset resolution and storage, input sources and touch pointer handling, and a bounded all-AI race on each circuit, plus the frame-time statistics. Rendering and browser input are covered by `npm run check:browser` instead, and audio by neither. See [browser validation](docs/validation.md), which also has the frame-time capture and comparison.
+The `server` CI job builds, tests (PostgreSQL 17 service container, no secrets), smoke-checks and packages the room server; nothing deploys it. The tests also cover the room server (`test/server/`): room rules, the protocol, headless WebSocket races and the database layer.
+
+The game tests cover the simulation and graphics preset logic (`src/race.ts`, `src/pit.ts`, `src/track.ts`, `src/records.ts`, `src/timing.ts`, `src/graphics.ts`, `src/input.ts`): collision penalties, lap counting, lane changes, leaderboards and championship scoring, fixed-step timing, graphics preset resolution and storage, input sources and touch pointer handling, and a bounded all-AI race on each circuit, plus the frame-time statistics. Rendering and browser input are covered by `npm run check:browser` instead, and audio by neither. See [browser validation](docs/validation.md), which also has the frame-time capture and comparison.
 
 The build output is plain HTML/JS/CSS; serve the `dist/` folder from any static host.
 
 ## Layout
 
 - `index.html` — the page that boots the game.
-- `src/` — TypeScript source (`src/main.ts` is the entry; `src/race.ts` and `src/track.ts` are the simulation).
+- `src/` — TypeScript source (`src/main.ts` is the entry; `src/race.ts` and `src/track.ts` are the simulation; `src/net/` is the online protocol and client, `src/online.ts` the online gate).
+- `server/` — the online room server; `deploy/server/` its systemd unit and environment example.
 - `assets/ui/strings.json` — all player-visible text.
 - `docs/architecture-audit.md` — architecture and deployment audit.
 - `docs/timing.md` — simulation timing policy and its test evidence.
@@ -44,5 +50,6 @@ The build output is plain HTML/JS/CSS; serve the `dist/` folder from any static 
 - `docs/pit-queue.md` — shared pit-lane queues, box and bay reservations, bay and pit-exit merges, and their evidence.
 - `docs/auto-stop-go.md` — automatic stop-and-go service and its evidence.
 - `docs/auto-bay.md` — race-long bay ownership, automatic fuel visits to the car's own bay, the fresh-Throttle departure, and their evidence.
+- `docs/online-server.md` — the online room server: rules, protocol, timing policy, accounts, configuration, resource limits, activation and rollback runbook; `docs/online-evidence.md` — its evidence.
 - `docs/validation.md` — repeatable browser checks, results and the remaining hardware validation.
 - `scripts/` — the browser check and its frame-time statistics.
