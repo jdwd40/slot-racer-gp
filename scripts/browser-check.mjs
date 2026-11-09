@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Bounded browser validation of the real game. Procedure and results: docs/validation.md.
 //
-//   node scripts/browser-check.mjs [tracks race controlled routing practice championship touch responsive touchrace reverse service queue autosg autobay]   functional checks (default: all)
+//   node scripts/browser-check.mjs [tracks race controlled routing practice championship touch responsive touchrace reverse service queue autosg autobay localslot online]   functional checks (default: all)
 //   node scripts/browser-check.mjs perf --label updated --machine "<name>"          frame-time capture
 //   node scripts/browser-check.mjs compare <baseline.json> <updated.json>           like-for-like comparison
 //
@@ -2341,8 +2341,51 @@ async function localslot(run, c) {
   return s;
 }
 
-const SCENARIOS = { tracks, race, controlled, routing, practice, championship, touch, responsive, touchrace, reverse, service, queue, autosg, autobay, localslot };
-const USAGE = 'usage: browser-check.mjs [tracks|race|controlled|routing|practice|championship|touch|responsive|touchrace|reverse|service|queue|autosg|autobay|localslot ...] | perf | compare <a.json> <b.json>\n'
+/**
+ * Online gate (#22). Default build: online is off and the page never contacts /api or /ws. A VITE_ONLINE=1 build served
+ * with the same-origin proxy (vite.config.ts) and a local room server: the health/protocol check passes, and a page-origin
+ * WebSocket completes hello, creates a server-hosted solo race and receives authoritative state. Diagnostics only.
+ */
+async function online(run, c) {
+  const net = [];
+  const s = await open(run);
+  const { page } = s;
+  page.on('request', (r) => { const u = new URL(r.url()); if (u.pathname.startsWith('/api') || u.pathname === '/ws') net.push(u.pathname); });
+  await page.reload();
+  await waitFor(page, () => window.__game && window.__game.screen === 'title');
+  await waitFor(page, () => window.__game.online.state !== 'checking', undefined, 10000);
+  const st = await read(page, () => window.__game.online);
+  if (st.state === 'off') {
+    await sleep(1500);
+    c.ok('Default build: online play is off', true, st);
+    c.ok('Default build: no request to /api or /ws', net.length === 0, net);
+    c.unavailable('Online room round trip', 'this build does not enable online play (VITE_ONLINE unset)');
+    return s;
+  }
+  c.ok('Online build: the same-origin health and protocol check passes', st.state === 'available' && st.wsUrl === new URL('/ws', run.url).href.replace(/^http/, 'ws'), st);
+  c.ok('Online build: only same-origin /api/health was requested before any play', net.length > 0 && net.every((p) => p === '/api/health'), net);
+  const trip = await read(page, (wsUrl) => new Promise((resolve) => {
+    const out = { msgs: [] };
+    const ws = new WebSocket(wsUrl);
+    const done = () => { try { ws.close(); } catch { /* closed */ } resolve(out); };
+    setTimeout(done, 10000);
+    ws.onopen = () => ws.send(JSON.stringify({ t: 'hello', v: 1, proto: 'slotrush' }));
+    ws.onmessage = (e) => {
+      const m = JSON.parse(e.data);
+      out.msgs.push(m.t);
+      if (m.t === 'welcome') ws.send(JSON.stringify({ t: 'create', name: 'Browser', mode: 'solo', settings: { track: 'circuit-2' } }));
+      if (m.t === 'joined') { out.code = m.room.code; out.hasToken = typeof m.token === 'string' && m.token.length > 20; ws.send(JSON.stringify({ t: 'start' })); }
+      if (m.t === 'state' && m.snap.cars.length === 4) { out.track = m.snap.track; out.cars = m.snap.cars.map((x) => x.control); ws.send(JSON.stringify({ t: 'leave' })); }
+      if (m.t === 'bye') { out.bye = m.code; done(); }
+    };
+  }), st.wsUrl);
+  c.ok('Page WebSocket through the same-origin /ws proxy: hello, solo room, server race state, leave', trip.code && trip.hasToken && trip.track === 'circuit-2' && trip.cars.join() === 'human,ai,ai,ai' && trip.bye === 'left', trip);
+  c.ok('No page errors', s.errors.length === 0, s.errors);
+  return s;
+}
+
+const SCENARIOS = { tracks, race, controlled, routing, practice, championship, touch, responsive, touchrace, reverse, service, queue, autosg, autobay, localslot, online };
+const USAGE = 'usage: browser-check.mjs [tracks|race|controlled|routing|practice|championship|touch|responsive|touchrace|reverse|service|queue|autosg|autobay|localslot|online ...] | perf | compare <a.json> <b.json>\n'
   + 'options: --dist <dir> --url <url> --commit <sha> --machine <name> --label <name> --viewport WxH --dpr N --preset low|balanced|high\n'
   + '         --seconds N --headed --channel <chrome|msedge> --out <dir> --max-minutes N';
 

@@ -118,11 +118,12 @@ describe('headless clients race over WebSockets', () => {
     // approach, placed 30 m and 37 m short of the entrance; the first human past the last pit entrance on the final lap is
     // given a stop-and-go it can no longer serve. Everything after that (routing, takeover, queueing, service, release, DQ) is the server's.
     let contention = false, finalDq = false, dqId = '';
-    const pump = rm.pump.bind(rm);
-    rm.pump = (now: number) => {
-      pump(now);
-      const r = rm.race;
-      if (!r || r.phase !== 'racing') return;
+    // checked after every simulation step (not every tick: under load one tick may run many steps)
+    const r = rm.race!;
+    const update = r.update.bind(r);
+    r.update = (dt, inputs) => {
+      update(dt, inputs);
+      if (r.phase !== 'racing') return;
       const a = r.car(A)!, b = r.car(B)!, c = r.car(C)!;
       if (!contention && a.crossed === 3 && b.crossed === 3 && a.mode === 'race' && b.mode === 'race' && !a.pitReq && !b.pitReq && !a.fuelReq && !b.fuelReq) {
         for (const [car, before] of [[a, 30], [b, 37]] as const) {
