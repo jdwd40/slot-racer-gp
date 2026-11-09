@@ -283,3 +283,21 @@ small { color: #9ca3af; font-weight: 500; }
 #net-banner.ret { border-left-color: #ef4444; color: #fecaca; }
 #net-banner.lag { border-left-color: #60a5fa; color: #dbeafe; }
 .lobby .tab { min-height: 40px; }
+
+/* ---- accounts: sign-in, create account and driver profile (docs/accounts.md). 16px+ inputs so iOS does not zoom on focus. */
+.account { width: min(420px, 100%); }
+.acct-form { display: flex; flex-direction: column; gap: 6px; align-items: stretch; margin: 10px auto 4px; max-width: 340px; text-align: left; }
+.acct-form small, .acct-note { color: #9ca3af; line-height: 1.35; display: block; }
+.acct-field { display: flex; flex-direction: column; gap: 4px; margin-top: 4px; }
+.acct-field input { font: inherit; font-size: 18px; font-weight: 700; min-height: 48px; padding: 8px 12px; border-radius: 10px; border: 2px solid rgba(255,255,255,0.18); background: rgba(255,255,255,0.06); color: #ffe066; outline: none; -webkit-user-select: text; user-select: text; width: 100%; box-sizing: border-box; }
+.acct-field input:focus { border-color: #ffd23f; }
+.acct-field input[aria-invalid="true"] { border-color: #ef4444; }
+.acct-field input:read-only { opacity: 0.6; }
+.acct-form .cta { margin-top: 8px; min-height: 48px; }
+.account .cta, .account .tab { min-height: 44px; }
+.account .net-msg[data-kind="err"] { color: #fca5a5; }
+.account .net-msg[data-kind="ok"] { color: #86efac; }
+.account .acct-who b { color: #ffe066; overflow-wrap: anywhere; }
+.acct-form[aria-busy="true"] { cursor: progress; }
+.net-entry .nm { display: inline-block; max-width: 12em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: bottom; }
+.ini.nm input:read-only { opacity: 0.75; }

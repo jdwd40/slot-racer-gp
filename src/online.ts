@@ -7,7 +7,7 @@ export type OnlineStatus =
   | { state: 'off' }
   | { state: 'checking' }
   | { state: 'unavailable'; reason: string }
-  | { state: 'available'; version: string; wsUrl: string };
+  | { state: 'available'; version: string; wsUrl: string; /** the server has a database: sign-in and driver profiles are offered */ accounts: boolean };
 
 export const ONLINE_ENABLED: boolean = import.meta.env.VITE_ONLINE === '1';
 
@@ -19,10 +19,10 @@ export async function probeOnline(enabled: boolean, fetchFn: typeof fetch, origi
   try {
     const r = await fetchFn(`${origin}/api/health`, { signal: ctl.signal, cache: 'no-store', credentials: 'same-origin' });
     if (!r.ok) return { state: 'unavailable', reason: `health ${r.status}` };
-    const h = (await r.json()) as { ok?: unknown; protocol?: unknown; version?: unknown };
+    const h = (await r.json()) as { ok?: unknown; protocol?: unknown; version?: unknown; accounts?: unknown; profiles?: unknown };
     if (h.ok !== true) return { state: 'unavailable', reason: 'not ok' };
     if (h.protocol !== PROTOCOL_VERSION) return { state: 'unavailable', reason: `protocol ${String(h.protocol)} (client ${PROTOCOL_VERSION})` };
-    return { state: 'available', version: String(h.version), wsUrl: origin.replace(/^http/, 'ws') + '/ws' };
+    return { state: 'available', version: String(h.version), wsUrl: origin.replace(/^http/, 'ws') + '/ws', accounts: h.accounts === true && h.profiles === true };
   } catch (e) {
     return { state: 'unavailable', reason: (e as Error).name === 'AbortError' ? 'timeout' : 'unreachable' };
   } finally {

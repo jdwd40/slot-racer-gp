@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 // Bounded browser checks of online play: independent browser contexts against the real room server. Results: docs/online-client-evidence.md.
 //
-//   node scripts/online-check.mjs [gate lobby service connection layout]   (default: all)
+//   node scripts/online-check.mjs [gate lobby service connection layout accounts]   (default: all)
+//   accounts needs SLOTRUSH_TEST_DATABASE_URL (e.g. $(node scripts/local-pg.mjs env) after `node scripts/local-pg.mjs start`)
 //
 // What runs: an online-enabled build (VITE_ONLINE=1) in dist-online/, two vite previews (same-origin /api and /ws proxies, as
 // Nginx does in production), and two in-process room servers built from server/ (scripts/qa-server.ts):
@@ -640,7 +641,175 @@ async function layout(run, c) {
   return [];
 }
 
-const SCENARIOS = { gate, lobby, service, connection, layout };
+
+/**
+ * Accounts and driver profiles (#24) against a room server with the local test database: create an account (loading and
+ * error states), restore it in a clean second browser, rename, race as a signed-in driver beside a guest with an HTML-like
+ * name rendered as text in the lobby, HUD and results, then sign out without losing local saves. Phone sizes get a simulated
+ * on-screen keyboard (the layout viewport shrinks, as Android Chrome does): the focused field must stay visible.
+ */
+async function accounts(run, c) {
+  if (!run.acctUrl) { c.unavailable('Accounts in the browser', 'SLOTRUSH_TEST_DATABASE_URL not set: no local database for the account server'); return []; }
+  const NAME = '<b>Zed</b>&amp;';
+  const USER = `zed_${Date.now().toString(36).slice(-6)}`, PASS = 'zed browser pw 1';
+  const fixtures = { 'srgp.champ': JSON.stringify({ v: 1, car: 'blaze', initials: 'QA', rounds: [], startedAt: 1 }), 'srgp.lb.race.circuit-1': '[{"id":"x","initials":"QA","car":"blaze","ms":61000,"at":1}]', 'srgp.ghost.circuit-1.blaze.QA': '{"v":1}' };
+  const a = await openPage(run, run.acctUrl, 'phonePortrait', { touch: true, name: 'phone A' });
+  await read(a.page, (f) => { for (const [k, v] of Object.entries(f)) localStorage.setItem(k, v); }, fixtures);
+  await a.page.reload();
+  await waitFor(a.page, () => window.__game && window.__game.screen === 'title', undefined, 120000);
+  await waitOnline(a.page);
+  await waitFor(a.page, () => window.__game.auth.state === 'guest', undefined, 15000);
+  c.ok('Health reports accounts: the title offers Sign in, the browser restores as a guest', (await a.page.locator('#o-account').textContent()) === STRINGS['acct.signIn'], await read(a.page, () => window.__game.auth));
+  await a.page.click('#o-account');
+  await a.page.click('#a-tab-register');
+  // simulated on-screen keyboard: the layout viewport loses about 40% of its height while a field has focus
+  const kb = async (page, view, fieldSel) => {
+    const full = VIEWS[view].viewport;
+    await page.focus(fieldSel);
+    await page.setViewportSize({ width: full.width, height: Math.round(full.height * 0.58) });
+    await sleep(300);
+    const f = await read(page, (sel) => { const e = document.querySelector(sel); const r = e.getBoundingClientRect(); const card = document.querySelector('.overlay.show .card'); return { top: Math.round(r.top), bottom: Math.round(r.bottom), vh: innerHeight, vw: innerWidth, focused: document.activeElement === e, cardScrolls: card.scrollHeight > card.clientHeight, docScrollX: document.documentElement.scrollWidth > innerWidth + 1, fontPx: parseFloat(getComputedStyle(e).fontSize) }; }, fieldSel);
+    await page.setViewportSize(full);
+    return { ...f, visible: f.top >= 0 && f.bottom <= f.vh, okFont: f.fontPx >= 16 };
+  };
+  const k1 = await kb(a.page, 'phonePortrait', '#a-pass');
+  c.ok('Phone portrait, keyboard up: the focused password field stays in view, no sideways scroll, 16 px+ text (no iOS zoom)', k1.visible && k1.focused && !k1.docScrollX && k1.okFont, k1);
+  await a.page.fill('#a-user-in', 'x');
+  await a.page.fill('#a-pass', PASS);
+  await a.page.locator('#a-submit').tap();
+  const e1 = await read(a.page, () => ({ msg: document.getElementById('a-msg').textContent, invalid: document.getElementById('a-user-in').getAttribute('aria-invalid') }));
+  c.ok('Invalid username: a plain error and the field is marked invalid, nothing sent', e1.msg === STRINGS['acct.err.invalid_username'] && e1.invalid === 'true', e1);
+  await a.page.fill('#a-user-in', USER);
+  await a.page.fill('#a-pass', PASS);
+  await a.page.fill('#a-name', NAME);
+  // loading state: hold the register response for a moment
+  let release;
+  const held = new Promise((r) => { release = r; });
+  await a.page.route('**/api/auth/register', async (route) => { await held; await route.continue(); });
+  await a.page.locator('#a-submit').tap();
+  await sleep(300);
+  const busy = await read(a.page, () => ({ msg: document.getElementById('a-msg').textContent, disabled: document.getElementById('a-submit').disabled, ariaBusy: document.getElementById('a-form').getAttribute('aria-busy'), auth: window.__game.auth }));
+  c.ok('Creating: a loading message, the form is busy and its buttons are disabled', busy.msg === STRINGS['acct.creating'] && busy.disabled && busy.ariaBusy === 'true' && busy.auth.busy, busy);
+  release();
+  await waitFor(a.page, () => window.__game.auth.state === 'signed-in', undefined, 15000);
+  await a.page.unroute('**/api/auth/register');
+  const prof = await read(a.page, () => ({ user: document.getElementById('a-user')?.textContent, name: document.getElementById('a-name')?.value, msg: document.getElementById('a-msg').textContent, injected: document.querySelectorAll('.account b b, .account #a-msg b').length }));
+  c.ok('Signed in after creating: the profile shows the private username to its owner and the saved driver name as text', prof.user === USER && prof.name === NAME && prof.injected === 0 && prof.msg.includes(NAME), prof);
+  await snapshotOf(a.page, 'account-profile-phonePortrait.png');
+  const cookies = await a.context.cookies();
+  const sc = cookies.find((x) => x.name === 'srsid');
+  c.ok('Session cookie: HttpOnly, SameSite=Strict, not readable by page scripts', !!sc && sc.httpOnly && sc.sameSite === 'Strict' && !(await read(a.page, () => document.cookie)).includes('srsid'), sc && { httpOnly: sc.httpOnly, sameSite: sc.sameSite, secure: sc.secure });
+
+  // a clean second browser (desktop): sign in, same profile; duplicate registration and wrong password are explained
+  const b = await openPage(run, run.acctUrl, 'laptop', { name: 'desktop B' });
+  await waitOnline(b.page);
+  await waitFor(b.page, () => window.__game.auth.state === 'guest', undefined, 15000);
+  await b.page.click('#o-account');
+  await b.page.click('#a-tab-register');
+  await b.page.fill('#a-user-in', USER.toUpperCase()); await b.page.fill('#a-pass', 'another password 1');
+  await b.page.click('#a-submit');
+  await waitFor(b.page, () => !window.__game.auth.busy && document.getElementById('a-msg').textContent.length > 0 && !document.getElementById('a-submit').disabled, undefined, 10000);
+  const dup = await read(b.page, () => document.getElementById('a-msg').textContent);
+  c.ok('Second browser: registering the same username (other case) is refused as taken', dup === STRINGS['acct.err.username_taken'], dup);
+  await b.page.click('#a-tab-login');
+  await b.page.fill('#a-user-in', USER); await b.page.fill('#a-pass', 'wrong password 1');
+  await b.page.click('#a-submit');
+  await waitFor(b.page, () => !window.__game.auth.busy && !document.getElementById('a-submit').disabled && document.getElementById('a-msg').textContent.length > 0, undefined, 10000);
+  const wrong = await read(b.page, () => ({ msg: document.getElementById('a-msg').textContent, pass: document.getElementById('a-pass').value }));
+  c.ok('Wrong password: one generic error (no hint which part was wrong), password field cleared', wrong.msg === STRINGS['acct.err.invalid_credentials'] && wrong.pass === '', wrong);
+  await b.page.fill('#a-pass', PASS);
+  await b.page.click('#a-submit');
+  await waitFor(b.page, () => window.__game.auth.state === 'signed-in', undefined, 15000);
+  const bName = await read(b.page, () => window.__game.auth.displayName);
+  c.ok('Clean second browser restores the same driver profile after sign-in', bName === NAME, bName);
+  await b.page.fill('#a-name', '   ');
+  await b.page.click('#a-submit');
+  const blank = await read(b.page, () => document.getElementById('a-msg').textContent);
+  c.ok('Blank driver name is refused with a plain message', blank === STRINGS['acct.err.name.blank'], blank);
+  const NAME2 = '<i>Zed</i> 2';
+  await b.page.fill('#a-name', NAME2);
+  await b.page.click('#a-submit');
+  await waitFor(b.page, () => window.__game.auth.displayName === '<i>Zed</i> 2' && !window.__game.auth.busy, undefined, 10000);
+  await a.page.reload();
+  await waitFor(a.page, () => window.__game && window.__game.auth.state === 'signed-in', undefined, 120000);
+  const aName = await read(a.page, () => ({ name: window.__game.auth.displayName, btn: document.querySelector('#o-account .nm')?.textContent, injected: document.querySelectorAll('#o-account i').length }));
+  c.ok('Renamed in browser B: browser A restores its session on reload and shows the new name as text', aName.name === NAME2 && aName.btn === NAME2 && aName.injected === 0, aName);
+
+  // signed-in A hosts, a guest joins: names as text in the lobby, HUD and results
+  await a.page.click('#o-online');
+  const nm = await read(a.page, () => ({ value: document.getElementById('n-name').value, ro: document.getElementById('n-name').readOnly }));
+  c.ok('Online menu: a signed-in driver races under the saved profile name (read-only here)', nm.value === NAME2 && nm.ro, nm);
+  await a.page.locator('#n-create').tap();
+  await waitFor(a.page, () => window.__game.screen === 'lobby');
+  const code = (await netOf(a.page)).room.code;
+  const g = await openPage(run, run.acctUrl, 'phoneLandscape', { touch: true, name: 'guest phone' });
+  await joinRoom(g, '<img src=x>', code);
+  await waitFor(g.page, () => window.__game.screen === 'lobby');
+  await waitFor(a.page, () => window.__game.net.room.participants.length === 2);
+  const lob = await read(a.page, () => ({ names: [...document.querySelectorAll('.lobby td .nm')].map((e) => e.textContent), scripts: document.querySelectorAll('.lobby script, .lobby img, .lobby td i:not([style]), .lobby td b').length, guest: window.__game.net.room.participants.map((p) => p.guest) }));
+  c.ok('Lobby: account and guest drivers share the room; HTML-like names are shown as text, never as markup', lob.names.includes(NAME2) && lob.names.includes('<img src=x>') && lob.scripts === 0 && lob.guest.join() === 'false,true', lob);
+  const pub = JSON.stringify(await netOf(g.page));
+  c.ok('The guest browser receives no username, session or account id for the signed-in driver', !pub.includes(USER) && !pub.includes('srsid'), { bytes: pub.length });
+  if (g.fingers) await g.fingers.tap('#l-ready'); else await g.page.click('#l-ready');
+  await waitFor(a.page, () => window.__game.net.room.participants.every((p) => p.host || p.ready));
+  await a.page.locator('#l-start').tap();
+  await waitFor(a.page, () => window.__game.screen === 'race', undefined, 30000);
+  await waitFor(g.page, () => window.__game.screen === 'race', undefined, 30000);
+  await sleep(1500);
+  const hud = await read(g.page, () => ({ text: document.getElementById('h-stand').textContent, injected: document.querySelectorAll('#h-stand i:not([style]), #h-stand script').length }));
+  c.ok('HUD standings (guest view): the account driver\'s HTML-like name is text', hud.text.includes(NAME2) && hud.injected === 0, hud);
+  // the server retires both human cars (seeded authoritative state), so the race classifies and both see the results
+  const room = run.accts.room(code);
+  for (const p of room.publicRoom().participants) room.race.retire(p.id);
+  await waitFor(g.page, () => window.__game.screen === 'netres', undefined, 60000);
+  const res = await read(g.page, () => ({ text: document.querySelector('.netres tbody')?.textContent ?? '', injected: document.querySelectorAll('.netres tbody i:not([style]), .netres tbody script').length }));
+  c.ok('Results (guest view): the account driver\'s name is text', res.text.includes(NAME2) && res.injected === 0, res);
+  let stored = [];
+  for (let i = 0; i < 50 && !stored.length; i++) { stored = (await run.accts.pool.query('SELECT envelope FROM race_results WHERE room_id = $1', [room.id])).rows; if (!stored.length) await sleep(100); }
+  const parts = stored[0]?.envelope.participants.filter((p) => p.control === 'human') ?? [];
+  const acctId = (await run.accts.pool.query('SELECT id::text FROM accounts WHERE username_key = $1', [USER])).rows[0]?.id;
+  c.ok('Stored result: the signed-in seat carries the account id, the guest seat none', parts.length === 2 && parts.some((p) => p.accountId === acctId && p.name === NAME2) && parts.some((p) => p.accountId === null), parts.map((p) => ({ name: p.name, account: p.accountId ? 'set' : null })));
+  await a.page.locator('#r-leave').tap();
+  await waitFor(a.page, () => window.__game.screen === 'title' && window.__game.net === null);
+
+  // sign out: account state gone, guest again, local saves kept
+  await read(a.page, () => { localStorage.setItem('srgp.acct.pending-test', '1'); sessionStorage.setItem('srgp.seat', '{"room":"x","participant":"p","token":"t","code":"ABCDEF"}'); });
+  await a.page.click('#o-account');
+  await a.page.locator('#a-logout').tap();
+  await waitFor(a.page, () => window.__game.auth.state === 'guest', undefined, 10000);
+  const after = await read(a.page, (keys) => ({ seat: sessionStorage.getItem('srgp.seat'), pending: localStorage.getItem('srgp.acct.pending-test'), saves: keys.map((k) => localStorage.getItem(k) !== null), msg: document.getElementById('a-msg')?.textContent }), Object.keys(fixtures));
+  c.ok('Sign-out: guest again, pending account data and the seat are cleared; local records, ghosts and championship kept', !after.seat && !after.pending && after.saves.every(Boolean) && after.msg === STRINGS['acct.signedOut'], after);
+  // browser B's session is unaffected by A's sign-out; then B's session is revoked and B is told on restore
+  await run.accts.pool.query('DELETE FROM sessions');
+  await b.page.reload();
+  await waitFor(b.page, () => window.__game && window.__game.auth.state === 'guest', undefined, 120000);
+  await b.page.click('#o-account');
+  const exp = await read(b.page, () => document.getElementById('a-msg').textContent);
+  c.ok('Revoked session: the second browser restores as a guest and is told its sign-in expired', exp === STRINGS['acct.expired'], exp);
+
+  // the finished pages are closed first (four software-rendered pages at once starve a new page's health probe)
+  for (const s of [b, g]) { c.ok(`No page errors (${s.name})`, s.errors.length === 0, s.errors.slice(0, 5)); await s.context.close(); run.contexts.delete(s.context); }
+  // layouts with errors and a keyboard, phone landscape
+  const l = await openPage(run, run.acctUrl, 'phoneLandscape', { touch: true, name: 'phone landscape' });
+  await waitOnline(l.page);
+  await waitFor(l.page, () => window.__game.auth.state === 'guest', undefined, 15000);
+  await l.page.click('#o-account');
+  await l.page.fill('#a-user-in', USER); await l.page.fill('#a-pass', 'nope nope nope');
+  await l.page.locator('#a-submit').tap();
+  await waitFor(l.page, (want) => !window.__game.auth.busy && document.getElementById('a-msg').textContent === want, STRINGS['acct.err.invalid_credentials'], 10000);
+  const k2 = await kb(l.page, 'phoneLandscape', '#a-pass');
+  const lf = await layoutFacts(l.page);
+  await snapshotOf(l.page, 'account-error-phoneLandscape.png');
+  c.ok('Phone landscape with an error and the keyboard up: the field stays in view, the card fits, controls are 40 px+', k2.visible && !k2.docScrollX && lf.fitsWidth && lf.small.length === 0, { k2, small: lf.small });
+  await a.page.click('#a-back');
+  await a.page.click('#o-account');
+  const pf = await layoutFacts(a.page);
+  await snapshotOf(a.page, 'account-signin-phonePortrait.png');
+  c.ok('Phone portrait sign-in form fits; every control is at least 40 px', pf.fitsWidth && !pf.docScrollX && pf.small.length === 0, pf.small);
+  return [a, l];
+}
+
+const SCENARIOS = { gate, lobby, service, connection, layout, accounts };
 
 async function main() {
   const names = process.argv.slice(2).length ? process.argv.slice(2) : Object.keys(SCENARIOS);
@@ -653,7 +822,7 @@ async function main() {
   const qaFile = path.join(ROOT, '.qa/qa-server.mjs');
   await build({ entryPoints: [path.join(ROOT, 'scripts/qa-server.ts')], outfile: qaFile, bundle: true, platform: 'node', target: 'node22', format: 'esm', packages: 'external', logLevel: 'warning' });
   const { startQaServer } = await import(pathToFileURL(qaFile).href);
-  const origins = ['http://localhost:4181', 'http://localhost:4182', 'http://localhost:4183'];
+  const origins = ['http://localhost:4181', 'http://localhost:4182', 'http://localhost:4183', 'http://localhost:4184'];
   const common = { allowedOrigins: origins, maxConnections: 100, maxConnectionsPerIp: 60, msgRate: 120, msgBurst: 200, graceS: 8, roomCap: 20 };
   const fast = await startQaServer({ ...common, timeScale: 2, maxCatchUpSteps: 12 });
   // 40 s grace here (production default 20): a SwiftShader page reload alone can take longer than 20 s on this host
@@ -661,8 +830,12 @@ async function main() {
   const proxy = await latencyProxy(real);
   const dead = 'http://127.0.0.1:9';   // nothing listens: the service is "down"
   const pv = [await startPreview(4181, fast.url), await startPreview(4182, `http://127.0.0.1:${proxy.port}`), await startPreview(4183, dead)];
+  // accounts: a third server with the local test database (its own schema, recreated each run); needs SLOTRUSH_TEST_DATABASE_URL
+  const dbUrl = process.env.SLOTRUSH_TEST_DATABASE_URL;
+  const accts = names.includes('accounts') && dbUrl ? await startQaServer({ ...common, timeScale: 2, maxCatchUpSteps: 12 }, { url: dbUrl, schema: 't_browser' }) : null;
+  if (accts) pv.push(await startPreview(4184, accts.url));
   const browser = await chromium.launch({ headless: true });
-  const run = { contexts: new Set(), qa: await import(pathToFileURL(qaFile).href), browser, fast, real, proxy, fastUrl: pv[0].url, realUrl: pv[1].url, deadUrl: pv[2].url, evidence: {} };
+  const run = { contexts: new Set(), qa: await import(pathToFileURL(qaFile).href), browser, fast, real, proxy, accts, fastUrl: pv[0].url, realUrl: pv[1].url, deadUrl: pv[2].url, acctUrl: accts ? pv[3].url : null, evidence: {} };
   console.log(`Chromium ${browser.version()}; fast server :${fast.port} (time x2), real-time server :${real.port} behind proxy :${proxy.port}`);
   const report = { commit: execFileSync('git', ['rev-parse', 'HEAD'], { cwd: ROOT, encoding: 'utf8' }).trim(), browser: `chromium ${browser.version()}`, scenarios: [] };
   let failed = false;
@@ -695,7 +868,7 @@ async function main() {
     await browser.close();
     for (const p of pv) await p.close();
     proxy.close();
-    await fast.close(); await real.close();
+    await fast.close(); await real.close(); await accts?.close();
   }
   process.exit(failed ? 1 : 0);
 }

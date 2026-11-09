@@ -49,10 +49,15 @@ export interface RoomSettings {
 export interface ChampionshipTag { id: string; round: number; }
 
 // ------------------------------------------------------------------------------------------------ client -> server
+/**
+ * `expectAccount` on create/join: the account id the browser believes it is signed in as ('' = a guest). It is never an
+ * identity (that only ever comes from the socket's session); a socket whose sign-in differs is refused, `expired`/`session`,
+ * instead of entering under an identity the page does not show (a session that expired before the socket opened).
+ */
 export type ClientMsg =
   | { t: 'hello'; v: number; proto: string }
-  | { t: 'create'; name: string; livery?: LiveryId; mode: Mode; settings: Partial<RoomSettings>; championship?: ChampionshipTag }
-  | { t: 'join'; code: string; name: string; livery?: LiveryId }
+  | { t: 'create'; name: string; livery?: LiveryId; mode: Mode; settings: Partial<RoomSettings>; championship?: ChampionshipTag; expectAccount?: string }
+  | { t: 'join'; code: string; name: string; livery?: LiveryId; expectAccount?: string }
   | { t: 'resume'; room: string; participant: string; token: string }
   | { t: 'ready'; ready: boolean }
   | { t: 'settings'; settings: Partial<RoomSettings> }
@@ -111,8 +116,8 @@ export type Parsed = { ok: true; msg: ClientMsg } | { ok: false; code: 'malforme
 
 const SHAPES: Record<ClientMsgType, Record<string, 'string' | 'number' | 'boolean' | 'object' | '?string' | '?object'>> = {
   hello: { v: 'number', proto: 'string' },
-  create: { name: 'string', livery: '?string', mode: 'string', settings: 'object', championship: '?object' },
-  join: { code: 'string', name: 'string', livery: '?string' },
+  create: { name: 'string', livery: '?string', mode: 'string', settings: 'object', championship: '?object', expectAccount: '?string' },
+  join: { code: 'string', name: 'string', livery: '?string', expectAccount: '?string' },
   resume: { room: 'string', participant: 'string', token: 'string' },
   ready: { ready: 'boolean' },
   settings: { settings: 'object' },
@@ -181,6 +186,27 @@ export function cleanName(raw: string): string | null {
   const chars = [...s];
   if (!chars.length) return null;
   return chars.slice(0, LIMITS.nameMax).join('');
+}
+
+export type DisplayNameCheck = { ok: true; name: string } | { ok: false; error: 'blank' | 'too_long' | 'reserved' | 'type' };
+
+/**
+ * A signed-in driver's saved display name (the profile), checked the same way in the browser and on the server. It is
+ * public race information and never an identity (the account ID is). Rules (docs/accounts.md): Unicode NFC; control, zero-
+ * width and bidirectional-override characters removed; runs of whitespace collapsed to one space; trimmed; then 1 to
+ * LIMITS.nameMax (16) characters, counted as code points. Unlike cleanName, an over-long name is refused, not cut.
+ * Names that pose as the AI field ("... (AI)") are refused. Any other text, including HTML-like text, is allowed and is
+ * always rendered as text.
+ */
+export function checkDisplayName(raw: unknown): DisplayNameCheck {
+  if (typeof raw !== 'string' || raw.length > 256) return { ok: false, error: 'type' };
+  // eslint-disable-next-line no-control-regex
+  const s = raw.normalize('NFC').replace(/[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u2028-\u202e\u2060-\u2069\ufeff]/g, '').replace(/\s+/g, ' ').trim();
+  const n = [...s].length;
+  if (!n) return { ok: false, error: 'blank' };
+  if (n > LIMITS.nameMax) return { ok: false, error: 'too_long' };
+  if (/\(\s*ai\s*\)\s*$/i.test(s)) return { ok: false, error: 'reserved' };
+  return { ok: true, name: s };
 }
 
 export const neutral = (): Input => ({ up: false, down: false });
