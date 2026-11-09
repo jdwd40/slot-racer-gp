@@ -510,7 +510,7 @@ function startRace(): void { startSession(mode === 'practice' ? 'practice' : mod
 /** timing-line crossing by the player: finish the recording of the lap just done, start the next */
 function onPlayerCross(): void {
   const p = me();
-  if (mode !== 'practice') return;
+  if (mode !== 'practice' || net) return;
   const lap = pendingLap;
   if (recorder.active && lap) {
     if (lap.valid) {
@@ -601,7 +601,7 @@ window.addEventListener('keydown', (e) => {
     return;
   }
   if (screen === 'boards' || screen === 'champ') { if (k === 'Escape') showTitle(); return; }
-  if (screen === 'online') { if (k === 'Escape') showTitle(); return; }
+  if (screen === 'online') { if (k === 'Escape') { cancelNetBegin(); showTitle(); } return; }
   if (screen === 'lobby' || screen === 'netres') return;
   // a shared race cannot be restarted from one browser
   if (k === 'KeyR') { if (!net) restartSession(); return; }
@@ -760,7 +760,7 @@ function handle(e: RaceEvent): void {
       if (e.car !== p) break;
       if (mode === 'practice') { pendingLap = e; break; }
       // online laps never enter this device's leaderboards: network results are kept apart from local records
-      if (e.valid && !p.finished && mode !== 'online') {
+      if (e.valid && !p.finished && mode !== 'online' && !net) {
         const rec = R.submitLap('race', T.DEF.id, R.currentInitials(), carId, e.time * 1000);
         if (rec) { freshIds.add(rec.id); const rank = R.board('race', T.DEF.id).findIndex((r) => r.id === rec.id) + 1; hud.toast(t('msg.boardEntry', { n: rank, time: R.fmtMs(e.time * 1000) }), 'good'); break; }
       }
@@ -962,6 +962,16 @@ function showOnline(): void {
   overlay.querySelector('#n-solo')!.addEventListener('click', () => { const n = who(); if (n) void netBegin((s) => s.create(n, 'solo', { track: T.DEF.id }, netLivery())); });
   overlay.querySelector('#n-back')!.addEventListener('click', () => { netNotice = ''; showTitle(); });
 }
+/** Give up a create, join or resume that has not been answered yet (Escape on the online menu while connecting). */
+function cancelNetBegin(): void {
+  if (!net || net.conn !== 'connecting') return;
+  const s = net;
+  net = null;
+  mode = 'race';
+  netNotice = '';
+  s.close();
+  syncBanner();
+}
 function say(msg: string): void { netNotice = msg; const el = overlay.querySelector('#n-msg'); if (el) el.textContent = msg; }
 
 /** Open a session and make one request (create, join or resume). A refusal is explained on the online menu. */
@@ -970,18 +980,25 @@ async function netBegin(req: (s: NetSession) => Promise<{ ok: true } | { ok: fal
   if (screen !== 'online') showOnline();
   say(t('net.connecting'));
   overlay.querySelectorAll<HTMLButtonElement>('.online button').forEach((b) => (b.disabled = true));
-  const s = new NetSession(online.state === 'available' ? online.wsUrl : '', WebSocket as unknown as SocketCtor, {
-    room: (r) => onNetRoom(r),
-    state: (m, at) => onNetState(m, at),
-    result: (r, fresh) => onNetResult(r, fresh),
-    end: (why, detail) => onNetEnd(why, detail),
-    nack: (m) => onNetNack(m),
+  // a session reports to this page only while it is the page's session: one cancelled while connecting stays silent
+  const own = <A extends unknown[]>(f: (...a: A) => void) => (...a: A): void => { if (net === s) f(...a); };
+  const s: NetSession = new NetSession(online.state === 'available' ? online.wsUrl : '', WebSocket as unknown as SocketCtor, {
+    room: own((r) => onNetRoom(r)),
+    state: own((m, at) => onNetState(m, at)),
+    result: own((r, fresh) => onNetResult(r, fresh)),
+    end: own((why, detail) => onNetEnd(why, detail)),
+    nack: own((m) => onNetNack(m)),
     // a dropped link lets go of everything here as well as on the server: after a reconnect a key or finger must press again
-    conn: (c) => { if (c === 'reconnecting') { pad.reset(); input.clear(); } syncBanner(); },
+    conn: own((c) => { if (c === 'reconnecting') { pad.reset(); input.clear(); } syncBanner(); }),
   }, seatStore(), undefined, () => performance.now());
   net = s;
   mode = 'online';
   const r = await req(s);
+  if (net !== s) {
+    // cancelled while connecting: a seat that was granted meanwhile is given back at once
+    if (r.ok) s.leave(); else s.close();
+    return;
+  }
   if (!r.ok) {
     net = null;
     mode = 'race';

@@ -457,6 +457,22 @@ async function connection(run, c) {
   c.ok('Protocol path, induced latency: confirmation grows by about the added round trip only', pl1.medianMs < pl0.medianMs + 220, pl1);
   P.delayMs = 0; P.jitterMs = 0;
   const a = await openPage(run, url, 'small', { name: 'keys' });
+  // ---- Escape while a create is still unanswered (stalled link) cancels it: no seat is kept and no room is entered later
+  await goOnline(a, 'Cancel');
+  const creates0 = run.real.log.lines.filter((l) => l.includes('room.create')).length;
+  // long enough for an unthrottled software-rendered page to reach the Escape while the link is still held
+  P.stallUntil = Date.now() + 15000;
+  await a.page.click('#n-solo');
+  await waitFor(a.page, () => window.__game.net && window.__game.net.conn === 'connecting', undefined, 2000);
+  await read(a.page, () => document.activeElement?.blur());   // Escape typed into the name field belongs to the field
+  await a.page.keyboard.press('Escape');
+  const cancelled = await read(a.page, () => ({ screen: window.__game.screen, mode: window.__game.mode, net: !!window.__game.net }));
+  await sleep(Math.max(0, P.stallUntil - Date.now()) + 4000);
+  P.stallUntil = 0;
+  const after = await read(a.page, () => ({ screen: window.__game.screen, mode: window.__game.mode, net: !!window.__game.net, seat: sessionStorage.getItem('srgp.seat') }));
+  const creates = run.real.log.lines.filter((l) => l.includes('room.create')).length - creates0;
+  c.ok('Escape while connecting cancels the create: back on the title, and the late reply does not open a lobby or keep a seat', cancelled.screen === 'title' && !cancelled.net && after.screen === 'title' && after.mode === 'race' && !after.net && after.seat === null && a.errors.length === 0, { cancelled, after, creates });
+  const b = await openPage(run, url, 'phoneLo', { touch: true, name: 'phone', fpsCap: CAP });
   const code = await createRoom(a, 'Keys');
   await joinRoom(b, 'Phone', code);
   await waitFor(b.page, () => window.__game.screen === 'lobby');
