@@ -5,6 +5,7 @@ import * as THREE from 'three';
 import * as T from './track';
 import { Car } from './race';
 import { makeCar, CarVisual } from './carModel';
+import { disposeObject } from './gfx';
 import { GhostData, GHOST_HZ, GHOST_VERSION } from './records';
 
 export class GhostRecorder {
@@ -86,7 +87,7 @@ export class GhostPlayer {
   }
 
   dispose(): void {
-    this.visual.group.traverse((o) => { const m = o as THREE.Mesh; if (m.isMesh) { m.geometry.dispose(); (Array.isArray(m.material) ? m.material : [m.material]).forEach((x) => x.dispose()); } });
+    disposeObject(this.visual.group);
     this.visual.group.removeFromParent();
   }
 }

@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Bounded browser validation of the real game. Procedure and results: docs/validation.md.
 //
-//   node scripts/browser-check.mjs [tracks race controlled routing practice championship touch responsive touchrace reverse service queue autosg autobay localslot online]   functional checks (default: all)
+//   node scripts/browser-check.mjs [tracks race controlled routing practice championship touch responsive touchrace reverse service queue autosg autobay localslot online memory]   functional checks (default: all)
 //   node scripts/browser-check.mjs perf --label updated --machine "<name>"          frame-time capture
 //   node scripts/browser-check.mjs compare <baseline.json> <updated.json>           like-for-like comparison
 //
@@ -2385,8 +2385,30 @@ async function online(run, c) {
   return s;
 }
 
-const SCENARIOS = { tracks, race, controlled, routing, practice, championship, touch, responsive, touchrace, reverse, service, queue, autosg, autobay, localslot, online };
-const USAGE = 'usage: browser-check.mjs [tracks|race|controlled|routing|practice|championship|touch|responsive|touchrace|reverse|service|queue|autosg|autobay|localslot|online ...] | perf | compare <a.json> <b.json>\n'
+/**
+ * GPU textures across repeated races (#37): every race rebuilds the four car visuals, and the old ones must free their
+ * textures (the number roundels leaked before). renderer.info.memory.textures returns to the first race's count each time.
+ */
+async function memory(run, c) {
+  const s = await open(run);
+  const { page } = s;
+  const sample = async () => {
+    await read(page, () => { window.__game.startSession('race'); window.__game.advance(3); });
+    await waitFor(page, () => window.__game.screen === 'race');
+    await frames(page, 5);
+    return read(page, () => window.__game.info());
+  };
+  const counts = [];
+  for (let i = 0; i < 6; i++) counts.push(await sample());
+  const tex = counts.map((x) => x.textures), geo = counts.map((x) => x.geometries);
+  c.ok('Textures return to the baseline after every race rebuild', tex.every((n) => n === tex[0]), { textures: tex });
+  c.ok('Geometries return to the baseline after every race rebuild', geo.every((n) => n === geo[0]), { geometries: geo });
+  c.ok('No page errors', s.errors.length === 0, s.errors);
+  return s;
+}
+
+const SCENARIOS = { tracks, race, controlled, routing, practice, championship, touch, responsive, touchrace, reverse, service, queue, autosg, autobay, localslot, online, memory };
+const USAGE = 'usage: browser-check.mjs [tracks|race|controlled|routing|practice|championship|touch|responsive|touchrace|reverse|service|queue|autosg|autobay|localslot|online|memory ...] | perf | compare <a.json> <b.json>\n'
   + 'options: --dist <dir> --url <url> --commit <sha> --machine <name> --label <name> --viewport WxH --dpr N --preset low|balanced|high\n'
   + '         --seconds N --headed --channel <chrome|msedge> --out <dir> --max-minutes N';
 

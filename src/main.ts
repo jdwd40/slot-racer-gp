@@ -4,7 +4,7 @@ import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 import * as T from './track';
 import { Race, Car, LAPS, RaceEvent, DRIVERS, PERSONAS, PEN, DEF, SOLO_ID, DriverId, RosterEntry } from './race';
 import { buildWorld, disposeWorld, arrowGeometry, BayPaint, World } from './world';
-import { Y0 } from './gfx';
+import { Y0, disposeObject } from './gfx';
 import { makeCar, makePlayerMarker, CarVisual } from './carModel';
 import { Hud, fmt, carLabel, flags, escHtml } from './hud';
 import { Sfx } from './audio';
@@ -105,7 +105,7 @@ const poseOf = ({ x, y, z, h, roll, pitch }: Car): Pose => ({ x, y, z, h, roll, 
 let prevPoses = race.cars.map(poseOf);
 let visuals: CarVisual[] = [];
 function disposeVisual(v: CarVisual): void {
-  v.group.traverse((o) => { const m = o as THREE.Mesh; if (m.isMesh) { m.geometry.dispose(); (Array.isArray(m.material) ? m.material : [m.material]).forEach((x) => x.dispose()); } });
+  disposeObject(v.group);
   v.group.removeFromParent();
 }
 /** (re)create car visuals for the cars of the current race */
