@@ -83,7 +83,7 @@ The protocol is JSON text over WebSocket at `/ws`. The first client message must
 | `joined` | Public room, `you`, the **private reconnect token** (only here, only to that socket), current `ctlSeq`/`actSeq` |
 | `room` | Public room snapshot on every change (`rev` increases). It never contains a token |
 | `state` | `tick` (server simulation steps), `now` (server ms), `lagMs`, the race snapshot and the events since the last state. It is sent `SLOTRUSH_SNAPSHOT_HZ` times a second, and at once on a resume |
-| `result` | The race's result envelope, sent once |
+| `result` | The race's result envelope, broadcast once when the race closes. A resume into `results` gets the same envelope again, after `joined` and `state`, so a driver whose link dropped at the finish still receives it |
 | `ack` / `nack` | `nack` carries `ref` (message type), `code` and optional `seq`/`detail` |
 | `bye` | `left`, `closed`, `shutdown`, `superseded` and so on, then the socket closes |
 

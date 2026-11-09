@@ -219,6 +219,8 @@ export function createApp({ cfg, log, manager, pool = null }: AppDeps): App {
       send(r.room.joinedMsg(r.participant, r.token, resumed));
       const st = r.room.stateMsg(manager.now());
       if (st && ws.readyState === ws.OPEN) ws.send(st);
+      // a driver who lost the link while the race closed missed the one `result` broadcast: replay the same frozen envelope
+      if (r.room.state === 'results' && r.room.result) send({ t: 'result', envelope: r.room.result });
     }
 
     function dispatch(m: ClientMsg): void {

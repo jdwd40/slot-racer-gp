@@ -264,6 +264,7 @@ describe('protocol and access checks', () => {
     expect(rm.participant(me)).toMatchObject({ peer: null, held: { up: false, down: false } });
     const back = await client();
     const r = await back.request({ t: 'resume', ...cred });
+    console.log("DBG resume", JSON.stringify(r));
     expect(r).toMatchObject({ t: 'joined', resumed: true, you: me });
     expect((r as { ctlSeq: number }).ctlSeq).toBe(seq);
     expect(back.received.some((m) => m.t === 'state')).toBe(true);   // current at once
@@ -275,6 +276,32 @@ describe('protocol and access checks', () => {
     expect(rm.race!.car(me)!.status).toBe('running');
     back.close(); cs.forEach((c) => c.close());
   });
+
+  it('a driver whose link drops while the race closes gets the same result envelope on resume', async () => {
+    const { cs, id } = await room(2, { track: 'circuit-1' });
+    await startRace(cs);
+    const stop = autodrive(cs);
+    const host = cs[0];
+    const hostId = host.me!;
+    await host.wait((m) => m.t === 'state' && (m.snap as RaceSnapshot).cars.find((c) => c.id === hostId)!.status !== 'running', 90_000);
+    const cred = host.credential()!;
+    // the host's link drops after its own finish; the guest drives on and the race closes within the host's grace
+    host.onMessage = null; host.stopHeartbeat();
+    (host.ws as unknown as WebSocket).terminate();
+    const missed = (await cs[1].wait((m) => m.t === 'result', 30_000)) as Extract<ServerMsg, { t: 'result' }>;
+    stop();
+    expect(results(host)).toHaveLength(0);
+    expect(mgr.room(id)!.state).toBe('results');
+    const back = await client();
+    const r = await back.request({ t: 'resume', ...cred });
+    expect(r).toMatchObject({ t: 'joined', resumed: true, you: hostId });
+    // joined, state and result go out back to back, so the result may be in before a wait could be set up
+    const replay = (results(back)[0] ?? await back.wait((m) => m.t === 'result', 2000)) as Extract<ServerMsg, { t: 'result' }>;
+    expect(replay.envelope).toEqual(missed.envelope);
+    const order = back.received.map((m) => m.t).filter((t) => t === 'joined' || t === 'state' || t === 'result');
+    expect(order).toEqual(['joined', 'state', 'result']);
+    back.close(); cs.forEach((c) => c.close());
+  }, 120_000);
 
   it('health and version report the protocol, rules and load; unknown API paths are 404 and accounts are off without a database', async () => {
     const h = await fetch(`${base}/api/health`).then(async (r) => ({ s: r.status, b: (await r.json()) as Record<string, unknown> }));
