@@ -6,7 +6,7 @@ import * as T from '../src/track';
 import { AUTO, BRAKE as BRAKE_DECEL, COAST, DRAG, VMAX, Car, Input, LAPS, PEN, Race, SgPhase } from '../src/race';
 import { DrivingInput } from '../src/input';
 import type { RaceEvent } from '../src/race';
-import { DT, NONE, UP, fresh, msgs, place, seedRandom } from './helpers';
+import { DT, NONE, UP, fresh, msgs, place, seedRandom, all, me } from './helpers';
 
 beforeEach(() => seedRandom(19));
 afterEach(() => vi.restoreAllMocks());
@@ -20,7 +20,7 @@ function setup(track = 'circuit-1', n = 1): { r: Race; P: Car; rival: Car } {
   const r = fresh(track);
   const rival = r.cars[r.cars.length - 1];
   r.cars.splice(n);
-  r.cars[0].isPlayer = true;
+  r.cars[0].human = true;
   for (const c of r.cars) { c.crossed = LAP; c.lapsDone = LAP - 1; c.sectors = 0; }
   return { r, P: r.cars[0], rival };
 }
@@ -49,7 +49,7 @@ function owes(c: Car, secs = PEN.stopSeconds): void { c.sgOwed = secs; c.sgDue =
  */
 function driver(held: Input): (r: Race) => Input {
   return (r) => {
-    const P = r.player;
+    const P = me(r);
     if (P.sgCtl || P.sgLeave) return held;
     const prof = r.profiles['-1'];
     return { up: P.v < prof[Math.floor(r.s(P) / T.PROFILE_STEP) % prof.length] * 0.97, down: false };
@@ -63,7 +63,7 @@ interface Trace {
 }
 /** Step frames of `dt` until `stop`, or `sec` of simulation time, recording what the acceptance checks need. */
 function run(r: Race, input: Input | ((r: Race) => Input), sec: number, stop?: (r: Race) => boolean, dt = DT): Trace {
-  const P = r.player;
+  const P = me(r);
   const tr: Trace = { events: [], msgs: [], phases: [], brakeAfterTakeover: false, minV: 0, maxDecel: 0, maxJump: 0, vIn: -1, handoverS: -1, fuelUp: false, overlaps: 0, offences: 0, held: 0 };
   let took = false;
   for (let t = 0; t < sec; t += dt) {
@@ -71,7 +71,7 @@ function run(r: Race, input: Input | ((r: Race) => Input), sec: number, stop?: (
     if (P.sgCtl) took = true;
     if (took && inp.down) tr.brakeAfterTakeover = true;
     const m = P.mode, v = P.v, u = P.u, f = P.fuel, ctl = P.sgCtl || P.sgLeave;
-    r.update(dt, inp);
+    r.update(dt, all(r, inp));
     for (const e of r.events) { tr.events.push(e); if (e.type === 'offence') tr.offences++; }
     tr.msgs.push(...msgs(r.events));
     r.events.length = 0;
@@ -97,7 +97,7 @@ function overlaps(r: Race): number {
   }
   return n;
 }
-const doneAndOut = (r: Race) => r.player.sgOwed === 0 && r.player.mode === 'race';
+const doneAndOut = (r: Race) => me(r).sgOwed === 0 && me(r).mode === 'race';
 const served = (tr: Trace) => tr.events.filter((e): e is Extract<RaceEvent, { type: 'served' }> => e.type === 'served').map((e) => e.car.idx);
 const grantsFor = (r: Race, c: Car, zone: string) => r.pit.log.filter((e) => e.car === c.idx && e.zone.startsWith(zone) && e.op === 'grant').length;
 /** Every grant is followed by exactly one release, and nothing is still held. */
@@ -111,11 +111,11 @@ function paired(r: Race): void {
 }
 /** Seconds the player stood still in the box holding its reservation before `served`. */
 function stationaryInBox(r: Race, input: Input, sec: number): { still: number; servedAt: number } {
-  const P = r.player;
+  const P = me(r);
   let still = 0, servedAt = -1;
   for (let t = 0; t < sec && servedAt < 0; t += DT) {
     const owed = P.sgOwed;
-    r.update(DT, input);
+    r.update(DT, all(r, input));
     if (r.events.some((e) => e.type === 'served')) servedAt = t;
     r.events.length = 0;
     if (owed > 0 && r.pit.box === P.idx && Math.abs(P.v) < 0.02 && Math.abs(T.gapS(r.s(P), T.PEN_S)) < T.PEN_HALF) still += DT;
@@ -188,11 +188,11 @@ describe('the box', () => {
   it('rolling backwards in the box is not stationary: it is braked to rest first, then the stop counts', () => {
     const { r, P } = setup();
     inPit(P, T.PEN_S + 0.6, -1.5); P.sgOwed = PEN.stopSeconds; P.sgDue = LAP;
-    r.update(DT, NONE); r.events.length = 0;
+    r.update(DT, all(r, NONE)); r.events.length = 0;
     expect(P.sgCtl).toBe(true);
     expect(P.sgServed).toBe(0);
     let countedRolling = false;
-    for (let i = 0; i < 30; i++) { r.update(DT / 4, NONE); if (P.v < -0.02 && P.sgServed > 0) countedRolling = true; }
+    for (let i = 0; i < 30; i++) { r.update(DT / 4, all(r, NONE)); if (P.v < -0.02 && P.sgServed > 0) countedRolling = true; }
     expect(countedRolling).toBe(false);
     expect(P.v).toBe(0);
     expect(Math.abs(T.gapS(r.s(P), T.PEN_S))).toBeLessThan(T.PEN_HALF);
@@ -318,7 +318,7 @@ describe('deferral and overrides', () => {
     const { r, P, rival } = setup();
     approach(r, P, 80, -1, 15);
     award(r, P, rival);
-    r.requestDefer();
+    r.requestDefer(me(r).id);
     expect([P.sgDue, P.sgDeferred]).toEqual([LAP + 1, true]);
     const tr = run(r, driver(UP), 6, () => r.s(P) > T.PIT_IN0 + 3 && r.s(P) < 40);
     expect(tr.phases).toContain('deferred');
@@ -335,7 +335,7 @@ describe('deferral and overrides', () => {
     award(r, P, rival);
     run(r, UP, 0.1);
     expect(P.sgCtl).toBe(true);
-    r.requestDefer();
+    r.requestDefer(me(r).id);
     run(r, UP, 0.05);
     expect(P.sgCtl).toBe(false); expect(P.sgPhase).toBe('deferred');
     expect([P.sgOwed, P.sgDue, P.sgDeferred]).toEqual([PEN.stopSeconds, LAP + 1, true]);
@@ -351,7 +351,7 @@ describe('deferral and overrides', () => {
     expect(P.sgDue).toBe(L1);
     run(r, UP, 0.1);
     expect(P.sgCtl).toBe(true);
-    r.requestLane();
+    r.requestLane(me(r).id);
     expect(P.laneOverride).toBe(true);
     const a = run(r, driver(UP), 12, () => P.crossed === L1 + 1);
     expect(a.msgs).toContain('msg.laneGo');
@@ -363,7 +363,7 @@ describe('deferral and overrides', () => {
     P.change = null; approach(r, P, 39, -1, 12, LAPS); P.crossed = LAPS; P.lapsDone = LAPS - 1;
     run(r, UP, 0.1);
     expect(P.sgCtl).toBe(true);
-    r.requestLane();
+    r.requestLane(me(r).id);
     const b = run(r, driver(UP), 12, () => P.finished);
     expect(b.events.some((e) => e.type === 'breach')).toBe(true);
     expect(P.status).toBe('dq'); expect(P.dqReason).toBe('stopGo');
@@ -391,7 +391,7 @@ describe('overrides with no switch left', () => {
     run(r, UP, 0.1);
     expect(P.sgCtl).toBe(true);
     expect(r.switchBeforeEntry(P)).toBe(false);
-    r.requestLane();
+    r.requestLane(me(r).id);
     expect(msgs(r.events)).toContain('msg.sgNoSwitchFinal');
     expect(P.laneOverride).toBe(false);
     r.events.length = 0;
@@ -407,7 +407,7 @@ describe('overrides with no switch left', () => {
     award(r, P, rival);
     run(r, UP, 0.1);
     const before = [P.sgOwed, P.sgDue, P.sgDeferred];
-    r.requestLane();
+    r.requestLane(me(r).id);
     expect(msgs(r.events)).toContain('msg.sgNoSwitch');
     expect(P.laneOverride).toBe(false);
     expect([P.sgOwed, P.sgDue, P.sgDeferred]).toEqual(before);
@@ -501,11 +501,11 @@ describe('combined fuel visit', () => {
     const { r, P, rival } = setup();
     approach(r, P, 60, -1, 14);
     P.fuel = 0.5;
-    r.requestPit();
+    r.requestPit(me(r).id);
     award(r, P, rival);
     const tr = run(r, driver(UP), 30, () => P.sgOwed === 0);
     expect(tr.vIn).toBeLessThanOrEqual(T.PIT_SPEED + 0.05);
-    r.update(DT, UP);
+    r.update(DT, all(r, UP));
     expect(P.sgCtl).toBe(true); expect(P.sgLeave).toBe(false); expect(P.sgPhase).toBe('bay');
     expect(P.mode).toBe('pitlane'); expect(P.pitFuel).toBe(true);
     expect(r.pit.bayOf(P)).toBe(P.bayHome);
@@ -521,14 +521,14 @@ describe('combined fuel visit', () => {
   it('a committed fuel stop and the stop-and-go clear independently on one visit', () => {
     const { r, P, rival } = setup();
     approach(r, P, 80, -1, 14);
-    r.requestPit(); r.requestDefer();
+    r.requestPit(me(r).id); r.requestDefer(me(r).id);
     expect(P.fuelDue).toBe(LAP + 1);
     approach(r, P, 60, -1, 14, LAP + 1);
     award(r, P, rival);
     expect(P.sgDue).toBe(LAP + 1);
     run(r, driver(UP), 30, () => P.sgOwed === 0);
     expect([P.sgOwed, P.fuelDue]).toEqual([0, LAP + 1]);
-    r.update(DT, NONE);
+    r.update(DT, all(r, NONE));
     expect(P.sgCtl).toBe(true);
     run(r, NONE, 5, () => P.mode === 'service');
     expect(P.bay).toBe(P.bayHome);
@@ -591,7 +591,7 @@ describe('Brake, reverse, pause and frames', () => {
     paired(r);
     // a restart is a new race: nothing owed, nothing reserved
     const fresh2 = new Race();
-    expect(fresh2.player.sgOwed).toBe(0); expect(fresh2.pit.box).toBe(-1); expect(fresh2.player.sgCommit).toBe(-1);
+    expect(me(fresh2).sgOwed).toBe(0); expect(fresh2.pit.box).toBe(-1); expect(me(fresh2).sgCommit).toBe(-1);
   });
 
   it('slow render frames give the same stop, the same stop time and the same handover', () => {
@@ -620,7 +620,7 @@ describe('Brake, reverse, pause and frames', () => {
     const snap = () => [P.sgOwed, P.sgDue, P.sgDeferred, P.fuelReq, P.fuelDue, P.svcBreach, r.pit.box];
     const s0 = snap();
     const ev: string[] = [];
-    for (let k = 0; k < 3; k++) { r.requestDefer(); r.requestLane(); r.requestPit(); ev.push(...msgs(r.events)); r.events.length = 0; }
+    for (let k = 0; k < 3; k++) { r.requestDefer(me(r).id); r.requestLane(me(r).id); r.requestPit(me(r).id); ev.push(...msgs(r.events)); r.events.length = 0; }
     expect(snap()).toEqual(s0);
     expect(ev).toContain('msg.deferPit'); expect(ev).toContain('msg.pitSingleFile');
     // keyboard and touch holding Throttle together: one letting go keeps it held, neither moves the car in the box

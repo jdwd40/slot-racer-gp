@@ -4,7 +4,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import * as T from '../src/track';
 import { Car, Input, LAPS, PEN, Race, SERVICE_READY } from '../src/race';
 import * as R from '../src/records';
-import { DT, NONE, UP, crossLine, fresh, memStorage, msgs, place, seedRandom, stepEvents } from './helpers';
+import { DT, NONE, UP, crossLine, fresh, memStorage, msgs, place, seedRandom, stepEvents, all, me } from './helpers';
 
 beforeEach(() => seedRandom(11));
 afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); });
@@ -17,8 +17,8 @@ function solo(lap = 3, track = 'circuit-1'): { r: Race; P: Car; rival: Car } {
   const r = fresh(track);
   const rival = r.cars[1];
   r.cars.splice(1);
-  const P = r.player;
-  P.isPlayer = true;
+  const P = me(r);
+  P.human = true;
   onLap(P, lap, 60);
   return { r, P, rival };
 }
@@ -63,21 +63,21 @@ describe('optional requests', () => {
 
   it('an optional request missed without an override, or cancelled, creates no obligation', () => {
     const { r, P } = solo(3);
-    r.requestPit();
+    r.requestPit(me(r).id);
     expect([P.fuelReq, P.pitReq, P.fuelDue]).toEqual([true, true, 0]);
     // blocked in the inside lane, no override used: the request just waits for the next lap
     passEntrance(r, P, 3, INSIDE);
     expect([P.fuelReq, P.pitReq, P.fuelDue]).toEqual([true, true, 0]);
     crossLine(r, P, 3);
     expect(P.svcBreach).toBeNull();
-    r.requestPit();
+    r.requestPit(me(r).id);
     expect([P.fuelReq, P.pitReq, P.fuelDue]).toEqual([false, false, 0]);
     expect(msgs(r.events)).toContain('msg.pitCancelled');
   });
 
   it('an optional request still armed at the flag is simply dropped: a normal finish', () => {
     const { r, P } = solo(LAPS);
-    r.requestPit();
+    r.requestPit(me(r).id);
     passEntrance(r, P, LAPS, INSIDE);
     crossLine(r, P, LAPS);
     expect(P.status).toBe('finished'); expect(P.fuelReq).toBe(false);
@@ -87,9 +87,9 @@ describe('optional requests', () => {
 describe('deferring', () => {
   it('Defer commits a fuel request to the next lap, releases this approach and re-arms beyond it', () => {
     const { r, P } = solo(3);
-    r.requestPit();
+    r.requestPit(me(r).id);
     expect(r.deferBlock(P)).toBeNull();
-    r.requestDefer();
+    r.requestDefer(me(r).id);
     expect([P.fuelReq, P.fuelDue, P.pitReq]).toEqual([false, 4, false]);
     expect(held(r, P)).toBe(true);
     expect(r.nextRoute(P)).toBeNull();
@@ -105,30 +105,30 @@ describe('deferring', () => {
 
   it('cannot be erased with a second toggle, cannot be deferred again and Pit only brings the route back', () => {
     const { r, P } = solo(3);
-    r.requestPit(); r.requestDefer();
+    r.requestPit(me(r).id); r.requestDefer(me(r).id);
     r.events.length = 0;
-    r.requestDefer();
+    r.requestDefer(me(r).id);
     expect(msgs(r.events)).toEqual(['msg.deferHeld']);
     r.events.length = 0;
-    r.requestPit(); // reselecting Pit: stop this lap after all
+    r.requestPit(me(r).id); // reselecting Pit: stop this lap after all
     expect(msgs(r.events)).toEqual(['msg.pitUndefer']);
     expect([P.fuelDue, P.pitReq]).toEqual([4, true]);
     r.events.length = 0;
-    r.requestPit(); // and now it cannot be cancelled
+    r.requestPit(me(r).id); // and now it cannot be cancelled
     expect(msgs(r.events)).toEqual(['msg.pitDue']);
     expect([P.fuelDue, P.pitReq]).toEqual([4, true]);
     // past this approach the fuel stop is due now: no further deferral
     passEntrance(r, P, 3, INSIDE); stepEvents(r, 1, UP);
     crossLine(r, P, 3);
     expect(r.deferBlock(P)).toBe('used');
-    r.requestDefer();
+    r.requestDefer(me(r).id);
     expect(P.fuelDue).toBe(4);
   });
 
   it('a lane override that skips a requested entrance is a deferral, once, and repeated overrides never reset it', () => {
     const { r, P } = solo(3);
-    r.requestPit();
-    r.requestLane(); // override: inside at the next switch
+    r.requestPit(me(r).id);
+    r.requestLane(me(r).id); // override: inside at the next switch
     expect(P.laneOverride).toBe(true);
     const sw = T.SWITCHES.find((x) => T.ahead(x.s0, T.PIT_IN0) < T.L / 2)!;
     place(P, 2 * T.L + T.FINISH_S + T.ahead(T.FINISH_S, sw.s0) - 0.2, OUTSIDE, 10);
@@ -139,38 +139,38 @@ describe('deferring', () => {
     expect(msgs(ev)).toContain('msg.fuelOverride');
     expect([P.fuelReq, P.fuelDue]).toEqual([false, 4]);
     // more overrides, toggles and reversing over the entrance change nothing
-    for (let k = 0; k < 3; k++) { r.requestLane(); r.requestPit(); r.requestDefer(); }
+    for (let k = 0; k < 3; k++) { r.requestLane(me(r).id); r.requestPit(me(r).id); r.requestDefer(me(r).id); }
     expect(P.fuelDue).toBe(4);
   });
 
   it('no extra-lap deferral on the final lap', () => {
     const { r, P, rival } = solo(LAPS);
-    r.requestPit();
+    r.requestPit(me(r).id);
     expect(r.deferBlock(P)).toBe('final');
-    r.requestDefer();
+    r.requestDefer(me(r).id);
     expect(msgs(r.events)).toContain('msg.deferFinal');
     expect([P.fuelReq, P.fuelDue]).toEqual([true, 0]);
-    r.requestPit(); // cancel the optional request
+    r.requestPit(me(r).id); // cancel the optional request
     award(r, P, rival);
     expect(P.sgDue).toBe(LAPS);
     expect(r.deferBlock(P)).toBe('final');
-    r.requestDefer();
+    r.requestDefer(me(r).id);
     expect([P.sgDue, P.sgDeferred]).toEqual([LAPS, false]);
   });
 
   it('is not offered in practice, in the pit lane, or with nothing to defer', () => {
-    const p = fresh('circuit-1', { practice: true }); p.player.isPlayer = true;
-    p.requestPit();
-    expect(p.deferBlock(p.player)).toBe('phase');
+    const p = fresh('circuit-1', { practice: true }); me(p).human = true;
+    p.requestPit(me(p).id);
+    expect(p.deferBlock(me(p))).toBe('phase');
     const { r, P } = solo(3);
     expect(r.deferBlock(P)).toBe('none');
-    r.requestPit(); P.mode = 'pitlane';
+    r.requestPit(me(r).id); P.mode = 'pitlane';
     expect(r.deferBlock(P)).toBe('pit');
     // de-slotted or towed: nothing to choose yet, and no misleading message
     for (const m of ['off', 'tow'] as const) {
       P.mode = m; r.events.length = 0;
       expect(r.deferBlock(P)).toBe('phase');
-      r.requestDefer();
+      r.requestDefer(me(r).id);
       expect(msgs(r.events)).toEqual([]);
       expect([P.fuelReq, P.fuelDue]).toEqual([true, 0]);
     }
@@ -181,7 +181,7 @@ describe('stop-and-go and the box', () => {
   it('box occupied: queueing is the default, one deferral is offered while another lap remains', () => {
     const r = fresh();
     r.cars.splice(2);
-    const [P, A] = r.cars; P.isPlayer = true;
+    const [P, A] = r.cars; P.human = true;
     onLap(P, 3, 60);
     award(r, P, A);
     // A stands in the box serving its own stop
@@ -189,7 +189,7 @@ describe('stop-and-go and the box', () => {
     expect(r.boxBusy(P)).toBe(true);
     expect(P.pitReq).toBe(true); // queue by default
     expect(r.deferBlock(P)).toBeNull();
-    r.requestDefer();
+    r.requestDefer(me(r).id);
     expect([P.sgDue, P.sgDeferred, P.pitReq]).toEqual([4, true, false]);
     expect(r.deferBlock(P)).toBe('held');
   });
@@ -197,20 +197,20 @@ describe('stop-and-go and the box', () => {
   it('box occupied on the final lap: no deferral, the route stays on', () => {
     const r = fresh();
     r.cars.splice(2);
-    const [P, A] = r.cars; P.isPlayer = true;
+    const [P, A] = r.cars; P.human = true;
     onLap(P, LAPS, 60);
     award(r, P, A);
     A.mode = 'pitlane'; A.u = (LAPS - 1) * T.L + T.PEN_S; A.hiU = A.u; A.d = T.pitD(A.u); A.v = 0;
     expect(r.boxBusy(P)).toBe(true);
     expect(r.deferBlock(P)).toBe('final');
-    r.requestLane(); // a manual override cannot waive it either
+    r.requestLane(me(r).id); // a manual override cannot waive it either
     expect(P.sgOwed).toBe(PEN.stopSeconds); expect(P.pitReq).toBe(true);
   });
 
   it('a deferred stop-and-go cannot be deferred again, and added stop time keeps the earliest deadline', () => {
     const { r, P, rival } = solo(3);
     award(r, P, rival);
-    r.requestDefer();
+    r.requestDefer(me(r).id);
     expect([P.sgDue, P.sgDeferred]).toEqual([4, true]);
     passEntrance(r, P, 3, OUTSIDE); stepEvents(r, 1, UP);
     expect(r.deferBlock(P)).toBe('used');
@@ -267,7 +267,7 @@ describe('stop-and-go and the box', () => {
 describe('fuel service', () => {
   it('a deferred fuel stop clears only after standing in a bay for the departure-ready time, even with a full tank', () => {
     const { r, P } = solo(3);
-    r.requestPit(); r.requestDefer();
+    r.requestPit(me(r).id); r.requestDefer(me(r).id);
     P.fuel = 1;
     // driving through the pit lane is not service
     P.mode = 'pitlane'; P.u = 3 * T.L + T.PIT_IN1; P.hiU = P.u; P.d = T.pitD(P.u); P.v = 6;
@@ -285,7 +285,7 @@ describe('fuel service', () => {
 
   it('a tow is recovery, not a visit: it never settles a committed fuel stop', () => {
     const { r, P } = solo(3);
-    r.requestPit(); r.requestDefer();
+    r.requestPit(me(r).id); r.requestDefer(me(r).id);
     P.fuel = 0; P.v = 0;
     stepEvents(r, 1);
     expect(P.mode).toBe('tow');
@@ -296,7 +296,7 @@ describe('fuel service', () => {
 
   it('one visit can serve the stop-and-go first and then the fuel stop, and each clears only itself', () => {
     const { r, P, rival } = solo(3);
-    r.requestPit(); r.requestDefer();
+    r.requestPit(me(r).id); r.requestDefer(me(r).id);
     award(r, P, rival);
     expect([P.sgOwed, P.fuelDue]).toEqual([PEN.stopSeconds, 4]);
     P.pitFuel = true;                       // set at the entrance for a visit with a fuel reason; serveBox places the car past it
@@ -308,7 +308,7 @@ describe('fuel service', () => {
 
   it('a fuel stop served after its due lap does not undo the breach', () => {
     const { r, P } = solo(3);
-    r.requestPit(); r.requestDefer();
+    r.requestPit(me(r).id); r.requestDefer(me(r).id);
     passEntrance(r, P, 3, OUTSIDE);
     crossLine(r, P, 3, INSIDE);
     let ev = crossLine(r, P, 4, INSIDE);
@@ -337,7 +337,7 @@ describe('the final crossing', () => {
 
   it('an obligation due on the final lap is judged before the finish is classified: one DQ, no finish', () => {
     const { r, P } = solo(LAPS - 1);
-    r.requestPit(); r.requestDefer(); // due on the final lap
+    r.requestPit(me(r).id); r.requestDefer(me(r).id); // due on the final lap
     expect(P.fuelDue).toBe(LAPS);
     crossLine(r, P, LAPS - 1);
     expect(P.svcBreach).toBeNull();
@@ -365,7 +365,7 @@ describe('the final crossing', () => {
 
   it('practice never disqualifies', () => {
     const r = fresh('circuit-1', { practice: true });
-    const P = r.player; P.isPlayer = true;
+    const P = me(r); P.human = true;
     P.fuelDue = 2; P.svcBreach = 'fuel';
     const ev = crossLine(r, P, LAPS + 2);
     expect(P.finished).toBe(false); expect(P.status).toBe('running');
@@ -376,7 +376,7 @@ describe('the final crossing', () => {
 describe('robustness', () => {
   it('reversing over the entrance after a deferral neither re-holds the route nor offers another deferral', () => {
     const { r, P } = solo(3);
-    r.requestPit(); r.requestDefer();
+    r.requestPit(me(r).id); r.requestDefer(me(r).id);
     place(P, 3 * T.L + T.PIT_IN0 + 1.2, OUTSIDE, 0); P.hiU = P.u;
     stepEvents(r, 1);
     expect(held(r, P)).toBe(false); expect(P.pitReq).toBe(true);
@@ -396,7 +396,7 @@ describe('robustness', () => {
   it('a re-slot behind the entrance does not bring the approach back', () => {
     const { r, P, rival } = solo(3);
     award(r, P, rival);
-    r.requestDefer();
+    r.requestDefer(me(r).id);
     place(P, 3 * T.L + T.PIT_IN0 + 0.5, INSIDE, 10); P.hiU = P.u;
     r.deslot(P);
     stepEvents(r, Math.ceil(2 / DT));
@@ -409,7 +409,7 @@ describe('robustness', () => {
 
   it('pause (clearing input and reverse) changes no obligation', () => {
     const { r, P, rival } = solo(3);
-    award(r, P, rival); r.requestDefer();
+    award(r, P, rival); r.requestDefer(me(r).id);
     const before = JSON.stringify([P.sgOwed, P.sgDue, P.sgDeferred, P.routeHold, P.fuelDue, P.svcBreach]);
     r.clearReverse();
     expect(JSON.stringify([P.sgOwed, P.sgDue, P.sgDeferred, P.routeHold, P.fuelDue, P.svcBreach])).toBe(before);
@@ -419,14 +419,14 @@ describe('robustness', () => {
     const { P } = solo(3);
     P.fuelDue = 4; P.svcBreach = 'fuel'; P.status = 'dq';
     const r2 = new Race();
-    expect(r2.player).toMatchObject({ fuelReq: false, fuelDue: 0, sgDue: 0, sgDeferred: false, routeHold: -1, overAppr: -1, svcBreach: null, status: 'running', dqReason: null });
+    expect(me(r2)).toMatchObject({ fuelReq: false, fuelDue: 0, sgDue: 0, sgDeferred: false, routeHold: -1, overAppr: -1, svcBreach: null, status: 'running', dqReason: null });
   });
 });
 
 describe('results and settlement', () => {
   it('a DQ ends the session: the race reaches the results without waiting, and the rest of the field is run on to real results', () => {
     const r = fresh();
-    const P = r.player; P.isPlayer = true;
+    const P = me(r); P.human = true;
     const [, A, B, C] = r.cars;
     for (const c of r.cars) { c.crossed = LAPS; c.lapsDone = LAPS - 1; c.lapStartT = 0; c.sectors = 7; }
     place(P, T.FINISH_S + LAPS * T.L - 0.3, OUTSIDE, 10);
@@ -457,7 +457,7 @@ describe('results and settlement', () => {
   it('a car that cannot finish in the run-out is a DNF, never an estimate', () => {
     const r = fresh();
     r.cars.splice(2);
-    const [P, A] = r.cars; P.isPlayer = true;
+    const [P, A] = r.cars; P.human = true;
     for (const c of r.cars) { c.crossed = LAPS; c.lapsDone = LAPS - 1; c.sectors = 7; }
     place(P, T.FINISH_S + LAPS * T.L - 0.3, OUTSIDE, 10);
     place(A, 200, INSIDE, 0); A.crossed = 1; A.lapsDone = 0;

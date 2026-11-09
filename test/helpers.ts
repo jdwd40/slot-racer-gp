@@ -2,11 +2,20 @@
 // localStorage double, and scripted race setups that bypass the countdown.
 import { vi } from 'vitest';
 import * as T from '../src/track';
-import { Race, Car, RaceEvent, Input } from '../src/race';
+import { Race, Car, RaceEvent, Input, Controls } from '../src/race';
 
 export const NONE: Input = { up: false, down: false };
 export const UP: Input = { up: true, down: false };
 export const DT = 1 / 60;
+
+/** The legacy single driver the solo-era tests script: the one human car, or slot 0 when none is human. */
+export const me = (r: Race): Car => r.cars.find((c) => c.human) ?? r.cars[0];
+/** The same held input for every human car (single-human tests: just that driver). AI entries never read inputs. */
+export function all(r: Race, input: Input): Controls {
+  const out: Record<string, Input> = {};
+  for (const c of r.cars) if (c.human) out[c.id] = input;
+  return out;
+}
 
 /** Replace Math.random with a seeded generator (mulberry32). Restore with vi.restoreAllMocks(). */
 export function seedRandom(seed = 1): void {
@@ -38,7 +47,7 @@ export function fresh(track = 'circuit-1', opts: { practice?: boolean } = {}): R
   T.setTrack(track);
   const r = new Race(opts);
   r.phase = 'racing'; r.t = 10; r.raceTime = 5;
-  for (const c of r.cars) { c.mode = 'race'; c.graceT = 0; c.isPlayer = false; c.pitPlan = false; }
+  for (const c of r.cars) { c.mode = 'race'; c.graceT = 0; c.human = false; c.pitPlan = false; }
   return r;
 }
 
@@ -50,14 +59,14 @@ export function place(c: Car, u: number, side: number, v: number): void {
 /** Park every car far apart, step twice so per-pair contact state clears, drop the events. */
 export function park(r: Race): void {
   for (const c of r.cars) place(c, 100 + c.idx * 8, 1, 0);
-  r.update(DT, NONE); r.update(DT, NONE);
+  r.update(DT, all(r, NONE)); r.update(DT, all(r, NONE));
   r.events.length = 0;
   for (const c of r.cars) c.v = 0;
 }
 
 export function stepEvents(r: Race, n = 1, input: Input = NONE): RaceEvent[] {
   const ev: RaceEvent[] = [];
-  for (let i = 0; i < n; i++) { r.update(DT, input); ev.push(...r.events); r.events.length = 0; }
+  for (let i = 0; i < n; i++) { r.update(DT, all(r, input)); ev.push(...r.events); r.events.length = 0; }
   return ev;
 }
 

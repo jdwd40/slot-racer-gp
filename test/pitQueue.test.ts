@@ -5,7 +5,7 @@ import * as T from '../src/track';
 import { Car, Input, LAPS, PEN, Race, SERVICE_READY } from '../src/race';
 import { PIT_Q } from '../src/pit';
 import type { RaceEvent } from '../src/race';
-import { DT, NONE, UP, fresh, msgs, place, seedRandom } from './helpers';
+import { DT, NONE, UP, fresh, msgs, place, seedRandom, all, me } from './helpers';
 
 beforeEach(() => seedRandom(7));
 afterEach(() => vi.restoreAllMocks());
@@ -17,7 +17,7 @@ const LAP = 3;
 function setup(n: number, player = false): Race {
   const r = fresh();
   r.cars.splice(n);
-  if (player) r.cars[0].isPlayer = true;
+  if (player) r.cars[0].human = true;
   for (const c of r.cars) { c.crossed = LAP; c.lapsDone = LAP - 1; c.sectors = 0; }
   return r;
 }
@@ -44,7 +44,7 @@ interface Watch { overlaps: number; offences: number; events: RaceEvent[]; held:
 /** Step for `sec`, checking every step that no two cars on the same path overlap. */
 function sim(r: Race, sec: number, input: Input | ((r: Race) => Input) = NONE, w: Watch = watch(), dt = DT, stop?: () => boolean): Watch {
   for (let t = 0; t < sec; t += dt) {
-    r.update(dt, typeof input === 'function' ? input(r) : input);
+    r.update(dt, all(r, typeof input === 'function' ? input(r) : input));
     for (const e of r.events) { w.events.push(e); if (e.type === 'offence') w.offences++; }
     r.events.length = 0;
     w.overlaps += overlaps(r);
@@ -127,7 +127,7 @@ describe('queue order', () => {
     const ai = r.ai.bind(r);
     r.ai = (c, t) => (c === A && c.sgOwed > 0 ? { t: 0, b: 1 } : ai(c, t));   // A serves where it stands
     approach(B, 6); owes(B);
-    approach(P, 9.5); r.requestPit();
+    approach(P, 9.5); r.requestPit(me(r).id);
     approach(D, 13); owes(D);
     if (rev) r.cars.reverse();
     let spilled = false, skipped = false;
@@ -367,7 +367,7 @@ describe('bay departures', () => {
     expect(A.mode).toBe('service'); expect(A.pitWait).toBe('exit');
     // the player drives off: the exit clears, the lane moves, and the bay car leaves
     let aOut = 0, prev = A.mode;
-    sim(r, 8, (rr) => (rr.player.mode === 'race' && rr.s(rr.player) < 60 ? UP : NONE), w, DT, () => {
+    sim(r, 8, (rr) => (me(rr).mode === 'race' && rr.s(me(rr)) < 60 ? UP : NONE), w, DT, () => {
       if (A.mode === 'bayOut' && prev !== 'bayOut') aOut++; prev = A.mode;
       return A.mode === 'race' || A.mode === 'pitlane' && T.gapS(r.s(A), T.PIT_OUT1) < 0;
     });
@@ -387,7 +387,7 @@ describe('pit exit', () => {
     const w = sim(r, 2);
     expect(A.pitWait).toBe('exit'); expect(A.mode).toBe('pitlane');
     expect(T.gapS(r.s(A), T.PIT_OUT0)).toBeGreaterThan(0);
-    sim(r, 4, (rr) => (rr.s(rr.player) < 70 ? UP : NONE), w, DT, () => A.mode === 'race');
+    sim(r, 4, (rr) => (rr.s(me(rr)) < 70 ? UP : NONE), w, DT, () => A.mode === 'race');
     expect(A.mode).toBe('race');
     expect(trail(r, 'exit')).toEqual([`${A.idx}:exit:grant`, `${A.idx}:exit:release:done`]);
     expect(w.overlaps).toBe(0); expect(w.offences).toBe(0);
@@ -412,12 +412,12 @@ describe('reservation lifecycle', () => {
     const [P, A] = r.cars;
     approach(P, 8, 0); P.crossed = LAP; P.lapsDone = LAP - 1; P.hiU = P.u;
     P.offences = 2; r.offence(P, A, 'rear');
-    r.requestPit();                                      // and a fuel stop
+    r.requestPit(me(r).id);                                      // and a fuel stop
     place(A, LAP * T.L + 120, 1, 0);
     sim(r, DT);
     expect(r.pit.box).toBe(P.idx); expect(r.pit.bays[0]).toBe(P.idx);
     const owed = P.sgOwed, due = P.sgDue;
-    r.requestDefer();
+    r.requestDefer(me(r).id);
     expect(r.pit.held(P)).toEqual([]);
     expect(trail(r).filter((x) => x.includes(':release:'))).toEqual([`${P.idx}:box:release:defer`, `${P.idx}:bay0:release:defer`]);
     expect([P.sgOwed, P.sgDue, P.sgDeferred, P.fuelDue]).toEqual([owed, due + 1, true, LAP + 1]);
@@ -431,7 +431,7 @@ describe('reservation lifecycle', () => {
     place(B, LAPS * T.L + 120, 1, 0);
     sim(f, DT);
     expect(f.deferBlock(Q)).toBe('final');
-    f.requestDefer();
+    f.requestDefer(me(f).id);
     expect(f.pit.box).toBe(Q.idx);
   });
 
@@ -491,7 +491,7 @@ describe('player controls', () => {
     sim(r, 1, UP);
     expect(P.pitWait).toBe('queued');
     const before = { u: P.u, d: P.d, side: P.laneSide, order: [...r.pit.order] };
-    r.requestLane();
+    r.requestLane(me(r).id);
     expect(msgs(r.events)).toContain('msg.pitSingleFile');
     sim(r, 0.5, UP);
     expect({ u: P.u, d: P.d, side: P.laneSide, order: [...r.pit.order] }).toEqual(before);
@@ -504,12 +504,12 @@ describe('player controls', () => {
     inPit(A, T.PEN_S - 0.8); owes(A);
     inPit(B, T.PIT_IN0 + 1.2); B.pitReq = true;
     r.ai = () => ({ t: 0, b: 1 });
-    approach(P, 5, 4); r.requestPit();
+    approach(P, 5, 4); r.requestPit(me(r).id);
     sim(r, 1.5, UP);
     expect(P.mode).toBe('race'); expect(P.pitWait).toBe('queued');
     expect(r.switchBeforeEntry(P)).toBe(false);
     const u = P.u;
-    r.requestLane();
+    r.requestLane(me(r).id);
     expect(msgs(r.events)).toContain('msg.queueNoSwitch');
     expect(P.laneOverride).toBe(false);
     sim(r, 0.5, UP);
@@ -525,7 +525,7 @@ describe('player controls', () => {
     r.syncRoute(P);
     sim(r, DT, UP);
     expect(r.pit.bays[0]).toBe(P.idx);
-    r.requestLane();                                  // one-switch override: stay off the pit route
+    r.requestLane(me(r).id);                                  // one-switch override: stay off the pit route
     sim(r, DT, UP);
     expect(r.pit.held(P)).toEqual([]);
     expect(trail(r, 'bay0')).toEqual([`${P.idx}:bay0:grant`, `${P.idx}:bay0:release:route`]);

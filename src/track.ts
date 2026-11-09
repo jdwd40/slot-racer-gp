@@ -2,9 +2,10 @@
 // 2D coordinates: x east, y north. Heading h in radians, CCW positive.
 // Lateral offset d is measured along the LEFT normal.
 //
-// Several circuits are defined below; `setTrack(id)` makes one of them the
-// active layout. Every exported geometry value is rebuilt on switch, so the
-// rest of the game reads them live through `import * as T`.
+// Several circuits are defined below. `Track` is an immutable per-race context
+// built from one of them (`trackFor(id)`); the simulation reads geometry only
+// through its race's context. `setTrack(id)` picks the displayed circuit, whose
+// values the renderer and HUD read live through `import * as T`.
 
 type SegDef = ['S', number | 'A' | 'B'] | ['A', number, number];
 
@@ -350,177 +351,239 @@ export const PIT_SPEED = 8;
 export interface Switch { s0: number; s1: number; }
 export const SWITCH_LEN = 7;
 
-// ---- active track state (rebuilt by setTrack) ----
-export let DEF: TrackDef = TRACKS[0];
-export let SEGS: Seg[] = [];
-export let L = 1;
-export let MAIN_LEN = 1;
-export let BOUNDS: Bounds = { mnx: 0, mny: 0, mxx: 0, mxy: 0, cx: 0, cy: 0, w: 1, h: 1 };
-export let SQ_SEG = 1;
-export let SQ_Q0 = 0, SQ_Q1 = 0, SQ_Q2 = 0, SQ_Q3 = 0, SQ_ENTRY = 0, SQ_EXIT = 0;
-export let SWITCHES: Switch[] = [];
-export let ELEV: ElevKey[] = [];
-export let BANKS: Bank[] = [];
-export let CROSSINGS: Crossing[] = [];
-/** stretches of track that sit above the ground (bridge decks and ramps) */
-export let RAISED: Range[] = [];
-export let MAX_Z = 0;
+// ---- per-race track context ----
+/** Geometry is fixed at construction and never changes, so any number of races (rooms) can share one context safely. */
+export class Track {
+  readonly DEF: TrackDef;
+  readonly SEGS: Seg[];
+  readonly L: number;
+  readonly MAIN_LEN: number;
+  readonly BOUNDS: Bounds;
+  readonly SQ_SEG: number;
+  readonly SQ_Q0: number; readonly SQ_Q1: number; readonly SQ_Q2: number; readonly SQ_Q3: number;
+  readonly SQ_ENTRY: number; readonly SQ_EXIT: number;
+  readonly SWITCHES: Switch[];
+  readonly ELEV: ElevKey[];
+  readonly BANKS: Bank[];
+  readonly CROSSINGS: Crossing[];
+  /** stretches of track that sit above the ground (bridge decks and ramps) */
+  readonly RAISED: Range[];
+  readonly MAX_Z: number;
+  // track-independent values, repeated here so simulation code reads everything through its own context
+  readonly CAR_LEN = CAR_LEN; readonly CAR_W = CAR_W; readonly LANE_HALF = LANE_HALF; readonly SQUEEZE_HALF = SQUEEZE_HALF;
+  readonly TRACK_EDGE = TRACK_EDGE; readonly PIT_IN0 = PIT_IN0; readonly PIT_IN1 = PIT_IN1; readonly BAYS = BAYS;
+  readonly BAY_HALF = BAY_HALF; readonly PEN_S = PEN_S; readonly PEN_HALF = PEN_HALF; readonly FINISH_S = FINISH_S;
+  readonly PIT_OUT0 = PIT_OUT0; readonly PIT_OUT1 = PIT_OUT1; readonly PIT_D = PIT_D; readonly BAY_D = BAY_D;
+  readonly PIT_SPEED = PIT_SPEED; readonly SWITCH_LEN = SWITCH_LEN; readonly PROFILE_STEP = PROFILE_STEP; readonly BANK_HALF = BANK_HALF;
+  readonly smooth = smooth;
 
-/** absolute track position of a segment-relative position */
-export function at(p: SegPos): number {
-  const g = SEGS[p[0]];
-  return g.s0 + (p[1] >= 0 ? p[1] : g.len + p[1]);
+  constructor(id: string) {
+    const def = TRACKS.find((d) => d.id === id) ?? TRACKS[0];
+    const sol = solve(def.segs);
+    const built = buildSegs(def.segs, sol.a, sol.b);
+    this.DEF = def;
+    this.SEGS = built.segs;
+    this.L = built.L;
+    this.MAIN_LEN = sol.a;
+    this.BOUNDS = boundsOf(this.SEGS, this.L);
+    // squeeze zone over the chosen sweeper
+    this.SQ_SEG = def.squeezeSeg;
+    const sq = this.SEGS[this.SQ_SEG];
+    this.SQ_Q0 = sq.s0 - 4; this.SQ_Q1 = sq.s0; this.SQ_Q2 = sq.s0 + sq.len; this.SQ_Q3 = this.SQ_Q2 + 4;
+    this.SQ_ENTRY = this.SQ_Q0 - 4; // priority is claimed here
+    this.SQ_EXIT = this.SQ_Q3;
+    this.SWITCHES = def.switches.map((p) => { const s0 = this.at(p); return { s0, s1: s0 + SWITCH_LEN }; });
+    this.ELEV = elevKeys(def, this.SEGS);
+    this.BANKS = (def.banked ?? []).map((b) => { const g = this.SEGS[b.seg]; return { s0: g.s0, s1: g.s0 + g.len, grip: b.grip, tilt: b.tilt, sign: g.sign }; });
+    this.MAX_Z = this.ELEV.reduce((m, k) => Math.max(m, k.z), 0);
+    // raised ranges
+    const raised: Range[] = [];
+    let open: Range | null = null;
+    for (let s = 0; s <= this.L; s += 0.25) {
+      const up = elevAt(this.ELEV, s) > 0.02;
+      if (up && !open) open = { s0: s, s1: s };
+      if (open) open.s1 = s;
+      if (!up && open) { raised.push(open); open = null; }
+    }
+    if (open) raised.push(open);
+    this.RAISED = raised;
+    // crossings: places where the centreline passes over itself
+    const crossings: Crossing[] = [];
+    const pts: { s: number; x: number; y: number }[] = [];
+    for (let s = 0; s < this.L; s += 0.5) { const c = segCenter(this.SEGS, s); pts.push({ s, x: c.x, y: c.y }); }
+    for (let i = 0; i < pts.length; i++) for (let j = i + 1; j < pts.length; j++) {
+      const a = pts[i], b = pts[j];
+      if (Math.abs(this.gapS(a.s, b.s)) < 8) continue;
+      const d2 = (a.x - b.x) ** 2 + (a.y - b.y) ** 2;
+      if (d2 > 0.7 * 0.7) continue;
+      const za = elevAt(this.ELEV, a.s), zb = elevAt(this.ELEV, b.s);
+      const hi = za >= zb ? a : b, lo = za >= zb ? b : a;
+      const ex = crossings.find((c) => (c.x - a.x) ** 2 + (c.y - a.y) ** 2 < 9);
+      if (ex) continue;
+      crossings.push({ x: (a.x + b.x) / 2, y: (a.y + b.y) / 2, sHi: hi.s, sLo: lo.s, zHi: Math.max(za, zb), zLo: Math.min(za, zb) });
+    }
+    this.CROSSINGS = crossings;
+    Object.freeze(this);
+  }
+
+  /** absolute track position of a segment-relative position */
+  at(p: SegPos): number {
+    const g = this.SEGS[p[0]];
+    return g.s0 + (p[1] >= 0 ? p[1] : g.len + p[1]);
+  }
+  /** height of the slot centreline above the mat */
+  elevZ(s: number): number { return elevAt(this.ELEV, this.wrapS(s)); }
+  /** banking at s: slope angle (radians, 0 when flat), grip factor and turn direction */
+  bankAt(sIn: number): { tilt: number; grip: number; sign: number } {
+    const s = this.wrapS(sIn);
+    for (const b of this.BANKS) {
+      if (s < b.s0 || s > b.s1) continue;
+      const f = bankBlend(b, s);
+      return { tilt: b.tilt * f, grip: 1 + b.grip * f, sign: b.sign };
+    }
+    return { tilt: 0, grip: 1, sign: 0 };
+  }
+  /** cornering grip multiplier (1 everywhere except inside banked sections) */
+  gripScale(s: number): number { return this.bankAt(s).grip; }
+  /** height of the track surface at lateral offset d: banked sections keep the inner edge on the mat and raise the outer edge */
+  surfZ(s: number, d: number): number {
+    const b = this.bankAt(s);
+    if (!b.tilt) return this.elevZ(s);
+    const dc = Math.max(-BANK_HALF, Math.min(BANK_HALF, d));
+    return this.elevZ(s) + (BANK_HALF - b.sign * dc) * Math.tan(b.tilt);
+  }
+  /** rise per unit of track length (for ramp pitch) */
+  slopeZ(s: number): number { return (this.elevZ(s + 0.4) - this.elevZ(s - 0.4)) / 0.8; }
+  /** roll of the surface: positive when the left side (d > 0) is higher */
+  rollAt(s: number): number { const b = this.bankAt(s); return b.tilt ? -b.sign * b.tilt : 0; }
+  point3(s: number, d: number): { x: number; y: number; z: number; h: number } {
+    const c = this.center(s);
+    return { x: c.x - Math.sin(c.h) * d, y: c.y + Math.cos(c.h) * d, z: this.surfZ(s, d), h: c.h };
+  }
+  isRaised(s: number): boolean { const w = this.wrapS(s); return this.RAISED.some((r) => w >= r.s0 && w <= r.s1); }
+  wrapS(s: number): number { const L = this.L; return ((s % L) + L) % L; }
+  /** signed shortest distance from a to b along the loop (b - a) */
+  gapS(a: number, b: number): number {
+    const L = this.L;
+    let g = (b - a) % L; if (g > L / 2) g -= L; if (g < -L / 2) g += L; return g;
+  }
+  private segIndex(s: number): number {
+    const SEGS = this.SEGS;
+    let lo = 0, hi = SEGS.length - 1;
+    while (lo < hi) { const m = (lo + hi + 1) >> 1; if (SEGS[m].s0 <= s) lo = m; else hi = m - 1; }
+    return lo;
+  }
+  center(sIn: number): CenterPt { return segCenter(this.SEGS, this.wrapS(sIn)); }
+  curvature(s: number): number { const g = this.SEGS[this.segIndex(this.wrapS(s))]; return g.kind === 'S' ? 0 : g.sign / g.R; }
+  laneHalf(sIn: number): number {
+    const s = this.wrapS(sIn);
+    if (s < this.SQ_Q0 || s > this.SQ_Q3) return LANE_HALF;
+    if (s < this.SQ_Q1) return LANE_HALF + (SQUEEZE_HALF - LANE_HALF) * smooth((s - this.SQ_Q0) / (this.SQ_Q1 - this.SQ_Q0));
+    if (s <= this.SQ_Q2) return SQUEEZE_HALF;
+    return SQUEEZE_HALF + (LANE_HALF - SQUEEZE_HALF) * smooth((s - this.SQ_Q2) / (this.SQ_Q3 - this.SQ_Q2));
+  }
+  trackHalf(s: number): number { return this.laneHalf(s) + TRACK_EDGE; }
+  point(s: number, d: number): { x: number; y: number; h: number } {
+    const c = this.center(s);
+    return { x: c.x - Math.sin(c.h) * d, y: c.y + Math.cos(c.h) * d, h: c.h };
+  }
+  /** lateral offset of the pit lane path at s (only valid inside the pit zone) */
+  pitD(sIn: number): number {
+    const s = this.wrapS(sIn);
+    if (s < PIT_IN0) return -LANE_HALF;
+    if (s < PIT_IN1) return -LANE_HALF + (PIT_D + LANE_HALF) * smooth((s - PIT_IN0) / (PIT_IN1 - PIT_IN0));
+    if (s < PIT_OUT0) return PIT_D;
+    if (s < PIT_OUT1) return PIT_D + (-LANE_HALF - PIT_D) * smooth((s - PIT_OUT0) / (PIT_OUT1 - PIT_OUT0));
+    return -LANE_HALF;
+  }
+  inRange(s: number, a: number, b: number): boolean { const w = this.wrapS(s); return w >= a && w < b; }
+  /** distance ahead from s to target position t along the loop (0..L) */
+  ahead(s: number, t: number): number { return this.wrapS(t - s); }
+  /** Speed profile per lane side for AI: max safe speed with braking lookahead. */
+  buildProfile(side: number, grip: number, vmax: number, brake: number): Float32Array {
+    const n = Math.ceil(this.L / PROFILE_STEP);
+    const v = new Float32Array(n);
+    for (let i = 0; i < n; i++) {
+      const s = i * PROFILE_STEP;
+      // take worst curvature in a small window (sections change abruptly)
+      let kl = 0;
+      for (const o of [0, 0.4, 0.8]) {
+        const k = this.curvature(s + o), d = side * this.laneHalf(s + o);
+        kl = Math.max(kl, Math.abs(k / (1 - k * d)) / this.gripScale(s + o));
+      }
+      v[i] = kl > 1e-6 ? Math.min(vmax, Math.sqrt(grip / kl)) : vmax;
+    }
+    for (let pass = 0; pass < 2; pass++) {
+      for (let i = n - 1; i >= 0; i--) {
+        const nx = v[(i + 1) % n];
+        const lim = Math.sqrt(nx * nx + 2 * brake * PROFILE_STEP);
+        if (v[i] > lim) v[i] = lim;
+      }
+    }
+    return v;
+  }
 }
 
-export function setTrack(id: string): TrackDef {
+const built = new Map<string, Track>();
+/** The immutable context for a circuit (unknown ids fall back to the first circuit). Built once per id and shared. */
+export function trackFor(id: string): Track {
   const def = TRACKS.find((d) => d.id === id) ?? TRACKS[0];
-  const sol = solve(def.segs);
-  const built = buildSegs(def.segs, sol.a, sol.b);
-  DEF = def;
-  SEGS = built.segs;
-  L = built.L;
-  MAIN_LEN = sol.a;
-  BOUNDS = boundsOf(SEGS, L);
-  // squeeze zone over the chosen sweeper
-  SQ_SEG = def.squeezeSeg;
-  const sq = SEGS[SQ_SEG];
-  SQ_Q0 = sq.s0 - 4; SQ_Q1 = sq.s0; SQ_Q2 = sq.s0 + sq.len; SQ_Q3 = SQ_Q2 + 4;
-  SQ_ENTRY = SQ_Q0 - 4; // priority is claimed here
-  SQ_EXIT = SQ_Q3;
-  SWITCHES = def.switches.map((p) => { const s0 = at(p); return { s0, s1: s0 + SWITCH_LEN }; });
-  ELEV = elevKeys(def, SEGS);
-  BANKS = (def.banked ?? []).map((b) => { const g = SEGS[b.seg]; return { s0: g.s0, s1: g.s0 + g.len, grip: b.grip, tilt: b.tilt, sign: g.sign }; });
-  MAX_Z = ELEV.reduce((m, k) => Math.max(m, k.z), 0);
-  // raised ranges
-  RAISED = [];
-  let open: Range | null = null;
-  for (let s = 0; s <= L; s += 0.25) {
-    const up = elevAt(ELEV, s) > 0.02;
-    if (up && !open) open = { s0: s, s1: s };
-    if (open) open.s1 = s;
-    if (!up && open) { RAISED.push(open); open = null; }
-  }
-  if (open) RAISED.push(open);
-  // crossings: places where the centreline passes over itself
-  CROSSINGS = [];
-  const pts: { s: number; x: number; y: number }[] = [];
-  for (let s = 0; s < L; s += 0.5) { const c = segCenter(SEGS, s); pts.push({ s, x: c.x, y: c.y }); }
-  for (let i = 0; i < pts.length; i++) for (let j = i + 1; j < pts.length; j++) {
-    const a = pts[i], b = pts[j];
-    if (Math.abs(gapS(a.s, b.s)) < 8) continue;
-    const d2 = (a.x - b.x) ** 2 + (a.y - b.y) ** 2;
-    if (d2 > 0.7 * 0.7) continue;
-    const za = elevAt(ELEV, a.s), zb = elevAt(ELEV, b.s);
-    const hi = za >= zb ? a : b, lo = za >= zb ? b : a;
-    const ex = CROSSINGS.find((c) => (c.x - a.x) ** 2 + (c.y - a.y) ** 2 < 9);
-    if (ex) continue;
-    CROSSINGS.push({ x: (a.x + b.x) / 2, y: (a.y + b.y) / 2, sHi: hi.s, sLo: lo.s, zHi: Math.max(za, zb), zLo: Math.min(za, zb) });
-  }
-  return def;
+  let t = built.get(def.id);
+  if (!t) { t = new Track(def.id); built.set(def.id, t); }
+  return t;
 }
 
-/** height of the slot centreline above the mat */
-export function elevZ(s: number): number { return elevAt(ELEV, wrapS(s)); }
-/** banking at s: slope angle (radians, 0 when flat), grip factor and turn direction */
-export function bankAt(sIn: number): { tilt: number; grip: number; sign: number } {
-  const s = wrapS(sIn);
-  for (const b of BANKS) {
-    if (s < b.s0 || s > b.s1) continue;
-    const f = bankBlend(b, s);
-    return { tilt: b.tilt * f, grip: 1 + b.grip * f, sign: b.sign };
-  }
-  return { tilt: 0, grip: 1, sign: 0 };
-}
-/** cornering grip multiplier (1 everywhere except inside banked sections) */
-export function gripScale(s: number): number { return bankAt(s).grip; }
+export const PROFILE_STEP = 0.25;
 /** half width of the tilted plate of a banked section (track plus kerb); outside it the ground is level */
 export const BANK_HALF = LANE_HALF + TRACK_EDGE + 0.45;
-/** height of the track surface at lateral offset d: banked sections keep the inner edge on the mat and raise the outer edge */
-export function surfZ(s: number, d: number): number {
-  const b = bankAt(s);
-  if (!b.tilt) return elevZ(s);
-  const dc = Math.max(-BANK_HALF, Math.min(BANK_HALF, d));
-  return elevZ(s) + (BANK_HALF - b.sign * dc) * Math.tan(b.tilt);
-}
-/** rise per unit of track length (for ramp pitch) */
-export function slopeZ(s: number): number { return (elevZ(s + 0.4) - elevZ(s - 0.4)) / 0.8; }
-/** roll of the surface: positive when the left side (d > 0) is higher */
-export function rollAt(s: number): number { const b = bankAt(s); return b.tilt ? -b.sign * b.tilt : 0; }
-export function point3(s: number, d: number): { x: number; y: number; z: number; h: number } {
-  const c = center(s);
-  return { x: c.x - Math.sin(c.h) * d, y: c.y + Math.cos(c.h) * d, z: surfZ(s, d), h: c.h };
-}
-export function isRaised(s: number): boolean { const w = wrapS(s); return RAISED.some((r) => w >= r.s0 && w <= r.s1); }
-setTrack(TRACKS[0].id);
-
-export function wrapS(s: number): number { return ((s % L) + L) % L; }
-/** signed shortest distance from a to b along the loop (b - a) */
-export function gapS(a: number, b: number): number {
-  let g = (b - a) % L; if (g > L / 2) g -= L; if (g < -L / 2) g += L; return g;
-}
 export function smooth(t: number): number { t = Math.max(0, Math.min(1, t)); return t * t * (3 - 2 * t); }
 
-function segIndex(s: number): number {
-  let lo = 0, hi = SEGS.length - 1;
-  while (lo < hi) { const m = (lo + hi + 1) >> 1; if (SEGS[m].s0 <= s) lo = m; else hi = m - 1; }
-  return lo;
+// ---- the active (displayed) track ----
+// The renderer, menus and HUD draw one circuit at a time and read it through these live bindings. The simulation never
+// does: each Race holds its own Track context, so changing the displayed circuit cannot alter a race already running.
+export let ACTIVE: Track;
+export let DEF: TrackDef;
+export let SEGS: Seg[];
+export let L: number;
+export let MAIN_LEN: number;
+export let BOUNDS: Bounds;
+export let SQ_SEG: number;
+export let SQ_Q0: number, SQ_Q1: number, SQ_Q2: number, SQ_Q3: number, SQ_ENTRY: number, SQ_EXIT: number;
+export let SWITCHES: Switch[];
+export let ELEV: ElevKey[];
+export let BANKS: Bank[];
+export let CROSSINGS: Crossing[];
+/** stretches of track that sit above the ground (bridge decks and ramps) */
+export let RAISED: Range[];
+export let MAX_Z: number;
+
+/** Make a circuit the displayed one (and the default for a new Race that names none). */
+export function setTrack(id: string): TrackDef {
+  const t = trackFor(id);
+  ACTIVE = t;
+  ({ DEF, SEGS, L, MAIN_LEN, BOUNDS, SQ_SEG, SQ_Q0, SQ_Q1, SQ_Q2, SQ_Q3, SQ_ENTRY, SQ_EXIT, SWITCHES, ELEV, BANKS, CROSSINGS, RAISED, MAX_Z } = t);
+  return t.DEF;
 }
 
-export function center(sIn: number): CenterPt { return segCenter(SEGS, wrapS(sIn)); }
+export function at(p: SegPos): number { return ACTIVE.at(p); }
+export function elevZ(s: number): number { return ACTIVE.elevZ(s); }
+export function bankAt(s: number): { tilt: number; grip: number; sign: number } { return ACTIVE.bankAt(s); }
+export function gripScale(s: number): number { return ACTIVE.gripScale(s); }
+export function surfZ(s: number, d: number): number { return ACTIVE.surfZ(s, d); }
+export function slopeZ(s: number): number { return ACTIVE.slopeZ(s); }
+export function rollAt(s: number): number { return ACTIVE.rollAt(s); }
+export function point3(s: number, d: number): { x: number; y: number; z: number; h: number } { return ACTIVE.point3(s, d); }
+export function isRaised(s: number): boolean { return ACTIVE.isRaised(s); }
+export function wrapS(s: number): number { return ACTIVE.wrapS(s); }
+export function gapS(a: number, b: number): number { return ACTIVE.gapS(a, b); }
+export function center(s: number): CenterPt { return ACTIVE.center(s); }
+export function curvature(s: number): number { return ACTIVE.curvature(s); }
+export function laneHalf(s: number): number { return ACTIVE.laneHalf(s); }
+export function trackHalf(s: number): number { return ACTIVE.trackHalf(s); }
+export function point(s: number, d: number): { x: number; y: number; h: number } { return ACTIVE.point(s, d); }
+export function pitD(s: number): number { return ACTIVE.pitD(s); }
+export function inRange(s: number, a: number, b: number): boolean { return ACTIVE.inRange(s, a, b); }
+export function ahead(s: number, t: number): number { return ACTIVE.ahead(s, t); }
+export function buildProfile(side: number, grip: number, vmax: number, brake: number): Float32Array { return ACTIVE.buildProfile(side, grip, vmax, brake); }
 
-export function curvature(s: number): number { const g = SEGS[segIndex(wrapS(s))]; return g.kind === 'S' ? 0 : g.sign / g.R; }
-
-export function laneHalf(sIn: number): number {
-  const s = wrapS(sIn);
-  if (s < SQ_Q0 || s > SQ_Q3) return LANE_HALF;
-  if (s < SQ_Q1) return LANE_HALF + (SQUEEZE_HALF - LANE_HALF) * smooth((s - SQ_Q0) / (SQ_Q1 - SQ_Q0));
-  if (s <= SQ_Q2) return SQUEEZE_HALF;
-  return SQUEEZE_HALF + (LANE_HALF - SQUEEZE_HALF) * smooth((s - SQ_Q2) / (SQ_Q3 - SQ_Q2));
-}
-
-export function trackHalf(s: number): number { return laneHalf(s) + TRACK_EDGE; }
-
-export function point(s: number, d: number): { x: number; y: number; h: number } {
-  const c = center(s);
-  return { x: c.x - Math.sin(c.h) * d, y: c.y + Math.cos(c.h) * d, h: c.h };
-}
-
-/** lateral offset of the pit lane path at s (only valid inside the pit zone) */
-export function pitD(sIn: number): number {
-  const s = wrapS(sIn);
-  if (s < PIT_IN0) return -LANE_HALF;
-  if (s < PIT_IN1) return -LANE_HALF + (PIT_D + LANE_HALF) * smooth((s - PIT_IN0) / (PIT_IN1 - PIT_IN0));
-  if (s < PIT_OUT0) return PIT_D;
-  if (s < PIT_OUT1) return PIT_D + (-LANE_HALF - PIT_D) * smooth((s - PIT_OUT0) / (PIT_OUT1 - PIT_OUT0));
-  return -LANE_HALF;
-}
-
-export function inRange(s: number, a: number, b: number): boolean { const w = wrapS(s); return w >= a && w < b; }
-
-/** distance ahead from s to target position t along the loop (0..L) */
-export function ahead(s: number, t: number): number { return wrapS(t - s); }
-
-// Speed profile per lane side for AI: max safe speed with braking lookahead.
-export const PROFILE_STEP = 0.25;
-export function buildProfile(side: number, grip: number, vmax: number, brake: number): Float32Array {
-  const n = Math.ceil(L / PROFILE_STEP);
-  const v = new Float32Array(n);
-  for (let i = 0; i < n; i++) {
-    const s = i * PROFILE_STEP;
-    // take worst curvature in a small window (sections change abruptly)
-    let kl = 0;
-    for (const o of [0, 0.4, 0.8]) {
-      const k = curvature(s + o), d = side * laneHalf(s + o);
-      kl = Math.max(kl, Math.abs(k / (1 - k * d)) / gripScale(s + o));
-    }
-    v[i] = kl > 1e-6 ? Math.min(vmax, Math.sqrt(grip / kl)) : vmax;
-  }
-  for (let pass = 0; pass < 2; pass++) {
-    for (let i = n - 1; i >= 0; i--) {
-      const nx = v[(i + 1) % n];
-      const lim = Math.sqrt(nx * nx + 2 * brake * PROFILE_STEP);
-      if (v[i] > lim) v[i] = lim;
-    }
-  }
-  return v;
-}
+setTrack(TRACKS[0].id);

@@ -5,7 +5,7 @@ import * as T from '../src/track';
 import { Car, Input, LAPS, PEN, Race, REV, REV_CAP, REV_PIT_MIN, VMAX } from '../src/race';
 import { DrivingInput, PadButton, TouchPad } from '../src/input';
 import { reversing } from '../src/hud';
-import { DT, NONE, UP, crossLine, fresh, msgs, place, seedRandom, stepEvents } from './helpers';
+import { DT, NONE, UP, crossLine, fresh, msgs, place, seedRandom, stepEvents, all, me } from './helpers';
 import type { RaceEvent } from '../src/race';
 
 beforeEach(() => seedRandom(11));
@@ -18,8 +18,8 @@ const BOTH: Input = { up: true, down: true };
 function solo(track = 'circuit-1'): { r: Race; P: Car } {
   const r = fresh(track);
   r.cars.splice(1);
-  r.player.isPlayer = true;
-  return { r, P: r.player };
+  me(r).human = true;
+  return { r, P: me(r) };
 }
 /** Step for `sec` seconds of frames; `each` sees every frame and the events it produced. */
 function run(r: Race, input: Input, sec: number, each?: (ev: RaceEvent[]) => void): RaceEvent[] {
@@ -152,7 +152,7 @@ describe('engagement', () => {
 
   it('a restart begins with reverse disengaged', () => {
     T.setTrack('circuit-1');
-    const P = new Race().player;
+    const P = me(new Race());
     expect([P.revOn, P.revHoldT, P.revLatch, P.revMark]).toEqual([false, 0, false, null]);
   });
 });
@@ -161,7 +161,7 @@ describe('where reverse is refused', () => {
   it('never during the countdown, and Brake held through the start stays latched until pressed again', () => {
     T.setTrack('circuit-1');
     const r = new Race({ practice: true });
-    const P = r.player;
+    const P = me(r);
     const u = P.u;
     until(r, BRAKE, () => r.phase === 'countdown');
     run(r, BRAKE, 2);
@@ -313,7 +313,7 @@ describe('recovering an overshot bay', () => {
   it('an occupied bay is never captured backing up, even the car\'s own', () => {
     const r = fresh();
     r.cars.splice(2);
-    const [P, A] = r.cars; P.isPlayer = true;
+    const [P, A] = r.cars; P.human = true;
     const j = P.bayHome;
     inPit(A, T.BAYS[j]); r.enterBay(A, j); A.mode = 'service'; A.refuelTarget = 2;
     inPit(P, T.BAYS[j] + T.BAY_HALF + 0.5);
@@ -329,7 +329,7 @@ describe('recovering a missed pit entrance', () => {
   it('back up on the road past the entrance, then enter driving forward with the request on', () => {
     const { r, P } = solo();
     place(P, T.PIT_IN0 + 1.2, -1, 0);
-    r.requestPit();
+    r.requestPit(me(r).id);
     expect(P.pitReq).toBe(true);
     engage(r, P);
     // backing over the entrance brings the fuel visit inside the automatic window: it is taken over (and reverse with it)
@@ -410,7 +410,7 @@ describe('lane changes and routing', () => {
     const { r, P } = solo();
     const sw = T.SWITCHES[0];
     place(P, sw.s0 + 1.5, 1, 0);
-    r.requestLane();
+    r.requestLane(me(r).id);
     expect(P.laneReq).toBe(true);
     engage(r, P);
     let d0 = P.d;
@@ -449,7 +449,7 @@ describe('collisions', () => {
   it('backing into a parked car stops against it: no pass-through, nobody shoved backwards, no offence', () => {
     const r = fresh();
     r.cars.splice(2);
-    const [P, A] = r.cars; P.isPlayer = true;
+    const [P, A] = r.cars; P.human = true;
     place(P, 120, 1, 0); place(A, 116, 1, 0); parkAI(r);
     engage(r, P);
     const ev = run(r, BRAKE, 3, () => {
@@ -464,7 +464,7 @@ describe('collisions', () => {
   it('a car arriving fast behind a reversing player is resolved forwards and not judged', () => {
     const r = fresh();
     r.cars.splice(2);
-    const [P, A] = r.cars; P.isPlayer = true;
+    const [P, A] = r.cars; P.human = true;
     place(P, 120, 1, 0);
     engage(r, P); run(r, BRAKE, 0.8);
     place(A, P.u - T.CAR_LEN - 0.2, 1, 10);
@@ -479,7 +479,7 @@ describe('collisions', () => {
   it('cars on the other level of a bridge are never touched while backing over or under it', () => {
     const r2 = fresh('circuit-4'); r2.cars.splice(2);
     const x = T.CROSSINGS[0];
-    const [P, A] = r2.cars; P.isPlayer = true; parkAI(r2);
+    const [P, A] = r2.cars; P.human = true; parkAI(r2);
     for (const [mine, theirs] of [[x.sHi, x.sLo], [x.sLo, x.sHi]]) {
       place(P, mine + 2, 1, 0); place(A, theirs, 1, 0); P.revMark = null; P.revLatch = false;
       run(r2, NONE, DT);
@@ -494,7 +494,7 @@ describe('collisions', () => {
   it('backing up in the squeeze leaves the priority queue, so queue order can never push a car through another', () => {
     const r = fresh();
     r.cars.splice(2);
-    const [P, A] = r.cars; P.isPlayer = true;
+    const [P, A] = r.cars; P.human = true;
     place(P, T.SQ_ENTRY + 6, 1, 0); place(A, T.SQ_ENTRY + 2, -1, 0); parkAI(r);
     r.squeezeQ.length = 0; r.squeezeQ.push(P, A);
     engage(r, P);
@@ -595,7 +595,7 @@ describe('keyboard and touch Brake', () => {
     const pad = new TouchPad([brake, throttle], input, () => {});
     const { r, P } = solo();
     place(P, 120, 1, 6);
-    const step = (sec: number): number[] => { const vs: number[] = []; for (let i = 0; i < Math.round(sec / DT); i++) { r.update(DT, { up: input.held('throttle'), down: input.held('brake') }); r.events.length = 0; vs.push(P.v); } return vs; };
+    const step = (sec: number): number[] => { const vs: number[] = []; for (let i = 0; i < Math.round(sec / DT); i++) { r.update(DT, all(r, { up: input.held('throttle'), down: input.held('brake') })); r.events.length = 0; vs.push(P.v); } return vs; };
     return { input, brake, pad, r, P, step };
   }
 

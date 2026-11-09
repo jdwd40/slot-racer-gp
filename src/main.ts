@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 import * as T from './track';
-import { Race, Car, LAPS, RaceEvent, DRIVERS, PERSONAS, PEN, DEF } from './race';
+import { Race, Car, LAPS, RaceEvent, DRIVERS, PERSONAS, PEN, DEF, SOLO_ID, DriverId, RosterEntry } from './race';
 import { buildWorld, disposeWorld, arrowGeometry, BayPaint, World } from './world';
 import { Y0 } from './gfx';
 import { makeCar, makePlayerMarker, CarVisual } from './carModel';
@@ -68,8 +68,29 @@ scene.add(world.root);
 type Mode = 'race' | 'practice' | 'champ';
 let mode: Mode = 'race';
 let carId = R.savedCar();
-function newRace(): Race { return new Race({ practice: mode === 'practice', playerColor: R.livery(carId).color }); }
+/** The local driver: camera, marker, HUD, audio emphasis, personal messages, records and the ghost all follow this ID. */
+const localId: DriverId = SOLO_ID;
+/**
+ * Grid slot of the local driver (diagnostics only, via __game.setLocalSlot). Championships always use slot 0, which their
+ * saved results are keyed by. In another slot the local car takes that slot's grid place, number and bay, and the rival
+ * from that slot moves to slot 0 with its name, colour and persona.
+ */
+let localSlot = 0;
+function newRace(): Race {
+  const practice = mode === 'practice';
+  const slot = mode === 'champ' ? 0 : localSlot;
+  const roster: RosterEntry[] = [{ id: localId, control: 'human', slot, name: DRIVERS[0].name, color: R.livery(carId).color }];
+  if (practice) return new Race({ practice, roster: [{ ...roster[0], slot: 0 }], track: T.DEF.id });
+  for (let k = 1; k < DRIVERS.length; k++) {
+    const D = DRIVERS[k];
+    roster.push({ id: `ai${k}`, control: 'ai', slot: k === slot ? 0 : k, name: D.name, color: D.color, persona: D.persona });
+  }
+  return new Race({ roster, track: T.DEF.id });
+}
 let race = newRace();
+/** the local driver's car */
+const me = (): Car => race.car(localId) ?? race.cars[0];
+const isMe = (c: Car): boolean => c.id === localId;
 const stepper = new FixedStepper();
 const poseOf = ({ x, y, z, h, roll, pitch }: Car): Pose => ({ x, y, z, h, roll, pitch });
 /** each car's placement before the latest simulation step; drawing blends from here to the live state */
@@ -82,7 +103,7 @@ function disposeVisual(v: CarVisual): void {
 /** (re)create car visuals for the cars of the current race */
 function rebuildVisuals(): void {
   visuals.forEach(disposeVisual);
-  visuals = race.cars.map((c) => { const v = makeCar(c.color, c.num, c.isPlayer); scene.add(v.group); return v; });
+  visuals = race.cars.map((c) => { const v = makeCar(c.color, c.num, isMe(c)); scene.add(v.group); return v; });
   paintBays();
 }
 /** Bays are painted from the race's owners (Car.bayHome): the player's in the chosen livery, with its number and tag. */
@@ -90,7 +111,8 @@ let bayPaint: BayPaint[] = [];
 function paintBays(): void {
   world.paintBays(bayPaint = T.BAYS.map((_, j) => {
     const o = race.bayOwner(j);
-    return o ? { color: o.color, num: o.num, tag: o.isPlayer ? t('hud.you') : DRIVERS[o.idx]?.tag ?? '', mine: o.isPlayer } : { color: 0, num: null, tag: '', mine: false };
+    const tag = (c: Car): string => (isMe(c) ? t('hud.you') : DRIVERS.find((d) => d.name === c.name)?.tag ?? c.name.slice(0, 5).toUpperCase());
+    return o ? { color: o.color, num: o.num, tag: tag(o), mine: isMe(o) } : { color: 0, num: null, tag: '', mine: false };
   }));
 }
 rebuildVisuals();
@@ -126,7 +148,7 @@ let markerFade = 0;
 let bridgeFade = 1;
 /** true while the player's car is on the lower level of a crossing */
 function playerUnderBridge(): boolean {
-  const p = race.player;
+  const p = me();
   return T.CROSSINGS.some((c) => p.z < c.zHi - 1 && (c.x - p.x) ** 2 + (c.y - p.y) ** 2 < 4.2 * 4.2);
 }
 
@@ -340,8 +362,8 @@ function showResults(): void {
   if (mode === 'champ') { recordChampRound(); showChamp(race); return; }
   enter('results');
   const res = race.results();
-  const me = race.player;
-  const pos = res.findIndex((r) => r.car.isPlayer) + 1;
+  const mine = me();
+  const pos = res.findIndex((r) => isMe(r.car)) + 1;
   // classified rows only get a position and a time; DQ and DNF rows say so instead and never inherit a place
   const winner = res[0].status === 'finished' ? res[0].time : NaN;
   const timeCell = (r: (typeof res)[number], i: number): string => {
@@ -349,13 +371,13 @@ function showResults(): void {
     if (r.status === 'dnf') return `<td class="mono">${t('res.dnf')}</td>`;
     return `<td class="mono">${i === 0 ? fmt(r.time) : '+' + (r.time - winner).toFixed(1) + 's'}${r.est ? ` <small>(${t('res.est')})</small>` : ''}</td>`;
   };
-  const rows = res.map((r, i) => `<tr class="${r.car.isPlayer ? 'me' : ''}"><td>${r.status === 'finished' ? i + 1 : '–'}</td><td>${colorDot(r.car.color)}${carLabel(r.car)}</td>
+  const rows = res.map((r, i) => `<tr class="${isMe(r.car) ? 'me' : ''}"><td>${r.status === 'finished' ? i + 1 : '–'}</td><td>${colorDot(r.car.color)}${carLabel(r.car, localId)}</td>
     ${timeCell(r, i)}
     <td class="mono">${fmt(r.car.bestLap)}</td><td>${r.car.pitStops}</td><td>${flags(r.car) || '–'}${r.status === 'dq' ? ` <small>${t(`res.dqReason.${r.car.dqReason}`)}</small>` : ''}</td></tr>`).join('');
-  const place = me.status === 'dq' ? `${t('res.youDq')} · ${t(`res.dqReason.${me.dqReason}`)}` : me.status === 'finished' ? t('res.youPlace', { n: pos }) : t('res.youDnf');
+  const place = mine.status === 'dq' ? `${t('res.youDq')} · ${t(`res.dqReason.${mine.dqReason}`)}` : mine.status === 'finished' ? t('res.youPlace', { n: pos }) : t('res.youDnf');
   overlay.className = 'overlay show';
   overlay.innerHTML = `<div class="card results">
-    <h2>${pos === 1 && me.status === 'finished' ? '🏆 ' + t('res.win') : t('res.title')}</h2>
+    <h2>${pos === 1 && mine.status === 'finished' ? '🏆 ' + t('res.win') : t('res.title')}</h2>
     <div class="place">${place}</div>
     <div class="tscroll"><table><thead><tr><th>#</th><th>${t('res.driver')}</th><th>${t('res.time')}</th><th>${t('res.best')}</th><th>${t('res.pits')}</th><th>${t('res.pen')}</th></tr></thead><tbody>${rows}</tbody></table></div>
     <div class="row"><button class="cta" id="o-again">${t('res.again')} <small>(R)</small></button><button class="cta alt" id="o-menu">${t('pause.menu')}</button></div>
@@ -370,8 +392,9 @@ const driverColor = (idx: number): number => (idx === 0 ? R.livery(champ?.car ??
 
 /** Store the finished round's result once (points are never awarded twice). */
 function recordChampRound(): void {
-  if (!champ || champRoundSaved || R.champDone(champ) || race.phase !== 'done') return;
-  champ.rounds.push(R.roundRecord(T.DEF.id, race.results()));
+  // only the race's final standings (every car terminal) are recorded: never a live or estimated order
+  if (!champ || champRoundSaved || R.champDone(champ) || race.phase !== 'done' || !race.final) return;
+  champ.rounds.push(R.roundRecord(T.DEF.id, race.final.map((x) => ({ car: { idx: x.slot }, status: x.status, time: x.time ?? 0 }))));
   R.saveChamp(champ);
   champRoundSaved = true;
 }
@@ -458,7 +481,7 @@ function startSession(m: Mode): void {
   } else { ghost.setData(null); pbMs = 0; }
   resume();
   camLead.set(0, 0);
-  const p = race.player;
+  const p = me();
   camTarget.set(p.x, 0, -p.y);
 }
 /** restart the current session (race, practice or championship round) */
@@ -467,7 +490,7 @@ function startRace(): void { startSession(mode === 'practice' ? 'practice' : mod
 
 /** timing-line crossing by the player: finish the recording of the lap just done, start the next */
 function onPlayerCross(): void {
-  const p = race.player;
+  const p = me();
   if (mode !== 'practice') return;
   const lap = pendingLap;
   if (recorder.active && lap) {
@@ -491,9 +514,9 @@ function onPlayerCross(): void {
 
 // ------------------------------------------------------------ input
 const input = new DrivingInput({
-  lane: () => { if (screen === 'race') race.requestLane(); },
-  pit: () => { if (screen === 'race') race.requestPit(); },
-  defer: () => { if (screen === 'race') race.requestDefer(); },
+  lane: () => { if (screen === 'race') race.requestLane(localId); },
+  pit: () => { if (screen === 'race') race.requestPit(localId); },
+  defer: () => { if (screen === 'race') race.requestDefer(localId); },
   view: () => toggleView(),
   pause: () => { if (screen === 'race') showPause(); else if (screen === 'pause') resume(); },
 });
@@ -627,7 +650,7 @@ function updateCamera(dt: number, p: Pose): void {
   const desired = new THREE.Vector3();
   let span: number;
   if (camMode === 'follow') {
-    const lead = Math.min(followSpan * 0.28, race.player.v * 0.3);
+    const lead = Math.min(followSpan * 0.28, me().v * 0.3);
     const lx = Math.cos(p.h) * lead, ly = Math.sin(p.h) * lead;
     const kl = 1 - Math.exp(-2.2 * dt);
     camLead.x += (lx - camLead.x) * kl; camLead.y += (ly - camLead.y) * kl;
@@ -678,20 +701,22 @@ function setPreset(id: PresetId): void {
 
 // ------------------------------------------------------------ events
 function handle(e: RaceEvent): void {
-  const p = race.player;
+  const p = me();
   switch (e.type) {
     case 'msg':
+      // personal messages are for their own driver's view only
+      if (e.to !== localId) break;
       hud.toast(t(e.text, e.vars), e.kind);
       if (e.kind === 'bad') sfx.bad(); else if (e.kind === 'good') sfx.good(); else sfx.beep();
       break;
     case 'light': if (e.n > 0) sfx.light(); break;
     case 'go': sfx.go(); hud.goFlash(t('msg.go')); break;
-    case 'bump': if (e.car.isPlayer || dist2(e.car) < 400) sfx.bump(e.power); break;
-    case 'deslot': if (e.car.isPlayer || dist2(e.car) < 600) sfx.crash(); break;
-    case 'switch': if (e.car.isPlayer || dist2(e.car) < 200) sfx.click(); break;
+    case 'bump': if (isMe(e.car) || isMe(e.other) || dist2(e.car) < 400) sfx.bump(e.power); break;
+    case 'deslot': if (isMe(e.car) || dist2(e.car) < 600) sfx.crash(); break;
+    case 'switch': if (isMe(e.car) || dist2(e.car) < 200) sfx.click(); break;
     case 'offence': {
-      if (!e.car.isPlayer) { if (e.stop) hud.toast(t('pen.aiStop', { name: e.car.name }), 'info'); break; }
-      const reason = t(e.cause === 'cut' ? 'pen.reasonCut' : 'pen.reasonRear', { name: carLabel(e.other) });
+      if (!isMe(e.car)) { if (e.stop) hud.toast(t('pen.aiStop', { name: e.car.name }), 'info'); break; }
+      const reason = t(e.cause === 'cut' ? 'pen.reasonCut' : 'pen.reasonRear', { name: carLabel(e.other, localId) });
       if (e.n === 1) { hud.toast(t('pen.warn1', { reason }), 'warn'); sfx.beep(); }
       else if (e.n === 2) { hud.toast(t('pen.warn2', { reason }), 'bad'); hud.goFlash(t('pen.flashFinal')); sfx.bad(); }
       else if (e.n === 3 || e.car.sgOwed <= PEN.stopSeconds) {
@@ -703,7 +728,7 @@ function handle(e: RaceEvent): void {
       else { hud.toast(t('pen.stopAdd', { n: PEN.stopSeconds, reason }), 'bad'); sfx.bad(); }
       break;
     }
-    case 'served': if (!e.car.isPlayer) hud.toast(t('pen.aiServed', { name: e.car.name }), 'info'); break;
+    case 'served': if (!isMe(e.car)) hud.toast(t('pen.aiServed', { name: e.car.name }), 'info'); break;
     case 'dq':
       if (e.car === p) { sfx.bad(); hud.goFlash(t('res.dq')); } else hud.toast(t('pen.aiDq', { name: e.car.name }), 'info');
       break;
@@ -748,13 +773,14 @@ function syncCars(dt: number, time: number, poses: Pose[]): void {
   const target = under ? 0.28 : 1;
   bridgeFade += (target - bridgeFade) * Math.min(1, dt * 8);
   for (const m of world.bridgeMats) m.opacity = bridgeFade;
-  const p = race.player;
+  const p = me();
   const inSession = screen === 'race' || screen === 'pause' || screen === 'results';
   const wanted = inSession && (camMode === 'full' || curSpan * portraitFit() > 34 || (under && p.mode !== 'off'));
   markerFade += ((wanted ? 1 : 0) - markerFade) * Math.min(1, dt * 8);
   playerMarker.visible = markerFade > 0.02;
   if (playerMarker.visible) {
-    playerMarker.position.set(poses[0].x, poses[0].z + Y0 + 0.05, -poses[0].y);
+    const mp = poses[Math.max(0, race.cars.indexOf(p))];
+    playerMarker.position.set(mp.x, mp.z + Y0 + 0.05, -mp.y);
     playerMarker.quaternion.copy(camera.quaternion);
     // curSpan is the world height of the view, so this holds a constant on-screen size
     playerMarker.scale.setScalar(Math.max(MARKER_MIN, (MARKER_PX * curSpan) / vp.h) * (1 + Math.sin(time * 3) * 0.04));
@@ -763,7 +789,7 @@ function syncCars(dt: number, time: number, poses: Pose[]): void {
 }
 
 function syncArrows(time: number): void {
-  const p = race.player;
+  const p = me();
   // lane change arrow: a pit route draws its choice for the next switch, straight when that means staying in lane
   const route = race.nextRoute(p);
   if (p.laneReq || p.change || route) {
@@ -814,12 +840,12 @@ function syncAudio(): void {
   if (!sfx.ctx) return;
   const playing = screen === 'race' || screen === 'results';
   race.cars.forEach((c, i) => {
-    let vol = c.isPlayer ? 1 : Math.max(0, 1 - Math.sqrt(dist2(c)) / 28) * 0.55;
+    let vol = isMe(c) ? 1 : Math.max(0, 1 - Math.sqrt(dist2(c)) / 28) * 0.55;
     if (!playing || c.mode === 'off' || c.mode === 'tow') vol = 0;
     // backing up runs the motor too: pitch follows speed by magnitude
     sfx.motor(i, Math.abs(c.v), c.v < 0 ? Math.max(c.throttle, 0.3) : c.throttle, vol);
   });
-  const p = race.player;
+  const p = me();
   let sq = playing && p.mode === 'race' ? Math.max(0, (p.latRatio - 0.75) / 0.25) : 0;
   if (p.mode === 'off' && p.off && p.off.t < 0.6) sq = 0.8;
   sfx.tyre(Math.min(1, sq));
@@ -830,10 +856,11 @@ function syncAudio(): void {
 /** one simulation step: physics, events, timing-line bookkeeping and ghost recording */
 function tick(dt: number): void {
   prevPoses = race.cars.map(poseOf);
-  race.update(dt, { up: input.held('throttle'), down: input.held('brake') });
+  // single-player adapter: this browser's held keys and touch pedals drive the local driver only
+  race.update(dt, { [localId]: { up: input.held('throttle'), down: input.held('brake') } });
   for (const e of race.events) handle(e);
   race.events.length = 0;
-  const p = race.player;
+  const p = me();
   if (p.crossed !== lastCrossed) { lastCrossed = p.crossed; onPlayerCross(); }
   recorder.sample(p, race.raceTime);
   if (race.phase === 'done' && screen === 'race') showResults();
@@ -856,17 +883,17 @@ function frame(now: number): void {
   stepper.frame(now, simulating, tick);
   const alpha = stepper.alpha;
   const poses = race.cars.map((c, i) => blendPose(prevPoses[i], c, alpha));
-  updateCamera(dt, poses[0]);
+  updateCamera(dt, poses[Math.max(0, race.cars.indexOf(me()))]);
   syncCars(dt, time, poses);
   // the blended cars trail the live state by up to a step; the ghost must trail with them to line up
   ghost.update(race.raceTime - (1 - alpha) * STEP, screen === 'race' ? dt : 0);
   syncArrows(time);
   syncAudio();
   hud.root.style.display = screen === 'race' || screen === 'pause' || screen === 'results' ? '' : 'none';
-  hud.update(race, dt, time, { mode, pbMs, round: mode === 'champ' && champ ? `${champ.rounds.length + (champRoundSaved ? 0 : 1)}/${R.CHAMP_TRACKS.length}` : '' });
+  hud.update(race, dt, time, { mode, me: localId, pbMs, round: mode === 'champ' && champ ? `${champ.rounds.length + (champRoundSaved ? 0 : 1)}/${R.CHAMP_TRACKS.length}` : '' });
   renderer.render(scene, camera);
 }
 requestAnimationFrame(frame);
 
 // debug/test hooks
-(window as unknown as { __game: unknown }).__game = { get race() { return race; }, T, R, PEN, DEF, PERSONAS, startRace, applyTrack, startSession, showTitle, showBoards, get mode() { return mode; }, get preset() { return preset; }, get touchMode() { return touchMode; }, setTouchMode, input, get audio() { return sfx.ctx?.state ?? null; }, get muted() { return sfx.muted; }, suspendAudio: () => sfx.ctx?.suspend(), get champ() { return champ; }, get bays() { return bayPaint; }, get ghost() { return ghost; }, get recorder() { return recorder; }, get pbMs() { return pbMs; }, get screen() { return screen; }, get view() { return camMode; }, get aspect() { return camera.aspect; }, get mini() { return { w: hud.mW, h: hud.mH }; }, stepper, advance: (sec: number) => { for (let t = 0; t < sec && simulating(); t += STEP) tick(STEP); }, setView: (m: 'follow' | 'full') => { camMode = m; }, zoom: (span: number) => { camMode = 'follow'; followSpan = span; curSpan = span; }, snapCam: () => { const p = race.player; camLead.set(0, 0); camTarget.set(p.x, 0, -p.y); }, get marker() { return playerMarker; }, arrows: { lane: laneArrow, pit: pitArrow }, info: () => ({ calls: renderer.info.render.calls, tris: renderer.info.render.triangles, objects: world.root.children.length, frames: renderer.info.render.frame, geometries: renderer.info.memory.geometries, textures: renderer.info.memory.textures }) };
+(window as unknown as { __game: unknown }).__game = { get race() { return race; }, T, R, PEN, DEF, PERSONAS, startRace, applyTrack, startSession, showTitle, showBoards, get mode() { return mode; }, get preset() { return preset; }, get touchMode() { return touchMode; }, setTouchMode, input, get audio() { return sfx.ctx?.state ?? null; }, get muted() { return sfx.muted; }, suspendAudio: () => sfx.ctx?.suspend(), get champ() { return champ; }, get bays() { return bayPaint; }, get ghost() { return ghost; }, get recorder() { return recorder; }, get pbMs() { return pbMs; }, get screen() { return screen; }, get view() { return camMode; }, get aspect() { return camera.aspect; }, get mini() { return { w: hud.mW, h: hud.mH }; }, stepper, advance: (sec: number) => { for (let t = 0; t < sec && simulating(); t += STEP) tick(STEP); }, setView: (m: 'follow' | 'full') => { camMode = m; }, zoom: (span: number) => { camMode = 'follow'; followSpan = span; curSpan = span; }, snapCam: () => { const p = me(); camLead.set(0, 0); camTarget.set(p.x, 0, -p.y); }, get marker() { return playerMarker; }, get localId() { return localId; }, get localSlot() { return localSlot; }, setLocalSlot: (n: number) => { localSlot = Math.max(0, Math.min(DRIVERS.length - 1, Math.floor(n))); }, get camTarget() { return { x: camTarget.x, z: camTarget.z }; }, arrows: { lane: laneArrow, pit: pitArrow }, info: () => ({ calls: renderer.info.render.calls, tris: renderer.info.render.triangles, objects: world.root.children.length, frames: renderer.info.render.frame, geometries: renderer.info.memory.geometries, textures: renderer.info.memory.textures }) };

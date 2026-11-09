@@ -5,7 +5,7 @@ import * as T from '../src/track';
 import { Car, Race } from '../src/race';
 import { DEFAULT_TOUCH, DrivingInput, KEY_HOLDS, KEY_TAPS, PadButton, TOUCH_KEY, TOUCH_MODES, TapAction, TouchPad, ControlsAnchor, controlsMoved, laneCue, pitCue, savedTouchMode, saveTouchMode, touchActive } from '../src/input';
 import { t } from '../src/i18n';
-import { fresh, memStorage, place, seedRandom } from './helpers';
+import { fresh, memStorage, place, seedRandom, all, me } from './helpers';
 
 class FakeButton extends EventTarget implements PadButton {
   dataset: { hold?: string; tap?: string };
@@ -273,16 +273,16 @@ describe('reset', () => {
 describe('same race behaviour as the keyboard', () => {
   beforeEach(() => seedRandom(9));
   afterEach(() => vi.restoreAllMocks());
-  const held = (r: Race) => r.player.routeHold >= 0 && r.player.routeHold === r.apprLap(r.player);
-  const snapshot = (r: Race) => { const p = r.player; return { lane: p.laneReq, pit: p.pitReq, only: p.pitPenaltyOnly, over: p.laneOverride, fuelReq: p.fuelReq, fuelDue: p.fuelDue, sgDue: p.sgDue, hold: p.routeHold, route: r.nextRoute(p), cues: [laneCue(p, r.nextRoute(p)), pitCue(p, held(r))] }; };
+  const held = (r: Race) => me(r).routeHold >= 0 && me(r).routeHold === r.apprLap(me(r));
+  const snapshot = (r: Race) => { const p = me(r); return { lane: p.laneReq, pit: p.pitReq, only: p.pitPenaltyOnly, over: p.laneOverride, fuelReq: p.fuelReq, fuelDue: p.fuelDue, sgDue: p.sgDue, hold: p.routeHold, route: r.nextRoute(p), cues: [laneCue(p, r.nextRoute(p)), pitCue(p, held(r))] }; };
   function setup(side: number): { r: Race; P: Car; tap: (a: 'lane' | 'pit' | 'defer') => void } {
     const r = fresh('circuit-1');
-    const P = r.player;
-    P.isPlayer = true;
+    const P = me(r);
+    P.human = true;
     place(P, T.SWITCHES[0].s0 - 8, side, 8);
     const button = { lane: new FakeButton({ tap: 'lane' }), pit: new FakeButton({ tap: 'pit' }), defer: new FakeButton({ tap: 'defer' }) };
     const nop = (): void => {};
-    const input = new DrivingInput({ lane: () => r.requestLane(), pit: () => r.requestPit(), defer: () => r.requestDefer(), view: nop, pause: nop });
+    const input = new DrivingInput({ lane: () => r.requestLane(me(r).id), pit: () => r.requestPit(me(r).id), defer: () => r.requestDefer(me(r).id), view: nop, pause: nop });
     new TouchPad([button.lane, button.pit, button.defer], input, nop);
     let id = 10;
     const tap = (a: 'lane' | 'pit' | 'defer'): void => { id++; button[a].fire('pointerdown', id); button[a].fire('pointerup', id); button[a].fire('lostpointercapture', id); };
@@ -293,7 +293,7 @@ describe('same race behaviour as the keyboard', () => {
     const a = setup(side as number), b = setup(side as number);
     for (const act of ['lane', 'lane', 'pit', 'lane', 'lane', 'lane', 'pit', 'pit', 'defer', 'pit', 'defer', 'lane', 'pit'] as const) {
       a.tap(act);
-      if (act === 'lane') b.r.requestLane(); else if (act === 'pit') b.r.requestPit(); else b.r.requestDefer();
+      if (act === 'lane') b.r.requestLane(me(b.r).id); else if (act === 'pit') b.r.requestPit(me(b.r).id); else b.r.requestDefer(me(b.r).id);
       expect(snapshot(a.r)).toEqual(snapshot(b.r));
     }
   });
