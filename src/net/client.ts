@@ -17,6 +17,7 @@ export interface SocketLike {
 export type SocketCtor = new (url: string, protocols?: string | string[], opts?: never) => SocketLike;
 
 export const HEARTBEAT_MS = 250;
+export const CONNECT_TIMEOUT_MS = 8000;
 
 export class OnlineClient {
   ws: SocketLike | null = null;
@@ -42,9 +43,11 @@ export class OnlineClient {
     const ws = new this.Ctor(this.url, undefined, this.opts as never);
     this.ws = ws;
     await new Promise<void>((res, rej) => {
-      ws.onopen = () => res();
-      ws.onerror = () => rej(new Error('connect failed'));
-      ws.onclose = (e) => rej(new Error(`closed ${e.code}`));
+      // a socket that neither opens nor fails (a dead network path) is given up, so a reconnect loop can try again
+      const timer = setTimeout(() => { rej(new Error('connect timeout')); try { ws.close(); } catch { /* not open */ } }, CONNECT_TIMEOUT_MS);
+      ws.onopen = () => { clearTimeout(timer); res(); };
+      ws.onerror = () => { clearTimeout(timer); rej(new Error('connect failed')); };
+      ws.onclose = (e) => { clearTimeout(timer); rej(new Error(`closed ${e.code}`)); };
     });
     // a replaced socket (a reconnect) is ignored from here on: its late close or messages never touch the new connection
     ws.onmessage = (ev) => { if (this.ws === ws) this.receive(String(ev.data)); };

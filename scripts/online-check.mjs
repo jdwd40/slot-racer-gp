@@ -386,7 +386,7 @@ async function service(run, c) {
   const seenA = await read(a.page, () => ({ ...window.__seen, chips: [...window.__seen.chips] }));
   const seenB = await read(b.page, () => ({ ...window.__seen, chips: [...window.__seen.chips] }));
   c.ok('Touch: Defer moves the stop-and-go to the next approach (server-side deferral)', deferred === true && seenB.sg.includes('deferred'), { deferred, sg: seenB.sg });
-  c.ok('Automatic stop-and-go served for the keyboard driver (entry, serving, leaving) with no key needed', A.sgOwed === 0 && seenA.sg.includes('serving') && seenA.sg.includes('leaving'), { sg: seenA.sg, owed: A.sgOwed });
+  c.ok('Automatic stop-and-go served for the keyboard driver (entry, serving, leaving) with no key needed', seenA.sg.join().includes('entry,serving,leaving') || seenA.sg.join().includes('queued,entry,serving,leaving'), { sg: seenA.sg, owedNow: A.sgOwed, offencesNow: A.offences, note: 'later stops come from real contacts by the scripted drivers' });
   const queued = [...seenA.sg, ...seenA.wait, ...seenB.sg, ...seenB.wait].some((x) => x === 'queued' || x === 'bay' || x === 'bayWait' || x === 'exit');
   c.ok('Shared pit queue: a driver waited for the box, a bay or the exit (seen in the HUD state)', queued, { queuedWith, a: seenA.wait, b: seenB.wait, sgA: seenA.sg, sgB: seenB.sg });
   c.ok('Own-bay refuelling: service in the driver\'s own bay, then a fresh Throttle press releases the car', [seenA, seenB].some((x) => x.bayOwn && (x.sg.includes('ready') || x.sg.includes('release')) && x.modes.includes('bayOut')), { a: [seenA.sg, seenA.modes], b: [seenB.sg, seenB.modes] });
