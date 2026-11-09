@@ -241,6 +241,30 @@ describe('NetSession against the real server', () => {
     await until(() => a2.ends.includes('left'));
   }, 90000);
 
+  it('a stop-and-go awarded on the final lap after the last pit entrance is a DQ in every client\'s standings', async () => {
+    const a = player(), b = player(new MemKV(), 0.95);
+    await a.s.create('A', 'multiplayer', { track: 'circuit-1' });
+    await b.s.join(a.s.room!.code, 'B'); b.s.ready(true);
+    await until(() => a.s.room!.participants.every((x) => x.host || x.ready));
+    a.s.start();
+    await until(() => a.s.inRace);
+    const room = mgr.room(a.s.room!.id)!;
+    const A = room.race!.car(a.s.me!)!, B = room.race!.car(b.s.me!)!;
+    // the server's race: wait until A is on its last lap with the last entrance behind it, then three offences
+    await until(() => !room.race || (A.lapsDone === 12 && A.mode === 'race' && room.race.apprLap(A) > 13), 60000);
+    for (let k = 0; k < 3; k++) room.race!.offence(A, B, 'rear');
+    expect(A.sgDue).toBeGreaterThan(13);
+    await until(() => a.results.length > 0 && b.results.length > 0, 60000);
+    for (const p of [a, b]) {
+      const row = p.results[0].r.classification!.find((x) => x.id === a.s.me)!;
+      expect(row.status).toBe('dq');
+      expect(row.pos).toBeNull();
+      expect(p.race!.final!.find((x) => x.id === a.s.me)!.status).toBe('dq');
+    }
+    expect(a.results[0].r.digest).toBe(b.results[0].r.digest);
+    a.s.leave(); b.s.leave();
+  }, 90000);
+
   it('connected solo with AI is its own mode; releasing controls reaches the server at once', async () => {
     const p = player();
     p.driving = false;
