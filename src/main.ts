@@ -1148,6 +1148,8 @@ async function netBegin(req: (s: NetSession) => Promise<{ ok: true } | { ok: fal
   if (!r.ok) {
     net = null;
     mode = 'race';
+    // the sign-in this browser raced under has ended (signed out elsewhere, expired, reset): find out who it is now
+    if (r.code === 'expired' && r.detail === 'session' && accounts.account) void accounts.restore().then(() => { if (screen === 'online') showOnline(); });
     showOnline();
     say(t(refusalText(r.code)) + (r.detail && r.code === 'not_ready' ? ` (${r.detail})` : ''));
     return;
@@ -1222,6 +1224,7 @@ function onNetNack(m: Extract<ServerMsg, { t: 'nack' }>): void {
 
 function onNetEnd(why: EndReason, detail?: string): void {
   void detail;
+  if (why === 'expired' && accounts.account) void accounts.restore();
   net = null;
   leaveNetRace();
   localId = SOLO_ID;

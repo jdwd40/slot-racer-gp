@@ -787,6 +787,8 @@ async function accounts(run, c) {
   const exp = await read(b.page, () => document.getElementById('a-msg').textContent);
   c.ok('Revoked session: the second browser restores as a guest and is told its sign-in expired', exp === STRINGS['acct.expired'], exp);
 
+  // the finished pages are closed first (four software-rendered pages at once starve a new page's health probe)
+  for (const s of [b, g]) { c.ok(`No page errors (${s.name})`, s.errors.length === 0, s.errors.slice(0, 5)); await s.context.close(); run.contexts.delete(s.context); }
   // layouts with errors and a keyboard, phone landscape
   const l = await openPage(run, run.acctUrl, 'phoneLandscape', { touch: true, name: 'phone landscape' });
   await waitOnline(l.page);
@@ -794,7 +796,7 @@ async function accounts(run, c) {
   await l.page.click('#o-account');
   await l.page.fill('#a-user-in', USER); await l.page.fill('#a-pass', 'nope nope nope');
   await l.page.locator('#a-submit').tap();
-  await waitFor(l.page, () => !window.__game.auth.busy && document.getElementById('a-msg').textContent === STRINGS['acct.err.invalid_credentials'], undefined, 10000);
+  await waitFor(l.page, (want) => !window.__game.auth.busy && document.getElementById('a-msg').textContent === want, STRINGS['acct.err.invalid_credentials'], 10000);
   const k2 = await kb(l.page, 'phoneLandscape', '#a-pass');
   const lf = await layoutFacts(l.page);
   await snapshotOf(l.page, 'account-error-phoneLandscape.png');
@@ -804,7 +806,7 @@ async function accounts(run, c) {
   const pf = await layoutFacts(a.page);
   await snapshotOf(a.page, 'account-signin-phonePortrait.png');
   c.ok('Phone portrait sign-in form fits; every control is at least 40 px', pf.fitsWidth && !pf.docScrollX && pf.small.length === 0, pf.small);
-  return [a, b, g, l];
+  return [a, l];
 }
 
 const SCENARIOS = { gate, lobby, service, connection, layout, accounts };
