@@ -2492,4 +2492,6 @@ async function main() {
   process.exit(failed ? 1 : 0);
 }
 
-main().catch((e) => { console.error(e.message); process.exit(1); });
+// scripts/online-check.mjs reuses the driver, input helpers and checks; run directly, this file is the browser check
+export { instrument, Keys, Checks, Fingers, PadKeys, PHONE, environment, capture, driveUntil, waitFor, read, sleep, LAPS, STRINGS };
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) main().catch((e) => { console.error(e.message); process.exit(1); });

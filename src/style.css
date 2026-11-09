@@ -253,3 +253,33 @@ small { color: #9ca3af; font-weight: 500; }
   .lights { top: calc(var(--eT) + 136px + var(--mini-h)); }
   .toast, .touch .toast { max-width: calc(100% - 24px); }
 }
+
+/* ---- online: menu, lobby, results and the connection banner (docs/online-client.md) */
+.modes { margin: 10px auto 0; color: #9ca3af; }
+.modes.net-off { color: #fdba74; }
+.net-entry { margin-top: 12px; }
+.modes-grid { display: flex; gap: 14px; justify-content: center; flex-wrap: wrap; margin: 8px 0 6px; }
+.mode-box { display: flex; flex-direction: column; gap: 8px; align-items: center; width: min(300px, 100%); padding: 12px; border-radius: 14px; background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.12); }
+.mode-box small { color: #9ca3af; line-height: 1.35; }
+.chk { display: flex; gap: 8px; align-items: center; justify-content: center; font-size: 13px; color: #d1d5db; min-height: 44px; cursor: pointer; }
+.chk input { width: 22px; height: 22px; }
+.join { display: flex; gap: 8px; align-items: stretch; flex-wrap: wrap; justify-content: center; }
+.join input, .ini.nm input { font: inherit; font-weight: 800; font-size: 18px; letter-spacing: 3px; text-align: center; text-transform: uppercase; width: 130px; min-height: 44px; padding: 6px 8px; border-radius: 10px; border: 2px solid rgba(255,255,255,0.18); background: rgba(255,255,255,0.06); color: #ffe066; outline: none; -webkit-user-select: text; user-select: text; }
+.ini.nm input { width: 200px; letter-spacing: 0; text-transform: none; }
+.join input:focus, .ini.nm input:focus { border-color: #ffd23f; }
+.online .cta, .lobby .cta, .netres .cta, .netwait .cta { min-height: 44px; }
+.online .car, .lobby .car { min-height: 44px; min-width: 44px; }
+.car.sq { justify-content: center; padding: 6px; }
+.net-msg { min-height: 1.4em; color: #fde047; font-weight: 700; overflow-wrap: anywhere; }
+.lobby h2 .code { letter-spacing: 4px; color: #ffe066; user-select: all; -webkit-user-select: all; }
+.lobby-track { font-weight: 800; margin-bottom: 6px; }
+.lobby td .nm, .netres td, .netwait td { overflow-wrap: anywhere; }
+.lobby tr.ai td { color: #9ca3af; }
+.chip.grn { background: #22c55e; color: #052e14; }
+.chip.dim { background: rgba(255,255,255,0.12); color: #d1d5db; }
+.overlay.see { background: rgba(0,0,0,0.25); }
+#net-banner { position: absolute; z-index: 20; top: calc(var(--eT, 8px) + 56px); left: 50%; transform: translateX(-50%); max-width: calc(100% - 24px); padding: 8px 14px; border-radius: 10px; background: rgba(10,14,20,0.9); border-left: 4px solid #fb923c; color: #fde68a; font-weight: 700; font-size: 14px; display: none; pointer-events: none; text-align: center; }
+#net-banner.show { display: block; }
+#net-banner.ret { border-left-color: #ef4444; color: #fecaca; }
+#net-banner.lag { border-left-color: #60a5fa; color: #dbeafe; }
+.lobby .tab { min-height: 40px; }
