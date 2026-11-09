@@ -62,6 +62,86 @@ jobs:
           retention-days: 30
           overwrite: false
 
+  # The online room server: built, tested on PostgreSQL 17, smoke-checked and packaged as a checked artifact. It needs no
+  # secrets (the database is a throwaway service container) and the static deploy below does not depend on it. Nothing
+  # here deploys the server: production activation is the owner's manual runbook (docs/online-server.md).
+  server:
+    name: Room server build, PostgreSQL 17 tests, smoke check and package
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          # throwaway CI-only database inside the job's container network: not a secret
+          POSTGRES_USER: slotrush_test
+          POSTGRES_PASSWORD: slotrush_test_pw
+          POSTGRES_DB: slotrush_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U slotrush_test -d slotrush_test"
+          --health-interval 5s --health-timeout 5s --health-retries 12
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Install dependencies from the lockfile
+        run: npm ci
+
+      - name: Database tests (migrations, accounts, sessions, admin reset, results) on PostgreSQL 17
+        env:
+          SLOTRUSH_TEST_DATABASE_URL: postgres://slotrush_test:slotrush_test_pw@127.0.0.1:5432/slotrush_test
+        run: npx vitest run test/server/db.test.ts
+
+      - name: Build the server bundle
+        env:
+          SLOTRUSH_BUILD: ${{ github.sha }}
+        run: npm run build:server
+
+      - name: Package the release with locked production dependencies
+        run: npm run pack:server
+
+      - name: Health and connection smoke check of the packaged release (production mode, migrated database)
+        env:
+          NODE_ENV: production
+          SLOTRUSH_PORT: '8787'
+          SLOTRUSH_ALLOWED_ORIGINS: https://slotrush.jdwd40.com
+          DATABASE_URL: postgres://slotrush_test:slotrush_test_pw@127.0.0.1:5432/slotrush_test
+          SLOTRUSH_SESSION_SECRET: ci-only-session-secret-not-used-anywhere-else
+        run: |
+          rel="$(ls -d server-bundle/slotrush-server-*/)"
+          psql_reset='DROP SCHEMA public CASCADE; CREATE SCHEMA public;'
+          PGPASSWORD=slotrush_test_pw psql -h 127.0.0.1 -U slotrush_test -d slotrush_test -c "$psql_reset"
+          (cd "$rel" && node server-dist/admin.mjs migrate)
+          (cd "$rel" && exec node --max-old-space-size=96 --max-semi-space-size=2 server-dist/main.mjs) > server.log 2>&1 &
+          pid=$!
+          for i in $(seq 1 30); do curl -fsS http://127.0.0.1:8787/api/health >/dev/null 2>&1 && break; sleep 1; done
+          set +e
+          node scripts/server-smoke.mjs http://127.0.0.1:8787 --origin https://slotrush.jdwd40.com --expect "$rel/server-dist/protocol.json"
+          status=$?
+          kill "$pid" || true
+          cat server.log
+          exit "$status"
+
+      - name: Retain the checked server release
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: slotrush-server-${{ github.sha }}
+          path: |
+            server-bundle/*.tar.gz
+            server-bundle/*.tar.gz.sha256
+          if-no-files-found: error
+          retention-days: 30
+          overwrite: false
+
   deploy:
     name: Deploy checked static artifact
     needs: check

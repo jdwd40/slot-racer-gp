@@ -83,3 +83,10 @@ export function crossLine(r: Race, c: Car, lap: number, side = -1, input: Input 
   const ev = stepEvents(r, 4, input);
   return ev;
 }
+
+/** Give one race a private copy of its circuit with an extra lane switch at s0. Shared track contexts are deep-frozen, so a test can no longer leak an edit into every later race on that circuit. */
+export function addSwitch(r: Race, s0: number): void {
+  const t = new T.Track(r.T.DEF.id);
+  t.SWITCHES.push({ s0, s1: s0 + T.SWITCH_LEN });
+  (r as unknown as { T: T.Track }).T = t;
+}

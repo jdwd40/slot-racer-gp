@@ -6,7 +6,8 @@ export const ACC = 30, VMAX = 26, COAST = 9, BRAKE = 30, DRAG = 0.006;
 export const AI_GRIP = 36;   // cornering speeds the AI aims for
 export const GRIP = 52;      // real grip of the slot (well above the AI's target, so cars stick)
 /** fuel per unit distance at nominal throttle (scaled to the lap length, by default the displayed track's) */
-export function fuelRate(L = T.L): number { return 1 / (L * 7.4); }
+/** Fuel burned per unit of track for a lap of length L. L is required: a default read from the displayed track would let it reach a race. */
+export function fuelRate(L: number): number { return 1 / (L * 7.4); }
 export const REFUEL_RATE = 0.2;           // tank per second
 export const LOW_FUEL = 0.2;
 /** burn multiplier the AI plans with: near full throttle (0.5 + 0.7*thr) plus a safety margin */
@@ -42,7 +43,7 @@ export const CLOSE_DELAY = 3.2;
 export type CarStatus = 'running' | 'finished' | 'dq' | 'dnf';
 export type DqReason = 'deadline' | 'stopGo' | 'fuel';
 /** why a car was not classified: the finish window or race time limit ran out, or the field run-on did */
-export type DnfReason = 'window' | 'timeout' | 'runout';
+export type DnfReason = 'window' | 'timeout' | 'runout' | 'retired';
 /** Stable driver identity for a whole race (a room seat or the solo driver). Never an array position. */
 export type DriverId = string;
 export type Control = 'human' | 'ai';
@@ -343,6 +344,12 @@ export interface RaceOpts {
   finishWindow?: number;
   /** race-time limit (seconds of racing) after which every car still running is terminally classified. Default: unlimited with one human, 1200 s with more */
   timeLimit?: number;
+  /**
+   * How the AI field is finished once every human is terminal. 'sync' (default, the browser): run on synchronously at close,
+   * up to RUN_OUT_MAX seconds in one call. 'live' (the room server): the race stays in 'racing' and keeps stepping normally
+   * until every car is terminal (finish window and time limit still apply), so no single update blocks for the run-on.
+   */
+  runOn?: 'sync' | 'live';
 }
 
 /** A terminal, authoritative result row: only cars with a terminal status ever appear, and never an estimated time. */
@@ -415,6 +422,7 @@ export class Race {
   readonly rng: Rng;
   readonly finishWindow: number;
   readonly timeLimit: number;
+  readonly runOn: 'sync' | 'live';
   /** the final standings, set once when the race closes; null until then */
   final: readonly Standing[] | null = null;
   /** highest action sequence number applied, per driver: a null-prototype table, so any string driver ID (even `__proto__`) is an own key */
@@ -429,6 +437,7 @@ export class Race {
     const humans = roster.filter((e) => e.control === 'human').length;
     this.finishWindow = opts.finishWindow ?? (humans > 1 ? 90 : Infinity);
     this.timeLimit = opts.timeLimit ?? (humans > 1 ? 1200 : Infinity);
+    this.runOn = opts.runOn ?? 'sync';
     for (const P of Object.values(PERSONAS)) for (const side of [-1, 1]) {
       this.profiles[`${P.id}:${side}`] = this.T.buildProfile(side, AI_GRIP * P.grip, VMAX, P.brake);
       this.profiles[`${P.id}:${side}:hot`] = this.T.buildProfile(side, AI_GRIP * P.grip * P.lapseGrip, VMAX, P.brake * P.lapseBrake);
@@ -709,6 +718,25 @@ export class Race {
     }
   }
 
+  /**
+   * Retire one car now: its driver left the race or did not come back within the reconnect grace. Like the finish window, a
+   * latched service breach is still a DQ (leaving never escapes one); anything else is DNF `retired`. The car is then a
+   * terminal car like any other. Returns false (and changes nothing) for an unknown or already terminal car.
+   */
+  retire(id: DriverId): boolean {
+    const c = this.car(id);
+    if (!c || c.status !== 'running') return false;
+    this.endService(c);
+    if (c.svcBreach) {
+      c.status = 'dq'; c.dqReason = 'deadline';
+      this.emit({ type: 'dq', car: c, reason: 'deadline' });
+    } else {
+      c.status = 'dnf'; c.dnfReason = 'retired';
+      this.emit({ type: 'dnf', car: c, reason: 'retired' });
+    }
+    return true;
+  }
+
   /** The car's race is over: routing, automatic service and pit reservations end with it. */
   private endService(c: Car): void {
     c.finished = true; c.laneReq = false; c.sgLeave = false; c.sgCtl = false; c.sgPhase = null; this.clearPitIntent(c); c.pitPlan = false; c.routeHold = -1;
@@ -791,7 +819,7 @@ export class Race {
     const humans = this.cars.filter((c) => c.human);
     const done = (humans.length ? humans : this.cars).every((c) => c.status !== 'running');
     if (done && this.humansDoneT < 0) this.humansDoneT = this.t;
-    if (this.humansDoneT >= 0 && this.t - this.humansDoneT > CLOSE_DELAY) this.close();
+    if (this.humansDoneT >= 0 && this.t - this.humansDoneT > CLOSE_DELAY && (this.runOn === 'sync' || this.cars.every((c) => c.status !== 'running'))) this.close();
   }
 
   // ---------------------------------------------------------------- car step

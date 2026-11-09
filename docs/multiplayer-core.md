@@ -70,7 +70,11 @@ Chromium 156 headless with SwiftShader, 480×270 at DPR 1 on the Low preset unle
 
 `touchrace` (a 13-lap race on emulated touch only) was not run, and `routing` did not finish, because of the build host's time limits; the touch pads and the routing logic are covered by `touch`, the unit tests and the `routing` checks that did run. No physical phone, tablet, touch device or GPU was available, so smooth play on real devices is unverified.
 
-## Next service task (rooms)
+## Next service task (rooms) — done in #22
+
+The room server ([online-server.md](online-server.md)) now covers the items below: seats, transport, snapshot cadence, disconnect grace and retirement, room finish window and time limit, and a live run-on in place of the synchronous `runOut()`. Tracks are now deep-frozen as well.
+
+Original notes:
 
 - Contexts are isolated per race and tested concurrently here, so a room service can host rooms on different circuits in one process. Isolated workers are optional, not required for safety.
 - Still to do: lobby and seat assignment to roster slots, a network transport for `act` and held inputs (with `lastSeq` acks), a snapshot cadence, disconnect handling, and choosing room `finishWindow`/`timeLimit` values. A disconnected driver currently just sends neutral input until the window or limit classifies them.

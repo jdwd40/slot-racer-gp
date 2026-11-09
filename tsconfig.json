@@ -14,13 +14,15 @@
     "noEmit": true,
     "isolatedModules": true,
     "types": [
-      "vite/client"
+      "vite/client",
+      "node"
     ]
   },
   "include": [
     "src/**/*.ts",
     "src/**/*.tsx",
     "test/**/*.ts",
+    "server/**/*.ts",
     "vitest.config.ts"
   ]
 }

@@ -3,7 +3,10 @@
 ## Scope and verified target
 
 This is a **static browser game**. No production Node process, multiplayer backend,
-database or Docker stack is required. No `src/`, save keys or save formats are changed.
+database or Docker stack is required for it. No `src/`, save keys or save formats are changed.
+The optional online room server (#22) is a separate, owner-activated service with its own
+runbook: [online-server.md](online-server.md). Nothing in this static pipeline deploys it,
+and this pipeline keeps working unchanged without it.
 
 The inspected SSH alias `app-vps` resolves to user `jd`, tailnet address
 `100.103.129.22`, port `4020`. The host reports hostname `my-vps` and public IPv4

@@ -4,7 +4,7 @@ import * as T from '../src/track';
 import { Car, PEN, Race } from '../src/race';
 import { routeChipId } from '../src/hud';
 import { t } from '../src/i18n';
-import { fresh, place, stepEvents, msgs, seedRandom, crossLine, NONE, UP, all, me } from './helpers';
+import { fresh, place, stepEvents, msgs, seedRandom, crossLine, NONE, UP, all, me, addSwitch } from './helpers';
 
 beforeEach(() => seedRandom(5));
 afterEach(() => vi.restoreAllMocks());
@@ -228,7 +228,7 @@ describe('clearance, committed changes and geometry', () => {
   it('routes at a switch straddling the wrap of the track position', () => {
     const { r, P } = solo();
     const s0 = T.L - 3;
-    T.SWITCHES.push({ s0, s1: s0 + T.SWITCH_LEN });
+    addSwitch(r, s0);
     r.requestPit(me(r).id);
     place(P, s0 - 0.2, INSIDE, 10);
     stepEvents(r, 3, UP);
@@ -248,7 +248,7 @@ describe('clearance, committed changes and geometry', () => {
   it('does not change road lanes while running down the pit lane over a switch', () => {
     const { r, P } = solo();
     const s0 = T.PIT_IN1 + 1;
-    T.SWITCHES.push({ s0, s1: s0 + T.SWITCH_LEN });
+    addSwitch(r, s0);
     P.mode = 'pitlane'; P.pitReq = true; P.u = s0 - 0.2; P.d = T.pitD(P.u); P.v = 5; P.laneSide = INSIDE;
     stepEvents(r, 6, UP);
     expect(P.change).toBeNull(); expect(P.mode).toBe('pitlane');

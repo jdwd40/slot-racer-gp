@@ -184,3 +184,7 @@ Accept only if:
 4. `race` passes with renderer and preset recorded.
 
 Then add the results here, labelled as the user's own hardware or as reference-machine evidence. A different machine is reference-machine evidence only. By hand, also press Alt+Tab and switch tabs mid-race: each should pause and resume without a jump in race time.
+
+## Online gate (#22)
+
+`node scripts/browser-check.mjs online` checks the online gate. With the default build it checks that online play is off and that no request goes to `/api` or `/ws`. With a `VITE_ONLINE=1` build served through the same-origin proxy and a running local room server, it checks that the health and protocol check passes and that a page WebSocket completes hello, a server-hosted solo race and leave. Results are in [online-evidence.md](online-evidence.md). They are diagnostics only (SwiftShader).

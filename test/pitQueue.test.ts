@@ -5,7 +5,7 @@ import * as T from '../src/track';
 import { Car, Input, LAPS, PEN, Race, SERVICE_READY } from '../src/race';
 import { PIT_Q } from '../src/pit';
 import type { RaceEvent } from '../src/race';
-import { DT, NONE, UP, fresh, msgs, place, seedRandom, all, me } from './helpers';
+import { DT, NONE, UP, fresh, msgs, place, seedRandom, all, me, addSwitch } from './helpers';
 
 beforeEach(() => seedRandom(7));
 afterEach(() => vi.restoreAllMocks());
@@ -520,7 +520,7 @@ describe('player controls', () => {
     const r = setup(1, true);
     const P = r.cars[0];
     const s0 = T.wrapS(T.PIT_IN0 - 20);
-    T.SWITCHES.push({ s0, s1: s0 + T.SWITCH_LEN });
+    addSwitch(r, s0);
     approach(P, 30, 8); P.fuelDue = LAP;              // a committed fuel stop due this lap
     r.syncRoute(P);
     sim(r, DT, UP);

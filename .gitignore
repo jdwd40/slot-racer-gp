@@ -31,3 +31,9 @@ public/decoders/
 .tesana_storage_state.json
 assets/ui/.storefront_pass.json
 .tesana/
+
+# room server build and local database
+server-dist/
+server-bundle/
+.local-pg/
+dist-online/
