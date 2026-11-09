@@ -138,15 +138,23 @@ export class AccountClient {
   }
   login(username: string, password: string): Promise<AuthResult> { return this.begin('/api/auth/login', { username: username.trim(), password }); }
 
-  /** Sign out here: the server revokes the session; this browser forgets every account-scoped thing, even if the server is unreachable. */
-  async logout(): Promise<void> {
+  /**
+   * Sign out here. Only the server can revoke the session (the cookie is HttpOnly), so this browser becomes a guest only
+   * once the server confirms it did; otherwise the session would still be live and a reload would sign straight back in.
+   * Account-scoped client state is forgotten either way, even if the server is unreachable.
+   */
+  async logout(): Promise<{ ok: true } | { ok: false; error: AuthError }> {
     this.busy = true;
     this.onChange?.(this.auth);
-    try { await this.call('/api/auth/logout', {}); } finally {
+    let r: { status: number; data: Json } | null = null;
+    try { r = await this.call('/api/auth/logout', {}); } finally {
       this.busy = false;
       clearAccountState(this.local, this.session);
-      this.set({ state: 'guest', expired: false });
     }
+    if (r && r.status === 200 && r.data.ok === true) { this.set({ state: 'guest', expired: false }); return { ok: true }; }
+    // still signed in as far as the server is concerned: say so, and let the driver try again
+    this.onChange?.(this.auth);
+    return { ok: false, error: r ? AccountClient.error(r.status, r.data).error : 'unreachable' };
   }
 
   /** Change the saved driver name. The account (and everything recorded for it) stays the same. */

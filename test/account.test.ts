@@ -80,17 +80,18 @@ function fakeServer() {
     },
   };
   let down = false;
+  const overrides = new Map<string, Route>();
   const fetchFn = (async (url: string, init: RequestInit) => {
     if (down) throw new TypeError('network');
     const path = new URL(url).pathname;
     const body = init.body ? JSON.parse(String(init.body)) as Record<string, unknown> : null;
     calls.push({ path, body });
     expect(init.credentials).toBe('same-origin');
-    const r = routes[path](body, jar);
+    const r = (overrides.get(path) ?? routes[path])(body, jar);
     if (r.cookie !== undefined) jar = r.cookie;
-    return new Response(JSON.stringify(r.body), { status: r.status });
+    return new Response(typeof r.body === 'string' ? r.body : JSON.stringify(r.body), { status: r.status });
   }) as unknown as typeof fetch;
-  return { fetchFn, users, sessions, calls, get jar() { return jar; }, set jar(v: string) { jar = v; }, setDown(v: boolean) { down = v; }, expireAll() { sessions.clear(); } };
+  return { fetchFn, users, sessions, calls, get jar() { return jar; }, set jar(v: string) { jar = v; }, setDown(v: boolean) { down = v; }, override(path: string, r: Route | null) { if (r) overrides.set(path, r); else overrides.delete(path); }, expireAll() { sessions.clear(); } };
 }
 
 /** Local game data that must survive every sign-in, sign-out and switch. */
@@ -152,20 +153,49 @@ describe('AccountClient', () => {
     keepsSaves();
   });
 
-  it('sign-out clears account state and pending submissions, keeps local records, ghosts and championships, even offline', async () => {
+  it('sign-out clears account state and pending submissions, keeps local records, ghosts and championships', async () => {
     const { srv, c, local, session, keepsSaves } = setup();
     const r = await c.register('eve_1', 'eve password 1');
     const id = r.ok ? r.account.id : '';
     local.setItem(accountKey(id, 'pending'), '[1]');
     local.setItem(accountKey(id, 'cache'), '{"private":true}');
     session.setItem('srgp.seat', '{}'); session.setItem('srgp.netResults', '[]');
-    srv.setDown(true);   // even if the server cannot be told, this browser forgets the account
-    await c.logout();
+    expect(await c.logout()).toEqual({ ok: true });
     expect(c.auth).toEqual({ state: 'guest', expired: false });
+    expect(srv.sessions.size).toBe(0);
     expect([...local.m.keys()].filter((k) => k.startsWith('srgp.acct.') && k !== OWNER_KEY)).toEqual([]);
     expect(session.length).toBe(0);
     keepsSaves();
+  });
+
+  it('a sign-out the server does not confirm is a failure: still signed in, account state forgotten anyway, retry works', async () => {
+    const { srv, c, local, session, keepsSaves } = setup();
+    const r = await c.register('ian_1', 'ian password 1');
+    const id = r.ok ? r.account.id : '';
+    const signedIn = c.auth;
+    local.setItem(accountKey(id, 'pending'), '[1]');
+    session.setItem('srgp.seat', '{}');
+    // offline: the server was never told, so the session (and its cookie) is still live
+    srv.setDown(true);
+    expect(await c.logout()).toEqual({ ok: false, error: 'unreachable' });
     srv.setDown(false);
+    expect(c.auth).toEqual(signedIn);
+    expect(c.busy).toBe(false);
+    expect(local.getItem(accountKey(id, 'pending'))).toBe(null);   // private client state is still forgotten
+    expect(session.getItem('srgp.seat')).toBe(null);
+    expect(srv.sessions.size).toBe(1);
+    expect((await new AccountClient(srv.fetchFn, 'https://slotrush.example', new MemStore(), new MemStore()).restore()).state).toBe('signed-in');   // a reload would sign back in
+    // the server answers but could not revoke the session (store error, proxy error page)
+    for (const fail of [{ status: 503, body: { error: 'unavailable' } }, { status: 502, body: 'Bad Gateway' }, { status: 200, body: {} }]) {
+      srv.override('/api/auth/logout', () => fail);
+      expect((await c.logout()).ok).toBe(false);
+      expect(c.auth).toEqual(signedIn);
+    }
+    srv.override('/api/auth/logout', null);
+    expect(await c.logout()).toEqual({ ok: true });
+    expect(c.auth).toEqual({ state: 'guest', expired: false });
+    expect(srv.sessions.size).toBe(0);
+    keepsSaves();
   });
 
   it('switching accounts: the next driver never inherits the previous one\'s pending submissions or seat', async () => {

@@ -1075,7 +1075,14 @@ function showAccount(tab: 'login' | 'register' = 'login'): void {
     overlay.querySelector('#a-logout')!.addEventListener('click', () => {
       if (accounts.busy) return;
       setBusy(true, t('acct.signingOut'));
-      void accounts.logout().then(() => { onIdentityChanged(); if (screen === 'account') { acctNotice = t('acct.signedOut'); showAccount(); } });
+      void accounts.logout().then((r) => {
+        onIdentityChanged();
+        if (screen !== 'account') return;
+        if (r.ok) { acctNotice = t('acct.signedOut'); showAccount(); return; }
+        // the server has not revoked the session: this device is still signed in
+        setBusy(false, '');
+        say2(t(r.error === 'unreachable' ? 'acct.err.signOutUnreachable' : 'acct.err.signOutFailed'), 'err');
+      });
     });
   } else if (form) {
     const reg = form.dataset.kind === 'register';

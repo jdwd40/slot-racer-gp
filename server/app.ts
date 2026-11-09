@@ -182,7 +182,9 @@ export function createApp({ cfg, log, manager, pool = null, sessionCheckMs = SES
     if (!writeGuard(req, res)) return;
     if (what === 'logout') {
       const sid = req.sessionID;
-      await new Promise<void>((r) => s.destroy(() => r()));
+      // only confirm a sign-out the store actually carried out: the client stays signed in until it hears ok
+      const err = await new Promise<unknown>((r) => s.destroy((e) => r(e)));
+      if (err) { log.error('auth.logout_failed', { error: String(err) }); json(res, 503, { error: 'unavailable' }); return; }
       endSession(sid);
       clearCookie(res);
       json(res, 200, { ok: true });

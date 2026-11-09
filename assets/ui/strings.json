@@ -418,6 +418,8 @@
     { "id": "acct.signOut", "text": "Sign out" },
     { "id": "acct.signingOut", "text": "Signing out…" },
     { "id": "acct.signedOut", "text": "Signed out. You're playing as a guest." },
+    { "id": "acct.err.signOutFailed", "text": "Couldn't sign out. You're still signed in on this device. Try again." },
+    { "id": "acct.err.signOutUnreachable", "text": "Couldn't reach the server to sign out. You're still signed in on this device. Check your connection and try again." },
     { "id": "acct.signingIn", "text": "Signing in…" },
     { "id": "acct.creating", "text": "Creating your account…" },
     { "id": "acct.created", "text": "Account created. Welcome, {name}!" },

@@ -28,7 +28,7 @@ No third-party identity provider, mail service or paid service is used or needed
 | Sign in | `POST /api/auth/login` `{ username, password }` | New session ID; the browser's previous session (and its sockets' sign-in) ends. `401 invalid_credentials` for any wrong part |
 | Restore | `GET /api/auth/me` | `{ account, profile, session: 'active' }`, or `{ account: null, session: 'none' \| 'expired' }`. `expired` means the browser sent a session cookie the server no longer accepts (expired, signed out elsewhere, owner reset); the reply also clears that cookie |
 | Profile | `GET /api/profile`, `POST /api/profile` `{ displayName }` | The session's own profile only. `401 signed_out` / `session_expired` |
-| Sign out | `POST /api/auth/logout` | Deletes the session row and clears the cookie; sockets opened with it are signed out at once (`bye expired`, close 4003) |
+| Sign out | `POST /api/auth/logout` | Deletes the session row and clears the cookie; sockets opened with it are signed out at once (`bye expired`, close 4003). If the store cannot delete the row: `503 unavailable`, cookie kept |
 | Recover | admin `reset-password` (above) | No email. The owner verifies the player out of band, then gives them the new password privately |
 
 **Session lifetime:** 30 days absolute from sign-in (`rolling: false`); there is no "remember me" variant. Expired rows are
@@ -90,6 +90,10 @@ every room entry, so a sign-out, expiry or reset elsewhere also ends a socket's 
   reports expired, and whenever the signed-in identity differs from the one that state belongs to (`srgp.acct.owner`:
   another account, or guest ↔ account). **Local records, ghosts, championships, settings and the guest online name are
   never touched** (tested).
+- **Sign-out is confirmed by the server.** Only the server can revoke the `HttpOnly` session, so the browser becomes a
+  guest only after `POST /api/auth/logout` answers `200 {ok:true}`. If the request fails (offline, a store error, a proxy
+  error page), the account screen says the device is **still signed in** and offers Sign out again; account-scoped
+  client state has already been removed either way.
 
 ## Abuse and failure handling
 

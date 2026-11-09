@@ -197,6 +197,19 @@ describe.skipIf(!URL)('PostgreSQL: driver profiles, ownership, session lifecycle
     expect(lo.headers.getSetCookie()[0]).toMatch(/Max-Age=0/);
     expect((await me(v2)).session).toBe('expired');
     expect((await rename(v2, 'Ghost')).status).toBe(401);
+    // a sign-out the store could not carry out is not confirmed: no ok, the cookie is kept and the session still works
+    const vf = await login('vic_sess');
+    await pool.query(`CREATE FUNCTION ${SCHEMA}.no_delete() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'store down'; END $$;
+      CREATE TRIGGER no_delete BEFORE DELETE ON sessions FOR EACH ROW EXECUTE FUNCTION ${SCHEMA}.no_delete()`);
+    try {
+      const bad = await req('/api/auth/logout', { cookie: vf, body: {} });
+      expect(bad.status).toBe(503);
+      expect(await bad.json()).toEqual({ error: 'unavailable' });
+      expect(bad.headers.getSetCookie()).toEqual([]);
+      expect((await me(vf)).session).toBe('active');
+    } finally { await pool.query(`DROP TRIGGER no_delete ON sessions; DROP FUNCTION ${SCHEMA}.no_delete()`); }
+    expect((await req('/api/auth/logout', { cookie: vf, body: {} })).status).toBe(200);
+    expect((await me(vf)).session).toBe('expired');
     // switching account in one browser: signing in as W on V's cookie ends V's session and starts a new one for W
     const v3 = await login('vic_sess');
     const sw = await req('/api/auth/login', { cookie: v3, body: { username: 'wes_sess', password: 'wes_sess password 1' } });
