@@ -1026,6 +1026,8 @@ export class Race {
     const s = this.s(c);
     c.v = 0; c.yawOff *= 0.8; c.wobble *= 0.9;
     if (!c.isPlayer || c.finished) c.throttle = 0; else c.throttle += ((input.up ? 1 : 0) - c.throttle) * Math.min(1, dt * 6);
+    // a Throttle held while turning in is still the arrival's: it has to be released before a press can ask to leave
+    if (c.isPlayer && c.mode === 'bayIn') c.upPrev = c.upPrev && input.up;
     if (c.mode === 'bayIn') {
       c.bayT = Math.min(1, c.bayT + dt / 0.45);
       c.u += T.gapS(s, bs) * Math.min(1, dt * 10);
