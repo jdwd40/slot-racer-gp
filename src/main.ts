@@ -1358,11 +1358,11 @@ function careerHtml(s: CareerStats): string {
   const tile = (v: number | string, label: string, id: string): string => `<div class="tile" data-k="${id}"><b class="mono">${v}</b><small>${label}</small></div>`;
   const bests = s.bests.length ? `<div class="tscroll"><table><thead><tr><th>${t('career.circuit')}</th><th>${t('career.mode')}</th><th>${t('res.best')}</th></tr></thead><tbody>${s.bests.map((b) => `<tr data-mode="${b.mode}"><td>${t(`track.${b.track}.name`)}${b.current ? '' : ` <small>(${t('career.oldLayout')})</small>`}</td><td>${careerMode(b.mode)}</td><td class="mono">${R.fmtMs(b.lapMs)} <small>${t('career.lapN', { n: b.lap })} · ${fmtDate(b.setAt)}</small></td></tr>`).join('')}</tbody></table></div>` : `<p><small>${t('career.noBests')}</small></p>`;
   const recent = s.recent.length ? `<div class="tscroll"><table><thead><tr><th>${t('career.date')}</th><th>${t('career.mode')}</th><th>${t('career.circuit')}</th><th>#</th><th>${t('champ.points')}</th></tr></thead><tbody>${s.recent.map((x) => `<tr data-race="${esc(x.raceId)}"><td>${fmtDate(x.finishedAt)}</td><td>${careerMode(x.mode)}${x.championship ? ` <small>R${x.championship.round}</small>` : ''}</td><td>${t(`track.${x.track}.name`)}</td><td>${x.status === 'dq' ? t('res.dq') : x.status === 'dnf' ? t('res.dnf') : `P${x.pos}/${x.field}`}</td><td class="mono">${x.points}</td></tr>`).join('')}</tbody></table></div>` : `<p><small>${t('career.noRaces')}</small></p>`;
-  return `<h3>${t('career.title')} · <span class="nm" id="a-career-name"></span></h3>
+  return `<h3>${t('career.title')} · <span class="nm">${esc(s.displayName)}</span></h3>
     <div class="tiles">${tile(c.points, t('career.points'), 'points')}${tile(c.wins, '🥇', 'wins')}${tile(c.seconds, '🥈', 'seconds')}${tile(c.thirds, '🥉', 'thirds')}${tile(c.races, t('career.races'), 'races')}</div>
     <p><small>${t('career.policy', { a: s.scoring.podium[0] ?? 0, b: s.scoring.podium[1] ?? 0, c: s.scoring.podium[2] ?? 0 })}</small></p>
     <h3>${t('career.bests')}</h3>${bests}
-    <h3>${t('career.recent')}</h3>${recent}`.replace('<span class="nm" id="a-career-name"></span>', `<span class="nm">${esc(s.displayName)}</span>`);
+    <h3>${t('career.recent')}</h3>${recent}`;
 }
 
 function onNetNack(m: Extract<ServerMsg, { t: 'nack' }>): void {
