@@ -45,7 +45,10 @@ describe('online gate (browser)', () => {
     const f = vi.fn(() => res(200, { ok: true, protocol: PROTOCOL_VERSION, version: 'abc' }));
     expect(await probeOnline(false, f as unknown as typeof fetch, 'https://slotrush.jdwd40.com')).toEqual({ state: 'off' });
     expect(f).not.toHaveBeenCalled();
-    expect(await probeOnline(true, f as unknown as typeof fetch, 'https://slotrush.jdwd40.com')).toEqual({ state: 'available', version: 'abc', wsUrl: 'wss://slotrush.jdwd40.com/ws' });
+    expect(await probeOnline(true, f as unknown as typeof fetch, 'https://slotrush.jdwd40.com')).toEqual({ state: 'available', version: 'abc', wsUrl: 'wss://slotrush.jdwd40.com/ws', accounts: false });
+    // sign-in is offered only when the server reports accounts and profiles (a database is attached)
+    expect(await probeOnline(true, (() => res(200, { ok: true, protocol: PROTOCOL_VERSION, version: 'abc', accounts: true, profiles: true })) as unknown as typeof fetch, 'https://x')).toMatchObject({ state: 'available', accounts: true });
+    expect(await probeOnline(true, (() => res(200, { ok: true, protocol: PROTOCOL_VERSION, version: 'abc', accounts: true })) as unknown as typeof fetch, 'https://x')).toMatchObject({ state: 'available', accounts: false });
     expect(f).toHaveBeenCalledWith('https://slotrush.jdwd40.com/api/health', expect.anything());
     expect(await probeOnline(true, (() => res(200, { ok: true, protocol: PROTOCOL_VERSION + 1 })) as unknown as typeof fetch, 'https://x')).toMatchObject({ state: 'unavailable', reason: expect.stringContaining('protocol') });
     expect(await probeOnline(true, (() => res(503, { ok: false })) as unknown as typeof fetch, 'https://x')).toMatchObject({ state: 'unavailable', reason: 'health 503' });

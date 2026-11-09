@@ -14,6 +14,7 @@ import { GhostRecorder, GhostPlayer } from './ghost';
 import { FixedStepper, STEP, MAX_GAP, Pose, blendPose } from './timing';
 import { PRESETS, PresetId, pixelRatioFor, savedPreset, savePreset } from './graphics';
 import { NetSession, loadSeat, refusalText, type ResultView, type Seat, type EndReason } from './net/session';
+import { AccountClient, type AuthError, type AuthState } from './net/account';
 import { SnapBuffer, applySnapshot, localEvent, mirrorRace } from './net/mirror';
 import { LIVERIES as NET_LIVERIES, LIMITS, type LiveryId, type PublicRoom, type ServerMsg } from './net/protocol';
 import type { RaceSnapshot, WireEvent } from './race';
@@ -170,7 +171,7 @@ app.appendChild(overlay);
 // (src/online.ts). Nothing online is offered on the menus before that check has passed.
 let online: OnlineStatus = ONLINE_ENABLED ? { state: 'checking' } : { state: 'off' };
 
-type Screen = 'title' | 'race' | 'pause' | 'results' | 'boards' | 'champ' | 'online' | 'lobby' | 'netwait' | 'netres';
+type Screen = 'title' | 'race' | 'pause' | 'results' | 'boards' | 'champ' | 'online' | 'lobby' | 'netwait' | 'netres' | 'account';
 let screen: Screen = 'title';
 let lbTrack = T.DEF.id;
 let lbKind: R.BoardKind = 'practice';
@@ -329,6 +330,7 @@ function showTitle(): void {
     ${onlineEntryHtml()}
   </div>`;
   overlay.querySelector('#o-online')?.addEventListener('click', () => { sfx.init(); showOnline(); });
+  overlay.querySelector('#o-account')?.addEventListener('click', () => { sfx.init(); showAccount(); });
   overlay.querySelector('#o-rejoin')?.addEventListener('click', () => { sfx.init(); const st = loadSeat(seatStore()); if (st) void netBegin((n) => n.resume(st)); });
   overlay.querySelectorAll<HTMLElement>('.track').forEach((b) => b.addEventListener('click', () => {
     sfx.init();
@@ -602,6 +604,7 @@ window.addEventListener('keydown', (e) => {
   }
   if (screen === 'boards' || screen === 'champ') { if (k === 'Escape') showTitle(); return; }
   if (screen === 'online') { if (k === 'Escape') { cancelNetBegin(); showTitle(); } return; }
+  if (screen === 'account') { if (k === 'Escape' && !accounts.busy) showTitle(); return; }
   if (screen === 'lobby' || screen === 'netres') return;
   // a shared race cannot be restarted from one browser
   if (k === 'KeyR') { if (!net) restartSession(); return; }
@@ -904,7 +907,7 @@ const hexc = (c: number): string => '#' + c.toString(16).padStart(6, '0');
 function onlineEntryHtml(): string {
   if (online.state === 'available') {
     const seat = loadSeat(seatStore());
-    return `<div class="row net-entry"><button class="cta" id="o-online">${t('net.online')}</button>${seat ? `<button class="cta alt" id="o-rejoin">${t('net.rejoin', { code: esc(seat.code) })}</button>` : ''}</div><p class="modes"><small>${t('net.onlineNote')}</small></p>`;
+    return `<div class="row net-entry"><button class="cta" id="o-online">${t('net.online')}</button>${seat ? `<button class="cta alt" id="o-rejoin">${t('net.rejoin', { code: esc(seat.code) })}</button>` : ''}${accountEntryHtml()}</div><p class="modes"><small>${t('net.onlineNote')}</small></p>`;
   }
   if (online.state === 'unavailable') return `<p class="modes net-off"><small>${t('net.unavailable')}</small></p>`;
   return '';
@@ -936,8 +939,15 @@ function showOnline(): void {
     <div class="row"><button class="cta alt" id="n-back">${t('boards.back')}</button></div>
   </div>`;
   const name = overlay.querySelector<HTMLInputElement>('#n-name')!;
-  name.value = netName() || (R.currentInitials() === R.ANON ? '' : R.currentInitials());
-  name.addEventListener('input', () => { try { localStorage.setItem(NAME_KEY, name.value); } catch { /* ignore */ } });
+  const signed = accounts.account;
+  if (signed) {
+    // a signed-in driver races under the saved profile name (the server uses it whatever is sent); it is edited in Account
+    name.value = signed.displayName; name.readOnly = true;
+    name.closest('label')!.insertAdjacentHTML('beforeend', `<small class="acct-note">${t('acct.nameFromProfile')}</small>`);
+  } else {
+    name.value = netName() || (R.currentInitials() === R.ANON ? '' : R.currentInitials());
+    name.addEventListener('input', () => { try { localStorage.setItem(NAME_KEY, name.value); } catch { /* ignore */ } });
+  }
   const code = overlay.querySelector<HTMLInputElement>('#n-code')!;
   code.value = hashCode();
   for (const f of [name, code]) f.addEventListener('keydown', (e) => { e.stopPropagation(); if (e.key === 'Enter') { f.blur(); if (f === code) join(); } });
@@ -947,6 +957,7 @@ function showOnline(): void {
     overlay.querySelectorAll('[data-nlivery]').forEach((x) => x.classList.toggle('sel', x === b));
   }));
   const who = (): string | null => {
+    if (accounts.account) return accounts.account.displayName;
     const n = name.value.trim();
     if (!n) { say(t('net.err.name')); name.focus(); return null; }
     return n;
@@ -962,6 +973,141 @@ function showOnline(): void {
   overlay.querySelector('#n-solo')!.addEventListener('click', () => { const n = who(); if (n) void netBegin((s) => s.create(n, 'solo', { track: T.DEF.id }, netLivery())); });
   overlay.querySelector('#n-back')!.addEventListener('click', () => { netNotice = ''; showTitle(); });
 }
+// ------------------------------------------------------------ accounts (docs/accounts.md)
+const localStore = (): Storage | null => { try { return window.localStorage; } catch { return null; } };
+/** Sign-in and driver profiles: offered only when the same-origin server passes its health check and has accounts. */
+const accounts = new AccountClient(fetch.bind(window), location.origin, localStore(), seatStore());
+let acctNotice = '';
+accounts.onChange = (a: AuthState) => {
+  if (a.state === 'guest' && a.expired) acctNotice = t('acct.expired');
+  if (screen === 'title' && !accounts.busy) showTitle();
+};
+const accountsOn = (): boolean => online.state === 'available' && online.accounts;
+
+function accountEntryHtml(): string {
+  if (!accountsOn()) return '';
+  const a = accounts.auth;
+  if (a.state === 'loading') return `<button class="cta alt" id="o-account" disabled aria-busy="true">${t('acct.loading')}</button>`;
+  if (a.state === 'unavailable') return `<button class="cta alt" id="o-account">${t('acct.unavailableShort')}</button>`;
+  // the display name is the driver's own public name; other people's text is always escaped
+  if (a.state === 'signed-in') return `<button class="cta alt" id="o-account" aria-label="${t('acct.profile')}">👤 <span class="nm">${esc(a.account.displayName)}</span></button>`;
+  return `<button class="cta alt" id="o-account">${t('acct.signIn')}</button>`;
+}
+
+function acctErrorText(e: AuthError, detail?: string): string {
+  if (e === 'invalid_name') return t(`acct.err.name.${detail === 'too_long' || detail === 'reserved' || detail === 'blank' ? detail : 'other'}`);
+  return t(`acct.err.${e}`);
+}
+
+/** Sign in, create an account, or (signed in) edit the driver name and sign out. Built for phone keyboards: real forms, Enter submits. */
+function showAccount(tab: 'login' | 'register' = 'login'): void {
+  if (!accountsOn() || net) { showTitle(); return; }
+  enter('account');
+  overlay.className = 'overlay show';
+  const a = accounts.auth;
+  const field = (id: string, label: string, attrs: string): string =>
+    `<label class="acct-field" for="${id}"><span class="lbl2">${t(label)}</span><input id="${id}" ${attrs} spellcheck="false" autocorrect="off"></label>`;
+  let body: string;
+  if (a.state === 'signed-in') {
+    body = `<h2>${t('acct.profile')}</h2>
+      <p class="acct-who">${t('acct.signedInAs')} <b class="mono" id="a-user"></b></p>
+      <p><small>${t('acct.privateNote')}</small></p>
+      <form id="a-form" class="acct-form" novalidate>
+        ${field('a-name', 'acct.driverName', `maxlength="${LIMITS.nameMax * 2}" autocomplete="nickname" enterkeyhint="done" required`)}
+        <small>${t('acct.nameRules', { n: LIMITS.nameMax })}</small>
+        <button class="cta" type="submit" id="a-submit">${t('acct.save')}</button>
+      </form>
+      <p id="a-msg" class="net-msg" role="status" aria-live="polite"></p>
+      <div class="row"><button class="cta alt" id="a-logout" type="button">${t('acct.signOut')}</button><button class="cta alt" id="a-back" type="button">${t('boards.back')}</button></div>`;
+  } else if (a.state === 'loading' || a.state === 'unavailable') {
+    body = `<h2>${t('acct.title')}</h2><p id="a-msg" class="net-msg" role="status" aria-live="polite">${t(a.state === 'loading' ? 'acct.loading' : 'acct.unavailable')}</p>
+      <div class="row">${a.state === 'unavailable' ? `<button class="cta" id="a-retry" type="button">${t('acct.retry')}</button>` : ''}<button class="cta alt" id="a-back" type="button">${t('boards.back')}</button></div>`;
+  } else {
+    const reg = tab === 'register';
+    body = `<h2>${t('acct.title')}</h2>
+      <div class="tabs" role="tablist"><button class="tab ${reg ? '' : 'sel'}" role="tab" aria-selected="${!reg}" id="a-tab-login" type="button">${t('acct.signIn')}</button><button class="tab ${reg ? 'sel' : ''}" role="tab" aria-selected="${reg}" id="a-tab-register" type="button">${t('acct.create')}</button></div>
+      <form id="a-form" class="acct-form" novalidate data-kind="${reg ? 'register' : 'login'}">
+        ${field('a-user-in', 'acct.username', `maxlength="20" autocomplete="username" autocapitalize="none" enterkeyhint="next" required`)}
+        ${reg ? `<small>${t('acct.userRules')}</small>` : ''}
+        ${field('a-pass', 'acct.password', `type="password" maxlength="128" autocomplete="${reg ? 'new-password' : 'current-password'}" enterkeyhint="${reg ? 'next' : 'go'}" required`)}
+        ${reg ? `<small>${t('acct.passRules')}</small>${field('a-name', 'acct.driverNameOpt', `maxlength="${LIMITS.nameMax * 2}" autocomplete="nickname" enterkeyhint="go"`)}<small>${t('acct.nameRules', { n: LIMITS.nameMax })}</small>` : ''}
+        <button class="cta" type="submit" id="a-submit">${t(reg ? 'acct.create' : 'acct.signIn')}</button>
+      </form>
+      <p id="a-msg" class="net-msg" role="status" aria-live="polite"></p>
+      <p><small>${t('acct.noEmail')}</small></p>
+      <div class="row"><button class="cta alt" id="a-back" type="button">${t('boards.back')}</button></div>`;
+  }
+  overlay.innerHTML = `<div class="card account">${body}</div>`;
+  const msg = overlay.querySelector<HTMLElement>('#a-msg')!;
+  msg.textContent = acctNotice || msg.textContent;
+  acctNotice = '';
+  const say2 = (text: string, kind: 'err' | 'ok' | 'busy'): void => { msg.textContent = text; msg.dataset.kind = kind; };
+  overlay.querySelector('#a-back')!.addEventListener('click', () => { if (!accounts.busy) showTitle(); });
+  overlay.querySelector('#a-retry')?.addEventListener('click', () => { void accounts.restore().then(() => showAccount()); showAccount(); });
+  overlay.querySelector('#a-tab-login')?.addEventListener('click', () => showAccount('login'));
+  overlay.querySelector('#a-tab-register')?.addEventListener('click', () => showAccount('register'));
+  const form = overlay.querySelector<HTMLFormElement>('#a-form');
+  const inputs = [...overlay.querySelectorAll<HTMLInputElement>('#a-form input')];
+  const setBusy = (on: boolean, label: string): void => {
+    overlay.querySelectorAll<HTMLButtonElement>('.account button').forEach((b) => { b.disabled = on; });
+    inputs.forEach((i) => { i.readOnly = on; });
+    form?.setAttribute('aria-busy', String(on));
+    if (on) say2(label, 'busy');
+  };
+  const invalid = (el: HTMLInputElement | null, text: string): void => { say2(text, 'err'); if (el) { el.setAttribute('aria-invalid', 'true'); el.focus(); } };
+  inputs.forEach((i) => i.addEventListener('input', () => i.removeAttribute('aria-invalid')));
+  if (a.state === 'signed-in') {
+    overlay.querySelector('#a-user')!.textContent = a.account.username;
+    const nameEl = overlay.querySelector<HTMLInputElement>('#a-name')!;
+    nameEl.value = a.account.displayName;
+    form!.addEventListener('submit', (e) => {
+      e.preventDefault();
+      if (accounts.busy) return;
+      setBusy(true, t('acct.saving'));
+      void accounts.rename(nameEl.value).then((r) => {
+        if (screen !== 'account') return;
+        if (r.ok) { showAccount(); say2(t('acct.saved'), 'ok'); return; }
+        if (r.error === 'session_expired' || r.error === 'signed_out') { showAccount(); return; }
+        setBusy(false, '');
+        invalid(nameEl, acctErrorText(r.error, r.detail));
+      });
+    });
+    overlay.querySelector('#a-logout')!.addEventListener('click', () => {
+      if (accounts.busy) return;
+      setBusy(true, t('acct.signingOut'));
+      void accounts.logout().then(() => { onIdentityChanged(); if (screen === 'account') { acctNotice = t('acct.signedOut'); showAccount(); } });
+    });
+  } else if (form) {
+    const reg = form.dataset.kind === 'register';
+    const user = overlay.querySelector<HTMLInputElement>('#a-user-in')!, pass = overlay.querySelector<HTMLInputElement>('#a-pass')!;
+    const nameEl = overlay.querySelector<HTMLInputElement>('#a-name');
+    user.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); pass.focus(); } });
+    if (reg) pass.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); nameEl?.focus(); } });
+    form.addEventListener('submit', (e) => {
+      e.preventDefault();
+      if (accounts.busy) return;
+      if (!/^[A-Za-z0-9_-]{3,20}$/.test(user.value.trim())) { invalid(user, t('acct.err.invalid_username')); return; }
+      const n = [...pass.value].length;
+      if (reg ? n < 10 || n > 128 : !n) { invalid(pass, t(reg ? 'acct.err.invalid_password' : 'acct.err.passwordRequired')); return; }
+      setBusy(true, t(reg ? 'acct.creating' : 'acct.signingIn'));
+      const go = reg ? accounts.register(user.value, pass.value, nameEl?.value ?? '') : accounts.login(user.value, pass.value);
+      void go.then((r) => {
+        if (screen !== 'account') return;
+        if (r.ok) { onIdentityChanged(); acctNotice = t(reg ? 'acct.created' : 'acct.welcome', { name: r.account.displayName }); showAccount(); return; }
+        setBusy(false, '');
+        pass.value = '';
+        invalid(r.error === 'invalid_name' ? nameEl : r.error === 'username_taken' || r.error === 'invalid_username' ? user : pass, acctErrorText(r.error, r.detail));
+      });
+    });
+    if (!('ontouchstart' in window)) user.focus({ preventScroll: true });
+  }
+}
+
+/** A sign-in, sign-out or switch: nothing this page holds for the previous identity survives it. */
+function onIdentityChanged(): void {
+  netResult = null; netNotice = '';
+}
+
 /** Give up a create, join or resume that has not been answered yet (Escape on the online menu while connecting). */
 function cancelNetBegin(): void {
   if (!net || net.conn !== 'connecting') return;
@@ -1331,10 +1477,17 @@ requestAnimationFrame(frame);
 
 // probed once the page has loaded, so scene building on a slow device cannot eat the probe's time budget
 if (ONLINE_ENABLED) {
-  const probe = (): void => { void probeOnline(true, fetch.bind(window), location.origin, 10000).then((st) => { online = st; if (screen === 'title') showTitle(); }); };
+  const probe = (): void => {
+    void probeOnline(true, fetch.bind(window), location.origin, 10000).then((st) => {
+      online = st;
+      if (screen === 'title') showTitle();
+      // session restoration only against a healthy server with accounts: a static or guest-only deploy never asks
+      if (st.state === 'available' && st.accounts) void accounts.restore();
+    });
+  };
   if (document.readyState === 'complete') setTimeout(probe, 0); else window.addEventListener('load', () => setTimeout(probe, 0), { once: true });
 }
 
 // debug/test hooks
 
-(window as unknown as { __game: unknown }).__game = { get online() { return online; }, get net() { return net && { conn: net.conn, me: net.me, room: net.room, result: net.result, reconnects: net.reconnects, tick: netTick, lagMs: netLag, buf: netBuf.stats, raceId: netRaceId, held: net.client.held, ctlSeq: net.client.ctlSeq, actSeq: net.client.actSeq }; }, netDrop: () => net?.client.ws?.close(4000, 'qa drop'), get race() { return race; }, T, R, PEN, DEF, PERSONAS, startRace, applyTrack, startSession, showTitle, showBoards, get mode() { return mode; }, get preset() { return preset; }, get touchMode() { return touchMode; }, setTouchMode, input, get audio() { return sfx.ctx?.state ?? null; }, get muted() { return sfx.muted; }, suspendAudio: () => sfx.ctx?.suspend(), get champ() { return champ; }, get bays() { return bayPaint; }, get ghost() { return ghost; }, get recorder() { return recorder; }, get pbMs() { return pbMs; }, get screen() { return screen; }, get view() { return camMode; }, get aspect() { return camera.aspect; }, get mini() { return { w: hud.mW, h: hud.mH }; }, stepper, advance: (sec: number) => { for (let t = 0; t < sec && simulating(); t += STEP) tick(STEP); }, setView: (m: 'follow' | 'full') => { camMode = m; }, zoom: (span: number) => { camMode = 'follow'; followSpan = span; curSpan = span; }, snapCam: () => { const p = me(); camLead.set(0, 0); camTarget.set(p.x, 0, -p.y); }, get marker() { return playerMarker; }, get localId() { return localId; }, get localSlot() { return localSlot; }, setLocalSlot: (n: number) => { localSlot = Math.max(0, Math.min(DRIVERS.length - 1, Math.floor(n))); }, get camTarget() { return { x: camTarget.x, z: camTarget.z }; }, get motorMix() { return motorMix; }, arrows: { lane: laneArrow, pit: pitArrow }, info: () => ({ calls: renderer.info.render.calls, tris: renderer.info.render.triangles, objects: world.root.children.length, frames: renderer.info.render.frame, geometries: renderer.info.memory.geometries, textures: renderer.info.memory.textures }) };
+(window as unknown as { __game: unknown }).__game = { get online() { return online; }, get auth() { return { state: accounts.auth.state, busy: accounts.busy, displayName: accounts.account?.displayName ?? null }; }, showAccount, get net() { return net && { conn: net.conn, me: net.me, room: net.room, result: net.result, reconnects: net.reconnects, tick: netTick, lagMs: netLag, buf: netBuf.stats, raceId: netRaceId, held: net.client.held, ctlSeq: net.client.ctlSeq, actSeq: net.client.actSeq }; }, netDrop: () => net?.client.ws?.close(4000, 'qa drop'), get race() { return race; }, T, R, PEN, DEF, PERSONAS, startRace, applyTrack, startSession, showTitle, showBoards, get mode() { return mode; }, get preset() { return preset; }, get touchMode() { return touchMode; }, setTouchMode, input, get audio() { return sfx.ctx?.state ?? null; }, get muted() { return sfx.muted; }, suspendAudio: () => sfx.ctx?.suspend(), get champ() { return champ; }, get bays() { return bayPaint; }, get ghost() { return ghost; }, get recorder() { return recorder; }, get pbMs() { return pbMs; }, get screen() { return screen; }, get view() { return camMode; }, get aspect() { return camera.aspect; }, get mini() { return { w: hud.mW, h: hud.mH }; }, stepper, advance: (sec: number) => { for (let t = 0; t < sec && simulating(); t += STEP) tick(STEP); }, setView: (m: 'follow' | 'full') => { camMode = m; }, zoom: (span: number) => { camMode = 'follow'; followSpan = span; curSpan = span; }, snapCam: () => { const p = me(); camLead.set(0, 0); camTarget.set(p.x, 0, -p.y); }, get marker() { return playerMarker; }, get localId() { return localId; }, get localSlot() { return localSlot; }, setLocalSlot: (n: number) => { localSlot = Math.max(0, Math.min(DRIVERS.length - 1, Math.floor(n))); }, get camTarget() { return { x: camTarget.x, z: camTarget.z }; }, get motorMix() { return motorMix; }, arrows: { lane: laneArrow, pit: pitArrow }, info: () => ({ calls: renderer.info.render.calls, tris: renderer.info.render.triangles, objects: world.root.children.length, frames: renderer.info.render.frame, geometries: renderer.info.memory.geometries, textures: renderer.info.memory.textures }) };
