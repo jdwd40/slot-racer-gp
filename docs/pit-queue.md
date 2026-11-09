@@ -1,6 +1,6 @@
 # Shared pit-lane queues, reservations and safe exits
 
-Cars arriving at an occupied stop-and-go box, a busy pit lane or a car leaving its bay now queue behind it with a real stopping gap. Nobody overlaps, passes through a stopped car or jumps lanes to get out of a queue. Automatic stopping at the box is now done by [automatic stop-and-go](auto-stop-go.md). Automatic stopping at the car's own bay is left for the next task. The player still brakes into the bay, and the AI drives itself as before.
+Cars arriving at an occupied stop-and-go box, a busy pit lane or a car leaving its bay now queue behind it with a real stopping gap. Nobody overlaps, passes through a stopped car or jumps lanes to get out of a queue. Automatic stopping at the box is now done by [automatic stop-and-go](auto-stop-go.md). Automatic stopping at the car's own bay is in [automatic bay visits](auto-bay.md). The AI drives itself as before, to its own bay.
 
 ## Ownership
 
@@ -9,7 +9,7 @@ Cars arriving at an occupied stop-and-go box, a busy pit lane or a car leaving i
 | Resource | Holder | Granted | Released (`why`) |
 | --- | --- | --- | --- |
 | Stop-and-go box (one) | `pit.box` | To the foremost car (by progress) that owes a stop and has not passed the box | Served (`done`), drove past or overshot it (`passed`), routing dropped (`route`), Defer (`defer`), de-slot, tow or finish (`terminal`), a car physically ahead now owes one too and the holder is not yet serving (`reorder`) |
-| Fuel bay *j* | `pit.bays[j]` | On the approach to a car that wants fuel: its own bay (`Car.bay`) if free, otherwise the first free bay ahead. Also when it stops in a bay (`enterBay`) or a tow lands in one | Back in the through lane after the bay exit (`done`), drove past it (`passed`), route dropped (`route`), Defer, de-slot, tow (`terminal`), stopped in a different bay (`moved`) |
+| Fuel bay *j* | `pit.bays[j]` | On the approach to a car that wants fuel, and only its own bay (`Car.bayHome`, see [automatic bay visits](auto-bay.md)) while that is free and still ahead. Also when it stops in its bay (`enterBay`) or a tow lands in it | Back in the through lane after the bay exit (`done`), drove past it (`passed`), route dropped (`route`), Defer, de-slot, tow (`terminal`), stopped in a different bay (`moved`) |
 | Bay merge *j* (bay → through lane) | `pit.merges[j]` | When the bay car's departure request is safe (below) | When the exit animation ends and the car is in the lane (`done`) |
 | Pit exit | `pit.exit` | To the foremost pit car within 4 m of the exit while the outside lane is clear | On crossing `PIT_OUT1` onto the road (`done`), towed (`terminal`), backed out of the window (`passed`), a car is now ahead of it (`reorder`) |
 
@@ -98,6 +98,6 @@ Every scenario asserts no overlapping cars on one path, no offences, and that ea
 
 ### Known limits
 
-- Automatic stopping at the car's own bay is not here (the box is: see [automatic stop-and-go](auto-stop-go.md)). A player who stops level with an occupied bay, inside a departing car's merge zone, keeps that car waiting until the player moves on. The player is never held there automatically.
+- Automatic stopping at the car's own bay is now in [automatic bay visits](auto-bay.md); with its bay occupied, the player waits `AUTO.bayWait` short of it, clear of the occupant's merge zone. A player driving the pit lane by hand (no fuel visit) who stops level with an occupied bay, inside a departing car's merge zone, still keeps that car waiting until the player moves on.
 - The assisted cap protects a road car only from the held pit queue ahead on the outside lane, not from ordinary racing traffic.
 - Two or more cars owing a stop and arriving together depends on the AI or the player stopping in the box. The queue itself only orders and holds them.

@@ -42,5 +42,7 @@ The build output is plain HTML/JS/CSS; serve the `dist/` folder from any static 
 - `docs/penalties.md` — service obligations: deferral, deadlines, disqualification, results and save compatibility.
 - `docs/pit-routing.md` — automatic outside-lane routing for pit visits.
 - `docs/pit-queue.md` — shared pit-lane queues, box and bay reservations, bay and pit-exit merges, and their evidence.
+- `docs/auto-stop-go.md` — automatic stop-and-go service and its evidence.
+- `docs/auto-bay.md` — race-long bay ownership, automatic fuel visits to the car's own bay, the fresh-Throttle departure, and their evidence.
 - `docs/validation.md` — repeatable browser checks, results and the remaining hardware validation.
 - `scripts/` — the browser check and its frame-time statistics.
