@@ -189,3 +189,20 @@ export function mergeStatic(root: THREE.Group): void {
     root.add(merged);
   }
 }
+
+/**
+ * Free the GPU resources of an Object3D subtree: every geometry, material and texture-valued material property
+ * (map, emissiveMap, alphaMap, ...), each disposed once however many meshes or materials share it.
+ * three.js does not dispose a material's textures with the material, so they are collected here.
+ * Anything in `keep` is still used outside the subtree and is left intact.
+ */
+export function disposeObject(root: THREE.Object3D, keep: ReadonlySet<object> = new Set()): void {
+  const geos = new Set<THREE.BufferGeometry>(), mats = new Set<THREE.Material>(), texs = new Set<THREE.Texture>();
+  root.traverse((o) => {
+    const m = o as THREE.Mesh;
+    if (m.geometry) geos.add(m.geometry);
+    if (m.material) for (const x of Array.isArray(m.material) ? m.material : [m.material]) mats.add(x);
+  });
+  for (const mat of mats) for (const v of Object.values(mat)) if ((v as THREE.Texture | null)?.isTexture) texs.add(v as THREE.Texture);
+  for (const r of [...geos, ...mats, ...texs]) if (!keep.has(r)) r.dispose();
+}

@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import * as T from './track';
-import { Y0, std, mesh, canvasTex, noise, ribbon, wall, boxAt, groupAt, figure, textTex, mergeStatic } from './gfx';
+import { Y0, std, mesh, canvasTex, noise, ribbon, wall, boxAt, groupAt, figure, textTex, mergeStatic, disposeObject } from './gfx';
 import { buildScenery, matTexture, tableTexture, TEAM_COLS } from './scenery';
 export { arrowGeometry, ribbon, wall, v3 } from './gfx';
 
@@ -615,16 +615,6 @@ export function buildWorld(): World {
 
 /** Free GPU resources of a world built by buildWorld (geometries, materials, textures). */
 export function disposeWorld(w: World): void {
-  const mats = new Set<THREE.Material>();
-  w.root.traverse((o) => {
-    const m = o as THREE.Mesh;
-    if (m.geometry) m.geometry.dispose();
-    if (m.material) (Array.isArray(m.material) ? m.material : [m.material]).forEach((x) => mats.add(x));
-  });
-  for (const m of mats) {
-    const sm = m as THREE.MeshStandardMaterial;
-    if (sm.map) sm.map.dispose();
-    m.dispose();
-  }
+  disposeObject(w.root);
   w.root.removeFromParent();
 }
