@@ -34,6 +34,7 @@ class Gate {
 }
 
 export interface Account { id: string; username: string; }
+export interface Profile { accountId: string; displayName: string; updatedAt: string | null; }
 
 export class Accounts {
   private gate = new Gate();
@@ -44,12 +45,22 @@ export class Accounts {
   hash(pw: string): Promise<string> { return this.gate.run(() => argon2.hash(pw, HASH_OPTS)); }
   private verifyHash(h: string, pw: string): Promise<boolean> { return this.gate.run(() => argon2.verify(h, pw)); }
 
-  /** Create an account. Returns null when the username is taken (case-insensitively). */
-  async register(username: string, password: string): Promise<Account | null> {
+  /**
+   * Create an account and its driver profile in one statement. Returns null when the username is taken (case-insensitively);
+   * a concurrent duplicate is settled by the unique key, never by a check-then-insert race. `displayName` must already be
+   * checked (checkDisplayName); it defaults to the username.
+   */
+  async register(username: string, password: string, displayName?: string): Promise<Account | null> {
     const h = await this.hash(password);
+    const key = username.toLowerCase();
     const r = await this.pool.query<{ id: string; username: string }>(
-      'INSERT INTO accounts (username, username_key, password_hash) VALUES ($1, $2, $3) ON CONFLICT (username_key) DO NOTHING RETURNING id::text, username',
-      [username.toLowerCase(), username.toLowerCase(), h],
+      `WITH a AS (
+         INSERT INTO accounts (username, username_key, password_hash) VALUES ($1, $1, $2) ON CONFLICT (username_key) DO NOTHING RETURNING id, username
+       ), p AS (
+         INSERT INTO profiles (account_id, display_name) SELECT id, $3 FROM a RETURNING account_id
+       )
+       SELECT a.id::text AS id, a.username FROM a JOIN p ON p.account_id = a.id`,
+      [key, h, displayName ?? key.slice(0, 16)],
     );
     return r.rows[0] ?? null;
   }
@@ -71,6 +82,28 @@ export class Accounts {
   async byId(id: string): Promise<Account | null> {
     const r = await this.pool.query<Account>('SELECT id::text, username FROM accounts WHERE id = $1', [id]);
     return r.rows[0] ?? null;
+  }
+
+  /**
+   * The driver profile of an account (the caller passes the id from the authenticated session, never from a request). An
+   * account without a profile row (made by a release before migration 002) reads as its username.
+   */
+  async profile(accountId: string): Promise<Profile | null> {
+    const r = await this.pool.query<{ id: string; display_name: string; updated_at: Date | null }>(
+      `SELECT a.id::text, COALESCE(p.display_name, left(a.username, 16)) AS display_name, p.updated_at
+       FROM accounts a LEFT JOIN profiles p ON p.account_id = a.id WHERE a.id = $1`, [accountId]);
+    const row = r.rows[0];
+    return row ? { accountId: row.id, displayName: row.display_name, updatedAt: row.updated_at?.toISOString() ?? null } : null;
+  }
+
+  /** Rename: only the display name changes. The account id, and anything recorded against it, stay as they are. */
+  async setDisplayName(accountId: string, displayName: string): Promise<Profile | null> {
+    const r = await this.pool.query<{ account_id: string; display_name: string; updated_at: Date }>(
+      `INSERT INTO profiles (account_id, display_name) SELECT id, $2 FROM accounts WHERE id = $1
+       ON CONFLICT (account_id) DO UPDATE SET display_name = EXCLUDED.display_name, updated_at = now()
+       RETURNING account_id::text, display_name, updated_at`, [accountId, displayName]);
+    const row = r.rows[0];
+    return row ? { accountId: row.account_id, displayName: row.display_name, updatedAt: row.updated_at.toISOString() } : null;
   }
 
   /** Owner-run recovery: set a new password and revoke every session of the account. False when no such account. */

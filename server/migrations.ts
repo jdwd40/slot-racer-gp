@@ -50,6 +50,23 @@ END $$;
 CREATE TRIGGER race_results_no_update BEFORE UPDATE ON race_results FOR EACH ROW EXECUTE FUNCTION race_results_immutable();
 `,
   },
+  {
+    // #24: driver profiles. One row per account, keyed by the stable account id, so a rename never makes a new identity and
+    // never detaches anything recorded against that id. Additive: a release that predates it ignores the table, and an
+    // account without a row (made by such a release) reads as its username until it saves a name.
+    id: '002_driver_profiles',
+    sql: `
+CREATE TABLE profiles (
+  account_id bigint PRIMARY KEY REFERENCES accounts(id) ON DELETE CASCADE,
+  display_name text NOT NULL,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now(),
+  -- the application normalizes (src/net/protocol.ts checkDisplayName); the database still refuses blank, padded or long names
+  CONSTRAINT profiles_display_name_shape CHECK (char_length(display_name) BETWEEN 1 AND 16 AND display_name = btrim(display_name) AND display_name !~ '[[:cntrl:]]')
+);
+INSERT INTO profiles (account_id, display_name) SELECT id, left(username, 16) FROM accounts;
+`,
+  },
 ];
 
 export const SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1].id;

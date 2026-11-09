@@ -5,7 +5,7 @@ import type { Duplex } from 'node:stream';
 import session from 'express-session';
 import { WebSocketServer, type WebSocket } from 'ws';
 import type { Pool } from 'pg';
-import { LIMITS, PROTOCOL_NAME, PROTOCOL_VERSION, RULES_VERSION, parseClientMessage, type ClientMsg, type ServerMsg } from '../src/net/protocol';
+import { LIMITS, PROTOCOL_NAME, PROTOCOL_VERSION, RULES_VERSION, checkDisplayName, parseClientMessage, type ClientMsg, type ServerMsg } from '../src/net/protocol';
 import { Accounts, Busy, checkPassword, checkUsername } from './accounts';
 import type { Config } from './config';
 import type { Logger } from './log';
@@ -35,16 +35,40 @@ interface SocketAuth { readonly sid: string; readonly account: SessionAccount; e
 const BODY_MAX = 4096;
 const MAX_RATE_STRIKES = 3;
 const SESSION_CHECK_MS = 10000;
+const COOKIE = 'srsid';
+
+/** A fixed-window counter per key (an address, a username, an account): at most `max` hits per `ms`. Memory is bounded. */
+export class RateWindow {
+  private m = new Map<string, { n: number; until: number }>();
+  constructor(private max: number, private ms: number, private now: () => number = () => Date.now()) {}
+  /** true when this key is already at its limit (nothing is counted) */
+  blocked(key: string): boolean { const f = this.m.get(key); return !!f && f.until > this.now() && f.n >= this.max; }
+  /** count one hit; false when the key was already at its limit */
+  hit(key: string): boolean {
+    const now = this.now();
+    if (this.m.size > 10000) for (const [k, v] of this.m) if (v.until <= now) this.m.delete(k);
+    const f = this.m.get(key);
+    if (!f || f.until <= now) { this.m.set(key, { n: 1, until: now + this.ms }); return true; }
+    if (f.n >= this.max) return false;
+    f.n++;
+    return true;
+  }
+  clear(key: string): void { this.m.delete(key); }
+}
 
 export function createApp({ cfg, log, manager, pool = null, sessionCheckMs = SESSION_CHECK_MS }: AppDeps): App {
   const started = Date.now();
   const accounts = pool ? new Accounts(pool) : null;
   const store = pool ? new PgSessionStore(pool) : null;
   const sessions = pool && store ? session({
-    store, secret: cfg.sessionSecret!, name: 'srsid', resave: false, saveUninitialized: false, rolling: false, proxy: true,
+    store, secret: cfg.sessionSecret!, name: COOKIE, resave: false, saveUninitialized: false, rolling: false, proxy: true,
     cookie: { httpOnly: true, sameSite: 'strict', secure: cfg.cookieSecure, maxAge: 30 * 86400000, path: '/' },
   }) : null;
   const perIp = new Map<string, number>();
+  // registration per address, failed sign-ins per username (on top of the per-address failure limit), renames per account
+  const registrations = new RateWindow(10, 3600000, manager.now);
+  const userFails = new RateWindow(10, 15 * 60000, manager.now);
+  const renames = new RateWindow(10, 60000, manager.now);
   let conns = 0;
   /** every open signed-in socket, so a session that ends also ends the sign-in of the sockets opened with it */
   const signedIn = new Set<SocketAuth>();
@@ -90,7 +114,7 @@ export function createApp({ cfg, log, manager, pool = null, sessionCheckMs = SES
       status: ok ? 200 : 503,
       body: {
         ok, service: 'slotrush-server', version: cfg.version, protocol: PROTOCOL_VERSION, rules: RULES_VERSION, schema: SCHEMA_VERSION,
-        accounts: !!accounts, db, uptimeS: Math.round((Date.now() - started) / 1000),
+        accounts: !!accounts, profiles: !!accounts, db, uptimeS: Math.round((Date.now() - started) / 1000),
         rooms: st.rooms, roomCap: cfg.roomCap, racing: st.racing, humans: st.humans, connections: conns, maxConnections: cfg.maxConnections,
         tickMaxMs: Math.round(manager.tickMaxMs * 10) / 10, rssMb: Math.round(mem.rss / 1048576), heapMb: Math.round(mem.heapUsed / 1048576),
       },
@@ -103,6 +127,7 @@ export function createApp({ cfg, log, manager, pool = null, sessionCheckMs = SES
       if (req.method === 'GET' && url === '/api/health') { const h = await health(); json(res, h.status, h.body); return; }
       if (req.method === 'GET' && url === '/api/version') { json(res, 200, { service: 'slotrush-server', version: cfg.version, protocol: PROTOCOL_VERSION, rules: RULES_VERSION, schema: SCHEMA_VERSION }); return; }
       if (url.startsWith('/api/auth/')) { await auth(req, res, url.slice('/api/auth/'.length)); return; }
+      if (url === '/api/profile') { await profile(req, res); return; }
       json(res, 404, { error: 'not_found' });
     } catch (e) {
       log.error('http.error', { url, error: String(e) });
@@ -110,50 +135,129 @@ export function createApp({ cfg, log, manager, pool = null, sessionCheckMs = SES
     }
   }
 
+  /** The session cookie came with the request but names no live session: it expired, was revoked or was signed out. */
+  const staleCookie = (req: Req): boolean => !req.session?.account && new RegExp(`(?:^|;\\s*)${COOKIE}=`).test(String(req.headers.cookie ?? ''));
+  const clearCookie = (res: ServerResponse): void => {
+    res.setHeader('set-cookie', `${COOKIE}=; Path=/; Max-Age=0; HttpOnly; SameSite=Strict${cfg.cookieSecure ? '; Secure' : ''}`);
+  };
+  /** A state-changing request: same origin and JSON only, so a cross-site form or script can do nothing with the cookie. */
+  const writeGuard = (req: Req, res: ServerResponse): boolean => {
+    if (req.method !== 'POST') { json(res, 405, { error: 'method' }); return false; }
+    if (!originOk(req)) { json(res, 403, { error: 'origin' }); return false; }
+    if (!String(req.headers['content-type'] ?? '').startsWith('application/json')) { json(res, 415, { error: 'content_type' }); return false; }
+    return true;
+  };
+  const body = async (req: Req, res: ServerResponse, allowed: readonly string[]): Promise<Record<string, unknown> | null> => {
+    let b: unknown;
+    try { b = await readBody(req); } catch (e) { json(res, (e as Error).message === 'too_large' ? 413 : 400, { error: (e as Error).message }); return null; }
+    // unknown fields (an accountId, an email...) are refused, never ignored: identity only ever comes from the session
+    if (!b || typeof b !== 'object' || Array.isArray(b) || Object.keys(b).some((k) => !allowed.includes(k))) { json(res, 400, { error: 'malformed' }); return null; }
+    return b as Record<string, unknown>;
+  };
+  const publicProfile = (p: { displayName: string; updatedAt: string | null }) => ({ displayName: p.displayName, updatedAt: p.updatedAt });
+
   async function auth(req: Req, res: ServerResponse, what: string): Promise<void> {
     if (!accounts) { json(res, 503, { error: 'accounts_unavailable' }); return; }
     await runSession(req, res);
     const s = req.session!;
-    if (req.method === 'GET' && what === 'me') { json(res, 200, { account: s.account ?? null }); return; }
-    if (req.method !== 'POST') { json(res, 405, { error: 'method' }); return; }
-    // same-origin only: a cross-site form or script cannot sign anybody in or out
-    if (!originOk(req)) { json(res, 403, { error: 'origin' }); return; }
-    if (!String(req.headers['content-type'] ?? '').startsWith('application/json')) { json(res, 415, { error: 'content_type' }); return; }
+    if (req.method === 'GET' && what === 'me') {
+      if (!s.account) {
+        const expired = staleCookie(req);
+        if (expired) clearCookie(res);
+        json(res, 200, { account: null, session: expired ? 'expired' : 'none' });
+        return;
+      }
+      const p = await accounts.profile(s.account.id);
+      if (!p) {
+        // the account was deleted under a live session: end it
+        const sid = req.sessionID;
+        await new Promise<void>((r) => s.destroy(() => r()));
+        endSession(sid); clearCookie(res);
+        json(res, 200, { account: null, session: 'expired' });
+        return;
+      }
+      json(res, 200, { account: { id: s.account.id, username: s.account.username }, profile: publicProfile(p), session: 'active' });
+      return;
+    }
+    if (!writeGuard(req, res)) return;
     if (what === 'logout') {
       const sid = req.sessionID;
       await new Promise<void>((r) => s.destroy(() => r()));
       endSession(sid);
+      clearCookie(res);
       json(res, 200, { ok: true });
       return;
     }
     if (what !== 'register' && what !== 'login') { json(res, 404, { error: 'not_found' }); return; }
-    let body: Record<string, unknown>;
-    try { body = (await readBody(req)) as Record<string, unknown>; } catch (e) { json(res, (e as Error).message === 'too_large' ? 413 : 400, { error: (e as Error).message }); return; }
-    if (!body || typeof body !== 'object' || Object.keys(body).some((k) => k !== 'username' && k !== 'password')) { json(res, 400, { error: 'malformed' }); return; }
-    const bad = checkUsername(body.username) ?? checkPassword(body.password);
+    const b = await body(req, res, what === 'register' ? ['username', 'password', 'displayName'] : ['username', 'password']);
+    if (!b) return;
+    const bad = checkUsername(b.username) ?? checkPassword(b.password);
     if (bad) { json(res, 400, { error: 'invalid', detail: bad }); return; }
+    let displayName: string | undefined;
+    if (what === 'register' && b.displayName !== undefined && b.displayName !== '') {
+      const d = checkDisplayName(b.displayName);
+      if (!d.ok) { json(res, 400, { error: 'invalid_name', detail: d.error }); return; }
+      displayName = d.name;
+    }
     const ip = clientIp(req);
-    if (manager.limited(`auth:${ip}`)) { json(res, 429, { error: 'rate' }); return; }
+    const ukey = (b.username as string).toLowerCase();
+    if (manager.limited(`auth:${ip}`) || (what === 'login' && userFails.blocked(ukey))) { json(res, 429, { error: 'rate' }); return; }
+    if (what === 'register' && !registrations.hit(ip)) { json(res, 429, { error: 'rate' }); return; }
     let acct;
     try {
-      acct = what === 'register' ? await accounts.register(body.username as string, body.password as string) : await accounts.login(body.username as string, body.password as string);
+      acct = what === 'register' ? await accounts.register(b.username as string, b.password as string, displayName) : await accounts.login(b.username as string, b.password as string);
     } catch (e) {
       if (e instanceof Busy) { json(res, 503, { error: 'busy' }); return; }
       throw e;
     }
     if (!acct) {
       noteAuthFail(ip);
+      if (what === 'login') userFails.hit(ukey);
       json(res, what === 'register' ? 409 : 401, { error: what === 'register' ? 'username_taken' : 'invalid_credentials' });
       return;
     }
+    if (what === 'login') userFails.clear(ukey);
     // a fresh session ID on every sign-in (no session fixation); the replaced session, and its sockets' sign-in, end
     const oldSid = req.sessionID;
     await new Promise<void>((r) => s.regenerate(() => r()));
     endSession(oldSid);
     req.session!.account = { id: acct.id, username: acct.username };
     await new Promise<void>((r) => req.session!.save(() => r()));
+    const p = await accounts.profile(acct.id);
     log.info(what === 'register' ? 'account.register' : 'account.login', { account: acct.id });
-    json(res, what === 'register' ? 201 : 200, { account: { id: acct.id, username: acct.username } });
+    json(res, what === 'register' ? 201 : 200, { account: { id: acct.id, username: acct.username }, profile: p ? publicProfile(p) : null, session: 'active' });
+  }
+
+  /**
+   * The signed-in driver's own profile. The account is always the session's: a request cannot name another account (an
+   * `accountId` field is refused as malformed), so nobody can read or change somebody else's profile.
+   */
+  async function profile(req: Req, res: ServerResponse): Promise<void> {
+    if (!accounts) { json(res, 503, { error: 'accounts_unavailable' }); return; }
+    if (req.method !== 'GET' && !writeGuard(req, res)) return;
+    await runSession(req, res);
+    const acct = req.session?.account;
+    if (!acct) {
+      const expired = staleCookie(req);
+      if (expired) clearCookie(res);
+      json(res, 401, { error: expired ? 'session_expired' : 'signed_out' });
+      return;
+    }
+    if (req.method === 'GET') {
+      const p = await accounts.profile(acct.id);
+      if (!p) { json(res, 401, { error: 'session_expired' }); return; }
+      json(res, 200, { profile: publicProfile(p) });
+      return;
+    }
+    const b = await body(req, res, ['displayName']);
+    if (!b) return;
+    const d = checkDisplayName(b.displayName);
+    if (!d.ok) { json(res, 400, { error: 'invalid_name', detail: d.error }); return; }
+    if (!renames.hit(acct.id)) { json(res, 429, { error: 'rate' }); return; }
+    const p = await accounts.setDisplayName(acct.id, d.name);
+    if (!p) { json(res, 401, { error: 'session_expired' }); return; }
+    log.info('profile.rename', { account: acct.id });
+    json(res, 200, { profile: publicProfile(p) });
   }
   const noteAuthFail = (ip: string): void => manager.noteFailure(`auth:${ip}`);
 
@@ -307,11 +411,15 @@ export function createApp({ cfg, log, manager, pool = null, sessionCheckMs = SES
         if (!auth) { enter(m, null); return; }
         // a signed-in entry binds the seat to the account: the session must still be live right now
         const a = auth;
-        return store!.live([{ sid: a.sid, accountId: a.account.id }]).then((live) => {
+        // and an account seat is named from the saved profile, never from the name the client sent
+        return store!.live([{ sid: a.sid, accountId: a.account.id }]).then(async (live) => {
           if (ws.readyState !== ws.OPEN || auth !== a) return;
           if (!live.has(a.sid)) { send({ t: 'nack', ref: m.t, code: 'expired', detail: 'session' }); a.end(); return; }
-          enter(m, a.account.id);
-        }, (e: unknown) => {
+          const prof = m.t === 'resume' ? null : await accounts!.profile(a.account.id);
+          if (ws.readyState !== ws.OPEN || auth !== a) return;
+          if (m.t !== 'resume' && !prof) { send({ t: 'nack', ref: m.t, code: 'expired', detail: 'session' }); a.end(); return; }
+          enter(m, a.account.id, prof?.displayName);
+        }).then(undefined, (e: unknown) => {
           log.warn('ws.session_check_failed', { error: String(e) });
           send({ t: 'nack', ref: m.t, code: 'unavailable', detail: 'sign-in check failed, try again' });
         });
@@ -322,11 +430,12 @@ export function createApp({ cfg, log, manager, pool = null, sessionCheckMs = SES
       if (m.t === 'leave') { room = null; pid = null; }
     }
 
-    function enter(m: Extract<ClientMsg, { t: 'create' | 'join' | 'resume' }>, accountId: string | null): void {
+    function enter(m: Extract<ClientMsg, { t: 'create' | 'join' | 'resume' }>, accountId: string | null, accountName?: string): void {
+      const name = m.t === 'resume' ? '' : accountName ?? m.name;
       const r = m.t === 'create'
-        ? manager.create(peer, { name: m.name, livery: m.livery, accountId, mode: m.mode, settings: m.settings, championship: m.championship })
+        ? manager.create(peer, { name, livery: m.livery, accountId, mode: m.mode, settings: m.settings, championship: m.championship })
         : m.t === 'join'
-          ? manager.join(peer, ip, { code: m.code, name: m.name, livery: m.livery, accountId })
+          ? manager.join(peer, ip, { code: m.code, name, livery: m.livery, accountId })
           : manager.resume(peer, ip, m.room, m.participant, m.token, accountId);
       if (!r.ok) { send({ t: 'nack', ref: m.t, code: r.code, ...(r.detail ? { detail: r.detail } : {}) }); return; }
       bind(r, m.t === 'resume');

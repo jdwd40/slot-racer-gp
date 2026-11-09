@@ -51,6 +51,6 @@ else if (cmd === 'stop') { if (existsSync(DATA)) run('pg_ctl', ['-D', DATA, '-m'
 else if (cmd === 'env') console.log(URL);
 else if (cmd === 'test') {
   start();
-  const r = spawnSync('npx', ['vitest', 'run', 'test/server/db.test.ts'], { stdio: 'inherit', env: { ...process.env, SLOTRUSH_TEST_DATABASE_URL: URL } });
+  const r = spawnSync('npx', ['vitest', 'run', 'test/server/db.test.ts', 'test/server/profiles.db.test.ts'], { stdio: 'inherit', env: { ...process.env, SLOTRUSH_TEST_DATABASE_URL: URL } });
   process.exit(r.status ?? 1);
 } else { console.error('usage: local-pg.mjs start|stop|env|test'); process.exit(2); }

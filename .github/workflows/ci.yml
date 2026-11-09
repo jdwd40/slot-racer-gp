@@ -96,10 +96,10 @@ jobs:
       - name: Install dependencies from the lockfile
         run: npm ci
 
-      - name: Database tests (migrations, accounts, sessions, admin reset, results) on PostgreSQL 17
+      - name: Database tests (migrations, accounts, profiles, sessions, admin reset, results) on PostgreSQL 17
         env:
           SLOTRUSH_TEST_DATABASE_URL: postgres://slotrush_test:slotrush_test_pw@127.0.0.1:5432/slotrush_test
-        run: npx vitest run test/server/db.test.ts
+        run: npx vitest run test/server/db.test.ts test/server/profiles.db.test.ts
 
       - name: Build the server bundle
         env:
