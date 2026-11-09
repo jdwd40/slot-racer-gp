@@ -107,6 +107,19 @@ files only: missing assets return 404, not the HTML entrypoint. Hashed assets ge
 one-year caching; HTML, favicon and release metadata revalidate. HTTP keeps an ACME
 webroot at `/var/www/html`, redirecting other requests to HTTPS once TLS is enabled.
 
+The site file sets its own compression in its TLS `server` block. The host's shared
+`http {}` config has `gzip on;` but leaves `gzip_types` commented out, so before this
+only `text/html` was compressed. Both site files (static and online) add
+`gzip_types text/css application/javascript application/json image/svg+xml`,
+`gzip_vary on`, `gzip_comp_level 5` and `gzip_min_length 1024`. Clients that do not
+send `Accept-Encoding: gzip` still get the uncompressed bytes. The online file turns
+gzip off in `location /api/` and `location = /ws`, and stops the upstream compressing
+too (it strips `Accept-Encoding` and `Sec-WebSocket-Extensions`). Responses that carry
+cookies or secrets are therefore never compressed, which avoids BREACH-style leaks.
+`deploy/test_nginx.py` checks all of this. The shared `http {}` config and other sites
+are not changed. To apply it after a merge, back up the site file, copy the new one
+over it, run `sudo nginx -t`, and reload only if validation succeeds.
+
 After public DNS resolves to this VPS, an administrator can issue just this site's
 certificate using the existing ACME account, without editing shared vhosts:
 
