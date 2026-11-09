@@ -251,8 +251,10 @@ export function createApp({ cfg, log, manager, pool = null, sessionCheckMs = SES
       json(res, 200, { profile: publicProfile(p) });
       return;
     }
-    const b = await body(req, res, ['displayName']);
+    const b = await body(req, res, ['displayName', 'expectAccount']);
     if (!b) return;
+    // the form was opened for another identity (signed out and in again in another tab): never rename this one from it
+    if (b.expectAccount !== undefined && b.expectAccount !== acct.id) { json(res, 409, { error: 'identity_changed' }); return; }
     const d = checkDisplayName(b.displayName);
     if (!d.ok) { json(res, 400, { error: 'invalid_name', detail: d.error }); return; }
     if (!renames.hit(acct.id)) { json(res, 429, { error: 'rate' }); return; }
@@ -410,6 +412,11 @@ export function createApp({ cfg, log, manager, pool = null, sessionCheckMs = SES
       if (room && room.state === 'closed') { room = null; pid = null; }
       if (m.t === 'create' || m.t === 'join' || m.t === 'resume') {
         if (room) { send({ t: 'nack', ref: m.t, code: 'already_in_room' }); return; }
+        // the page shows one identity and this socket holds another (its session expired, was reset or replaced before the
+        // socket opened): refuse, so a driver the page shows signed in never silently races as a guest, or the reverse
+        if (m.t !== 'resume' && m.expectAccount !== undefined && m.expectAccount !== (auth?.account.id ?? '')) {
+          send({ t: 'nack', ref: m.t, code: 'expired', detail: 'session' }); return;
+        }
         if (!auth) { enter(m, null); return; }
         // a signed-in entry binds the seat to the account: the session must still be live right now
         const a = auth;

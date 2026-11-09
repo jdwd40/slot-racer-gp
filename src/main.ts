@@ -966,11 +966,11 @@ function showOnline(): void {
     const n = who(); if (!n) return;
     const c = code.value.trim().toUpperCase();
     if (c.length !== LIMITS.codeLength) { say(t('net.err.code')); code.focus(); return; }
-    void netBegin((s) => s.join(c, n, netLivery()));
+    void netBegin((s) => s.join(c, n, netLivery(), accounts.expected));
   };
-  overlay.querySelector('#n-create')!.addEventListener('click', () => { const n = who(); if (n) void netBegin((s) => s.create(n, 'multiplayer', { track: T.DEF.id, aiFill: overlay.querySelector<HTMLInputElement>('#n-ai')!.checked }, netLivery())); });
+  overlay.querySelector('#n-create')!.addEventListener('click', () => { const n = who(); if (n) void netBegin((s) => s.create(n, 'multiplayer', { track: T.DEF.id, aiFill: overlay.querySelector<HTMLInputElement>('#n-ai')!.checked }, netLivery(), accounts.expected)); });
   overlay.querySelector('#n-join')!.addEventListener('click', join);
-  overlay.querySelector('#n-solo')!.addEventListener('click', () => { const n = who(); if (n) void netBegin((s) => s.create(n, 'solo', { track: T.DEF.id }, netLivery())); });
+  overlay.querySelector('#n-solo')!.addEventListener('click', () => { const n = who(); if (n) void netBegin((s) => s.create(n, 'solo', { track: T.DEF.id }, netLivery(), accounts.expected)); });
   overlay.querySelector('#n-back')!.addEventListener('click', () => { netNotice = ''; showTitle(); });
 }
 // ------------------------------------------------------------ accounts (docs/accounts.md)
@@ -983,6 +983,17 @@ accounts.onChange = (a: AuthState) => {
   if (screen === 'title' && !accounts.busy) showTitle();
 };
 const accountsOn = (): boolean => online.state === 'available' && online.accounts;
+// another tab signed in, out or switched: the cookie is shared, so this tab follows rather than keep showing the old identity
+window.addEventListener('storage', (e) => {
+  if (e.storageArea && e.storageArea !== localStore()) return;
+  const before = accounts.expected;
+  void accounts.syncFromOtherTab(e.key).then((a) => {
+    if (!a || accounts.expected === before) return;
+    onIdentityChanged();
+    if (screen === 'account') showAccount();
+    else if (screen === 'online' && !net) showOnline();
+  });
+});
 
 function accountEntryHtml(): string {
   if (!accountsOn()) return '';
@@ -1068,6 +1079,8 @@ function showAccount(tab: 'login' | 'register' = 'login'): void {
         if (screen !== 'account') return;
         if (r.ok) { showAccount(); say2(t('acct.saved'), 'ok'); return; }
         if (r.error === 'session_expired' || r.error === 'signed_out') { showAccount(); return; }
+        // signed out and in again in another tab: nothing was saved, and the screen now shows who this browser really is
+        if (r.error === 'identity_changed') { onIdentityChanged(); acctNotice = t('acct.err.identity_changed'); showAccount(); return; }
         setBusy(false, '');
         invalid(nameEl, acctErrorText(r.error, r.detail));
       });
@@ -1155,10 +1168,12 @@ async function netBegin(req: (s: NetSession) => Promise<{ ok: true } | { ok: fal
   if (!r.ok) {
     net = null;
     mode = 'race';
-    // the sign-in this browser raced under has ended (signed out elsewhere, expired, reset): find out who it is now
-    if (r.code === 'expired' && r.detail === 'session' && accounts.account) void accounts.restore().then(() => { if (screen === 'online') showOnline(); });
+    // the sign-in this page shows is not the browser's any more (expired, signed out elsewhere, reset, switched in another
+    // tab): nothing was entered; find out who this browser is now and let the driver choose again
+    const session = r.code === 'expired' && r.detail === 'session';
+    if (session && accountsOn()) void accounts.restore().then(() => { if (screen === 'online' && !net) showOnline(); });
     showOnline();
-    say(t(refusalText(r.code)) + (r.detail && r.code === 'not_ready' ? ` (${r.detail})` : ''));
+    say(session ? t('net.err.session') : t(refusalText(r.code)) + (r.detail && r.code === 'not_ready' ? ` (${r.detail})` : ''));
     return;
   }
   netNotice = '';

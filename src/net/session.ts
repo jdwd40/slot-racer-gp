@@ -72,11 +72,12 @@ export class NetSession {
   private setConn(c: Conn): void { if (this.conn !== c) { this.conn = c; this.hooks.conn?.(c); } }
 
   /** Create a room (any mode), join one by code, or resume a stored seat. */
-  create(name: string, mode: Mode, settings: Partial<RoomSettings>, livery?: LiveryId): Promise<Outcome> {
-    return this.begin({ t: 'create', name, mode, settings, ...(livery ? { livery } : {}) });
+  /** `expectAccount`: who the page shows ('' = guest, an account id when signed in); a socket signed in otherwise is refused. */
+  create(name: string, mode: Mode, settings: Partial<RoomSettings>, livery?: LiveryId, expectAccount?: string): Promise<Outcome> {
+    return this.begin({ t: 'create', name, mode, settings, ...(livery ? { livery } : {}), ...(expectAccount !== undefined ? { expectAccount } : {}) });
   }
-  join(code: string, name: string, livery?: LiveryId): Promise<Outcome> {
-    return this.begin({ t: 'join', code: code.trim().toUpperCase(), name, ...(livery ? { livery } : {}) });
+  join(code: string, name: string, livery?: LiveryId, expectAccount?: string): Promise<Outcome> {
+    return this.begin({ t: 'join', code: code.trim().toUpperCase(), name, ...(livery ? { livery } : {}), ...(expectAccount !== undefined ? { expectAccount } : {}) });
   }
   resume(seat: Seat): Promise<Outcome> { this.seat = seat; return this.begin({ t: 'resume', room: seat.room, participant: seat.participant, token: seat.token }); }
 

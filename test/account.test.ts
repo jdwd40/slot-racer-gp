@@ -74,6 +74,7 @@ function fakeServer() {
     '/api/profile': (b, c) => {
       const id = who(c);
       if (!id) return { status: 401, body: { error: c ? 'session_expired' : 'signed_out' } };
+      if (b!.expectAccount !== undefined && b!.expectAccount !== id) return { status: 409, body: { error: 'identity_changed' } };
       const u = [...users.values()].find((x) => x.id === id)!;
       u.name = String(b!.displayName);
       return { status: 200, body: { profile: { displayName: u.name, updatedAt: 'now' } } };
@@ -141,7 +142,8 @@ describe('AccountClient', () => {
     const r = await c.register('dee_1', 'dee password 1', 'Dee');
     const id = r.ok ? r.account.id : '';
     expect(await c.rename('  Dee   Two ')).toEqual({ ok: true, account: { id, username: 'dee_1', displayName: 'Dee Two' } });
-    expect(srv.calls.at(-1)).toEqual({ path: '/api/profile', body: { displayName: 'Dee Two' } });   // only the name: no account id is ever sent
+    // the name, and the account the form was opened for (an expectation the server checks, never an identity it uses)
+    expect(srv.calls.at(-1)).toEqual({ path: '/api/profile', body: { displayName: 'Dee Two', expectAccount: id } });
     expect(await c.rename('')).toEqual({ ok: false, error: 'invalid_name', detail: 'blank' });
     local.setItem(accountKey(id, 'pending'), '[{"race":"r1"}]');
     session.setItem('srgp.seat', '{"room":"r"}');
@@ -225,6 +227,39 @@ describe('AccountClient', () => {
     expect(local.getItem(accountKey(aid, 'pending'))).toBe('[3]');
     keepsSaves();
     void srv;
+  });
+
+  it('two tabs: a profile form opened for one account never renames the next one, and the stale tab follows the switch', async () => {
+    const srv = fakeServer();
+    const local = new MemStore(), s1 = new MemStore(), s2 = new MemStore();
+    const tab1 = new AccountClient(srv.fetchFn, 'https://slotrush.example', local, s1);
+    const tab2 = new AccountClient(srv.fetchFn, 'https://slotrush.example', local, s2);   // same browser: same cookie, same localStorage
+    await tab1.register('alice_1', 'alice password 1', 'Alice');
+    await tab2.restore();
+    await tab2.logout();
+    await tab2.register('bob_1', 'bob password 1', 'Bob');
+    const bob = tab2.account!;
+    s1.setItem('srgp.seat', '{"room":"alice"}');   // tab 1's own seat, taken as Alice
+    expect(tab1.account).toMatchObject({ username: 'alice_1' });   // tab 1 has not heard yet
+    expect(tab1.expected).toBe('1');
+    // saving the name on Alice's open form: refused, nothing renamed, and tab 1 now shows who the browser really is
+    expect(await tab1.rename('Hacked Name')).toEqual({ ok: false, error: 'identity_changed' });
+    expect([...srv.users.values()].map((u) => u.name).sort()).toEqual(['Alice', 'Bob']);
+    expect(tab1.account).toEqual(bob);
+    expect(tab1.busy).toBe(false);
+    expect(s1.getItem('srgp.seat')).toBe(null);   // Alice's seat does not pass to Bob
+    // the storage event from another tab: tab 1 asks the server rather than keep showing the old identity
+    await tab2.logout();
+    expect(await tab1.syncFromOtherTab('srgp.netName')).toBe(null);   // unrelated keys are ignored
+    expect(tab1.account).toEqual(bob);
+    expect(await tab1.syncFromOtherTab(OWNER_KEY)).toEqual({ state: 'guest', expired: false });   // the sign-out cleared the shared cookie
+    expect(tab1.expected).toBe('');
+    await tab2.login('alice_1', 'alice password 1');
+    s1.setItem('srgp.seat', '{"room":"guest"}');
+    expect(await tab1.syncFromOtherTab(null)).toMatchObject({ state: 'signed-in', account: { username: 'alice_1' } });
+    expect(s1.getItem('srgp.seat')).toBe(null);   // a guest seat is not carried into an account either
+    // the same account renames normally
+    expect(await tab1.rename('Alice Two')).toMatchObject({ ok: true, account: { displayName: 'Alice Two' } });
   });
 
   it('clearAccountState removes only account-scoped keys', () => {

@@ -16,6 +16,8 @@ describe('protocol parser', () => {
     expect(parseClientMessage(JSON.stringify({ t: 'ctl', seq: 3, up: true, down: false }))).toMatchObject({ ok: true });
     expect(parseClientMessage(JSON.stringify({ t: 'act', seq: 1, type: 'defer' }))).toMatchObject({ ok: true });
     expect(parseClientMessage(JSON.stringify({ t: 'create', name: 'A', mode: 'championship', settings: { track: 'circuit-2' }, championship: { id: 'c', round: 3 } }))).toMatchObject({ ok: true });
+    expect(parseClientMessage(JSON.stringify({ t: 'join', code: 'ABCDEF', name: 'A', expectAccount: '' }))).toMatchObject({ ok: true });
+    expect(parseClientMessage(JSON.stringify({ t: 'create', name: 'A', mode: 'solo', settings: {}, expectAccount: '42' }))).toMatchObject({ ok: true });
     const bad = [
       'nope', '[]', 'null', '{}', JSON.stringify({ t: 'what' }), JSON.stringify({ t: 'ctl', seq: 0, up: true, down: false }),
       JSON.stringify({ t: 'ctl', seq: 1, up: 1, down: false }), JSON.stringify({ t: 'ctl', seq: 1, up: true }),
@@ -25,6 +27,7 @@ describe('protocol parser', () => {
       JSON.stringify({ t: 'create', name: 'A', mode: 'championship', settings: {}, championship: { id: 'c', round: 0 } }),
       JSON.stringify({ t: 'join', code: 'ABCDEF', name: 'x'.repeat(65) }), JSON.stringify({ t: 'join', code: 'ABCDEF', name: 'A', livery: 'gold' }),
       JSON.stringify({ t: '__proto__' }), JSON.stringify({ t: 'ping', id: 1.5 }),
+      JSON.stringify({ t: 'join', code: 'ABCDEF', name: 'A', expectAccount: 42 }), JSON.stringify({ t: 'resume', room: 'r', participant: 'p', token: 't', expectAccount: '' }),
     ];
     for (const b of bad) expect(parseClientMessage(b), b).toMatchObject({ ok: false, code: 'malformed' });
     expect(parseClientMessage(Buffer.from('{}') as unknown as string)).toMatchObject({ ok: false });

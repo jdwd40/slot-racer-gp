@@ -217,6 +217,16 @@ describe('protocol and access checks', () => {
     expect(c.closed?.code).toBe(1009);
   });
 
+  it('a page that shows a sign-in this socket does not have is refused, never entered as a guest', async () => {
+    const c = await client();
+    // no session on this socket (the cookie expired before it opened), but the page still shows account 42
+    expect(await c.request({ t: 'create', name: 'Ada', mode: 'solo', settings: {}, expectAccount: '42' })).toMatchObject({ t: 'nack', code: 'expired', detail: 'session' });
+    expect(await c.request({ t: 'join', code: 'ABCDEF', name: 'Ada', expectAccount: '42' })).toMatchObject({ t: 'nack', code: 'expired', detail: 'session' });
+    // once the page knows it is a guest, guest entry works on the same socket
+    expect(await c.request({ t: 'create', name: 'Ada', mode: 'solo', settings: {}, expectAccount: '' })).toMatchObject({ t: 'joined' });
+    c.close();
+  });
+
   it('commands need room membership; a flood of messages is refused and then disconnected', async () => {
     const c = await client();
     c.send({ t: 'ctl', seq: 1, up: true, down: false });

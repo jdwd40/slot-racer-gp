@@ -16,7 +16,9 @@ export type AuthState =
 
 export type AuthError =
   | 'invalid_credentials' | 'username_taken' | 'invalid_username' | 'invalid_password' | 'invalid_name' | 'rate' | 'busy'
-  | 'signed_out' | 'session_expired' | 'unavailable' | 'unreachable' | 'other';
+  | 'signed_out' | 'session_expired' | 'unavailable' | 'unreachable' | 'other'
+  /** the browser's sign-in is no longer the one this page showed (signed out and in again in another tab): nothing was changed */
+  | 'identity_changed';
 export type AuthResult = { ok: true; account: SignedIn } | { ok: false; error: AuthError; detail?: string };
 
 /** Minimal storage (localStorage/sessionStorage in the browser, a Map in tests). */
@@ -57,10 +59,28 @@ export class AccountClient {
   /** a request in flight (the UI disables its buttons and shows progress) */
   busy = false;
   onChange: ((a: AuthState) => void) | null = null;
+  /** the identity this tab last held ('' guest, an account id), kept through `loading`: this tab's seat belongs to it */
+  private owner: string | null = null;
 
   constructor(private fetchFn: typeof fetch, private origin: string, private local: Store | null, private session: Store | null) {}
 
   get account(): SignedIn | null { return this.auth.state === 'signed-in' ? this.auth.account : null; }
+
+  /**
+   * Who the page shows, for a server that refuses work done under another identity: an account id, '' for a guest, or
+   * undefined when this page does not know (accounts off, unavailable, still loading).
+   */
+  get expected(): string | undefined { return this.auth.state === 'signed-in' ? this.auth.account.id : this.auth.state === 'guest' ? '' : undefined; }
+
+  /**
+   * Another tab of this browser signed in, out or switched (it rewrote OWNER_KEY in the shared localStorage; pass the
+   * `storage` event's key, null when the whole store was cleared). The cookie is shared, so ask the server who this tab is now.
+   */
+  async syncFromOtherTab(key: string | null): Promise<AuthState | null> {
+    if (key !== null && key !== OWNER_KEY) return null;
+    if (this.auth.state === 'off' || this.busy) return null;
+    return this.restore();
+  }
 
   private set(a: AuthState): void {
     // a different identity from the one the account-scoped state belongs to: that state is not this driver's
@@ -69,7 +89,10 @@ export class AccountClient {
       let prev: string | null = null;
       try { prev = this.local?.getItem(OWNER_KEY) ?? null; } catch { /* ignore */ }
       if (prev !== null && prev !== owner) clearAccountState(this.local, this.session);
+      // another tab already recorded the new owner, but this tab's own seat (sessionStorage) still belongs to the old one
+      else if (this.owner !== null && this.owner !== owner) clearAccountState(null, this.session);
       try { this.local?.setItem(OWNER_KEY, owner); } catch { /* ignore */ }
+      this.owner = owner;
     }
     this.auth = a;
     this.onChange?.(a);
@@ -101,7 +124,7 @@ export class AccountClient {
     if (status === 400 && e === 'invalid') return { error: detail?.startsWith('username') ? 'invalid_username' : 'invalid_password', detail };
     if (status === 400 && e === 'invalid_name') return { error: 'invalid_name', detail };
     if (status === 401) return { error: e === 'session_expired' ? 'session_expired' : e === 'signed_out' ? 'signed_out' : 'invalid_credentials' };
-    if (status === 409) return { error: 'username_taken' };
+    if (status === 409) return { error: e === 'identity_changed' ? 'identity_changed' : 'username_taken' };
     if (status === 429) return { error: 'rate' };
     if (status === 503) return { error: e === 'busy' ? 'busy' : 'unavailable' };
     return { error: 'other' };
@@ -167,12 +190,15 @@ export class AccountClient {
     this.busy = true;
     this.onChange?.(this.auth);
     try {
-      const r = await this.call('/api/profile', { displayName: d.name });
+      // the server renames only the account this form was opened for, never whoever the cookie names by now
+      const r = await this.call('/api/profile', { displayName: d.name, expectAccount: cur.id });
       if (!r) return { ok: false, error: 'unreachable' };
       if (r.status !== 200) {
         const e = AccountClient.error(r.status, r.data);
         // the session ended (elsewhere, by expiry or an owner reset): this browser is a guest again
         if (e.error === 'session_expired' || e.error === 'signed_out') { clearAccountState(this.local, this.session); this.set({ state: 'guest', expired: true }); }
+        // another identity holds the cookie now: find out which, so this tab stops showing the old one
+        if (e.error === 'identity_changed') { this.busy = false; await this.restore(); }
         return { ok: false, ...e };
       }
       const p = r.data.profile as Json | undefined;

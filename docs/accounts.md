@@ -27,7 +27,7 @@ No third-party identity provider, mail service or paid service is used or needed
 | Register | `POST /api/auth/register` `{ username, password, displayName? }` | 201 and signed in. `409 username_taken` (case-insensitive, settled by a unique key, so simultaneous attempts make one account) |
 | Sign in | `POST /api/auth/login` `{ username, password }` | New session ID; the browser's previous session (and its sockets' sign-in) ends. `401 invalid_credentials` for any wrong part |
 | Restore | `GET /api/auth/me` | `{ account, profile, session: 'active' }`, or `{ account: null, session: 'none' \| 'expired' }`. `expired` means the browser sent a session cookie the server no longer accepts (expired, signed out elsewhere, owner reset); the reply also clears that cookie |
-| Profile | `GET /api/profile`, `POST /api/profile` `{ displayName }` | The session's own profile only. `401 signed_out` / `session_expired` |
+| Profile | `GET /api/profile`, `POST /api/profile` `{ displayName, expectAccount? }` | The session's own profile only. `401 signed_out` / `session_expired`; `409 identity_changed` when `expectAccount` (the account the form was opened for) is not the session's |
 | Sign out | `POST /api/auth/logout` | Deletes the session row and clears the cookie; sockets opened with it are signed out at once (`bye expired`, close 4003). If the store cannot delete the row: `503 unavailable`, cookie kept |
 | Recover | admin `reset-password` (above) | No email. The owner verifies the player out of band, then gives them the new password privately |
 
@@ -63,7 +63,10 @@ every room entry, so a sign-out, expiry or reset elsewhere also ends a socket's 
   against an exact field list: an `accountId`, `account_id`, `id`, `username` or any unknown field is `400 malformed`, so a
   submitted ID can never select another profile (tested).
 - **Join/create:** the socket's session is re-checked, then the seat records that account ID. One account holds at most one
-  seat in a room (`already_joined`).
+  seat in a room (`already_joined`). The browser also sends `expectAccount` (the account it shows, `''` for a guest): a
+  socket whose sign-in differs (the cookie expired or was reset before the socket opened, or another tab switched account)
+  is refused with `nack expired/session` and the page re-checks who it is, so a driver shown as signed in never silently
+  takes a guest seat. `expectAccount` only ever refuses; the identity still comes from the session alone.
 - **Start:** the roster, with each seat's account ID, is frozen. The result envelope uses that frozen roster.
 - **Reconnect:** `resume` needs the seat's private token **and**, for an account seat, a live session of the same account
   (`forbidden` otherwise). The participant ID, car, number and pit bay are unchanged.
@@ -90,6 +93,10 @@ every room entry, so a sign-out, expiry or reset elsewhere also ends a socket's 
   reports expired, and whenever the signed-in identity differs from the one that state belongs to (`srgp.acct.owner`:
   another account, or guest ↔ account). **Local records, ghosts, championships, settings and the guest online name are
   never touched** (tested).
+- **Tabs follow each other.** A sign-in, sign-out or switch in one tab rewrites `srgp.acct.owner`; the other tabs see the
+  `storage` event, ask `GET /api/auth/me` who they are now, drop their own seat if the identity changed, and redraw. A
+  profile save always carries `expectAccount`, so a form left open from before the switch renames nobody (`409`, and the
+  tab then shows the current account), even where storage events do not arrive.
 - **Sign-out is confirmed by the server.** Only the server can revoke the `HttpOnly` session, so the browser becomes a
   guest only after `POST /api/auth/logout` answers `200 {ok:true}`. If the request fails (offline, a store error, a proxy
   error page), the account screen says the device is **still signed in** and offers Sign out again; account-scoped

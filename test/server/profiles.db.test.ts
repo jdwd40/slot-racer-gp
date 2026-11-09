@@ -210,6 +210,11 @@ describe.skipIf(!URL)('PostgreSQL: driver profiles, ownership, session lifecycle
     } finally { await pool.query(`DROP TRIGGER no_delete ON sessions; DROP FUNCTION ${SCHEMA}.no_delete()`); }
     expect((await req('/api/auth/logout', { cookie: vf, body: {} })).status).toBe(200);
     expect((await me(vf)).session).toBe('expired');
+    // the page still shows V after the cookie expired: room entry is refused, never taken as a guest seat
+    const stale = await socket(v.cookie);
+    expect(await stale.request({ t: 'create', name: 'V', mode: 'solo', settings: {}, expectAccount: v.id })).toMatchObject({ t: 'nack', code: 'expired', detail: 'session' });
+    expect(await stale.request({ t: 'create', name: 'V', mode: 'solo', settings: {}, expectAccount: '' })).toMatchObject({ t: 'joined', room: { participants: [{ guest: true }] } });
+    stale.close();
     // switching account in one browser: signing in as W on V's cookie ends V's session and starts a new one for W
     const v3 = await login('vic_sess');
     const sw = await req('/api/auth/login', { cookie: v3, body: { username: 'wes_sess', password: 'wes_sess password 1' } });
@@ -218,6 +223,17 @@ describe.skipIf(!URL)('PostgreSQL: driver profiles, ownership, session lifecycle
     expect((await me(v3)).account).toBe(null);
     expect((await me(w2)).account!.id).toBe(w.id);
     expect((await me(w.cookie)).account!.id).toBe(w.id);   // W's other browser is unaffected
+    // another tab still shows V's profile form: saving it on W's cookie renames nobody; W's own form saves normally
+    const before = (await me(w2)).profile!.displayName;
+    const stray = await rename(w2, 'Not Wes', { expectAccount: v.id });
+    expect(stray.status).toBe(409);
+    expect(await stray.json()).toEqual({ error: 'identity_changed' });
+    expect((await me(w2)).profile!.displayName).toBe(before);
+    expect((await rename(w2, 'Wes 2', { expectAccount: w.id })).status).toBe(200);
+    // ...and that tab cannot enter a room under W either
+    const other = await socket(w2);
+    expect(await other.request({ t: 'join', code: 'ABCDEF', name: 'V', expectAccount: v.id })).toMatchObject({ t: 'nack', code: 'expired', detail: 'session' });
+    other.close();
     // the session cookie is never readable by scripts and the API never returns it in a body
     expect(sw.headers.getSetCookie()[0]).toMatch(/HttpOnly/);
     expect(JSON.stringify(await (await req('/api/auth/me', { cookie: w2 })).json())).not.toMatch(/srsid|sid|hash|password/i);

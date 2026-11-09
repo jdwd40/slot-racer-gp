@@ -330,6 +330,7 @@
     { "id": "net.err.full", "text": "That room is full: four drivers is the limit." },
     { "id": "net.err.started", "text": "That race has already started, and its starting grid is locked. Wait for the next one or create a room." },
     { "id": "net.err.expired", "text": "That seat has expired and cannot be taken back. Join the room again once its race is over." },
+    { "id": "net.err.session", "text": "Your sign-in changed or expired, so you were not entered. Check who you're signed in as, then try again." },
     { "id": "net.err.protocol", "text": "This page is out of date for the game server. Reload the page to update." },
     { "id": "net.err.unavailable", "text": "The game server has no room free right now. Try again in a minute." },
     { "id": "net.err.overloaded", "text": "The game server is busy. Try again in a minute." },
@@ -441,6 +442,7 @@
     { "id": "acct.err.signed_out", "text": "You're signed out." },
     { "id": "acct.err.session_expired", "text": "Your sign-in has expired. Sign in again." },
     { "id": "acct.err.unavailable", "text": "The account service is unavailable right now." },
+    { "id": "acct.err.identity_changed", "text": "You signed in or out in another tab, so nothing was saved. This is the account you're signed in as now." },
     { "id": "acct.err.unreachable", "text": "Can't reach the server. Check your connection and try again." },
     { "id": "acct.err.other", "text": "Something went wrong. Try again." }
   ]

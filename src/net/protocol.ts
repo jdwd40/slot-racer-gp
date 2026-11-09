@@ -49,10 +49,15 @@ export interface RoomSettings {
 export interface ChampionshipTag { id: string; round: number; }
 
 // ------------------------------------------------------------------------------------------------ client -> server
+/**
+ * `expectAccount` on create/join: the account id the browser believes it is signed in as ('' = a guest). It is never an
+ * identity (that only ever comes from the socket's session); a socket whose sign-in differs is refused, `expired`/`session`,
+ * instead of entering under an identity the page does not show (a session that expired before the socket opened).
+ */
 export type ClientMsg =
   | { t: 'hello'; v: number; proto: string }
-  | { t: 'create'; name: string; livery?: LiveryId; mode: Mode; settings: Partial<RoomSettings>; championship?: ChampionshipTag }
-  | { t: 'join'; code: string; name: string; livery?: LiveryId }
+  | { t: 'create'; name: string; livery?: LiveryId; mode: Mode; settings: Partial<RoomSettings>; championship?: ChampionshipTag; expectAccount?: string }
+  | { t: 'join'; code: string; name: string; livery?: LiveryId; expectAccount?: string }
   | { t: 'resume'; room: string; participant: string; token: string }
   | { t: 'ready'; ready: boolean }
   | { t: 'settings'; settings: Partial<RoomSettings> }
@@ -111,8 +116,8 @@ export type Parsed = { ok: true; msg: ClientMsg } | { ok: false; code: 'malforme
 
 const SHAPES: Record<ClientMsgType, Record<string, 'string' | 'number' | 'boolean' | 'object' | '?string' | '?object'>> = {
   hello: { v: 'number', proto: 'string' },
-  create: { name: 'string', livery: '?string', mode: 'string', settings: 'object', championship: '?object' },
-  join: { code: 'string', name: 'string', livery: '?string' },
+  create: { name: 'string', livery: '?string', mode: 'string', settings: 'object', championship: '?object', expectAccount: '?string' },
+  join: { code: 'string', name: 'string', livery: '?string', expectAccount: '?string' },
   resume: { room: 'string', participant: 'string', token: 'string' },
   ready: { ready: 'boolean' },
   settings: { settings: 'object' },
