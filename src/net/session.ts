@@ -89,7 +89,7 @@ export class NetSession {
       return msg.includes('protocol') ? { ok: false, code: 'protocol' } : { ok: false, code: 'unreachable' };
     }
     let r: ServerMsg;
-    try { r = await this.client.request(req); } catch { this.setConn('offline'); return { ok: false, code: 'unreachable' }; }
+    try { r = await this.client.request(req); } catch { this.client.drop(); this.setConn('offline'); return { ok: false, code: 'unreachable' }; }
     if (r.t !== 'joined') {
       const n = r as Extract<ServerMsg, { t: 'nack' }>;
       this.closing = true; this.client.close(); this.setConn('offline');
@@ -154,14 +154,19 @@ export class NetSession {
       try {
         await this.client.connect();
         const r = await this.client.request({ t: 'resume', room: seat.room, participant: seat.participant, token: seat.token });
+        // given up (left, closed) while this attempt was in flight: the seat is not taken back
+        if (this.closing || this.ended) break;
         if (r.t === 'joined') { this.held = { up: false, down: false }; this.adopt(r); return; }
         const n = r as Extract<ServerMsg, { t: 'nack' }>;
-        if (n.code === 'expired' || n.code === 'forbidden' || n.code === 'not_found') { this.closing = true; this.client.close(); this.finish('expired', n.detail); return; }
+        if (n.code === 'expired' || n.code === 'forbidden' || n.code === 'not_found') { this.client.drop(); this.finish('expired', n.detail); return; }
       } catch { /* not reachable yet */ }
+      // a refused or failed attempt gives its socket up before the next one, or each retry would hold another server connection
+      this.client.drop();
       if (this.now() > deadline) { this.finish('expired', 'reconnect window passed'); return; }
       await new Promise((res) => setTimeout(res, wait));
       wait = Math.min(2000, wait * 1.5);
     }
+    this.client.drop();
   }
 
   private finish(why: EndReason, detail?: string): void {
