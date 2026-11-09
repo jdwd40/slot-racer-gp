@@ -24,6 +24,8 @@ export interface AppDeps {
   scoring?: Scoring;
   /** results waiting in the durable queue (server/spool.ts), for health */
   pendingResults?: () => number;
+  /** of those, results held in memory only (the spool could not take them): lost on a restart, so worth an alert */
+  unsavedResults?: () => number;
 }
 export interface App {
   server: http.Server;
@@ -62,7 +64,7 @@ export class RateWindow {
   clear(key: string): void { this.m.delete(key); }
 }
 
-export function createApp({ cfg, log, manager, pool = null, sessionCheckMs = SESSION_CHECK_MS, scoring = makeScoring(cfg.careerPoints), pendingResults = () => 0 }: AppDeps): App {
+export function createApp({ cfg, log, manager, pool = null, sessionCheckMs = SESSION_CHECK_MS, scoring = makeScoring(cfg.careerPoints), pendingResults = () => 0, unsavedResults = () => 0 }: AppDeps): App {
   const started = Date.now();
   const accounts = pool ? new Accounts(pool) : null;
   const store = pool ? new PgSessionStore(pool) : null;
@@ -132,7 +134,7 @@ export function createApp({ cfg, log, manager, pool = null, sessionCheckMs = SES
       status: ok ? 200 : 503,
       body: {
         ok, service: 'slotrush-server', version: cfg.version, protocol: PROTOCOL_VERSION, rules: RULES_VERSION, schema: SCHEMA_VERSION,
-        accounts: !!accounts, profiles: !!accounts, career: !!accounts, db, scoring: scoring.version, pendingResults: pendingResults(), uptimeS: Math.round((Date.now() - started) / 1000),
+        accounts: !!accounts, profiles: !!accounts, career: !!accounts, db, scoring: scoring.version, pendingResults: pendingResults(), unsavedResults: unsavedResults(), uptimeS: Math.round((Date.now() - started) / 1000),
         rooms: st.rooms, roomCap: cfg.roomCap, racing: st.racing, humans: st.humans, connections: conns, maxConnections: cfg.maxConnections,
         tickMaxMs: Math.round(manager.tickMaxMs * 10) / 10, rssMb: Math.round(mem.rss / 1048576), heapMb: Math.round(mem.heapUsed / 1048576),
       },

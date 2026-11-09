@@ -1,13 +1,13 @@
 // Career points and personal bests from server-finalized results (docs/career.md): scoring, the final-lap DQ podium change
 // on the real room/race core, identical awards for every member, and the durable result queue across a simulated restart.
 import { describe, it, expect } from 'vitest';
-import { mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { LAPS, PEN, type Standing } from '../../src/race';
 import { CHAMP_POINTS, roundPoints } from '../../src/records';
 import { parseClientMessage, type AwardsView } from '../../src/net/protocol';
-import { computeAwards, lapBests, makeScoring, parsePodium } from '../../server/career';
+import { computeAwards, lapBests, makeScoring, parsePodium, type Scoring } from '../../server/career';
 import { buildEnvelope, type EnvelopeParticipant, type ResultEnvelope } from '../../server/envelope';
 import { memoryLogger } from '../../server/log';
 import { MemoryResultSink, ResultConflict, type ResultSink } from '../../server/results';
@@ -169,9 +169,24 @@ describe('awards from a real server race', () => {
 
 class Flaky implements ResultSink {
   down = true; calls = 0;
+  /** the scoring version each successful store was given */
+  scored: string[] = [];
   constructor(readonly inner = new MemoryResultSink()) {}
-  async consume(e: Readonly<ResultEnvelope>) { this.calls++; if (this.down) throw new Error('connect ECONNREFUSED'); return this.inner.consume(e); }
+  async consume(e: Readonly<ResultEnvelope>, s?: Scoring) {
+    this.calls++;
+    if (this.down) throw new Error('connect ECONNREFUSED');
+    const r = await this.inner.consume(e);
+    if (r === 'stored') this.scored.push(s?.version ?? 'none');
+    return r;
+  }
 }
+/** wait (real time: the sink writes to disk) until the room's awards leave `from` */
+async function settledFrom(room: Room, from: AwardsView['sync']): Promise<void> {
+  for (let i = 0; i < 400 && (!room.awards || room.awards.sync === from); i++) await new Promise((r) => setTimeout(r, 5));
+}
+const spoolDir = () => mkdtempSync(join(tmpdir(), 'srgp-spool-'));
+/** a spool path that cannot be written: a regular file stands where the directory should be */
+function blockedSpool(): string { const d = join(spoolDir(), 'spool'); writeFileSync(d, 'not a directory'); return d; }
 
 describe('durable result queue', () => {
   it('a storage failure is spooled to disk and reported pending; after a restart the spool is stored exactly once', async () => {
@@ -183,7 +198,7 @@ describe('durable result queue', () => {
     expect(await a.consume(e)).toBe('queued');
     expect(await a.consume(e)).toBe('queued');   // a second delivery while queued is the same queued result
     expect(readdirSync(dir)).toEqual([`${e.raceId}.json`]);
-    expect(JSON.parse(readFileSync(join(dir, `${e.raceId}.json`), 'utf8')).digest).toBe(e.digest);
+    expect(JSON.parse(readFileSync(join(dir, `${e.raceId}.json`), 'utf8')).envelope.digest).toBe(e.digest);
     a.stop();   // the process stops with the database still down
 
     // restart: a new process loads the spool and stores it once the database is back
@@ -211,8 +226,9 @@ describe('durable result queue', () => {
     const a = new DurableSink(store, { dir, log, retryMs: 60_000 });
     await a.consume(e); a.stop();
     const f = join(dir, `${e.raceId}.json`);
-    const j = JSON.parse(readFileSync(f, 'utf8')) as { classification: Standing[] };
-    [j.classification[0].id, j.classification[1].id] = [j.classification[1].id, j.classification[0].id];
+    const j = JSON.parse(readFileSync(f, 'utf8')) as { envelope: { classification: Standing[] } };
+    const cl = j.envelope.classification;
+    [cl[0].id, cl[1].id] = [cl[1].id, cl[0].id];
     writeFileSync(f, JSON.stringify(j));
     store.down = false;
     const b = new DurableSink(store, { dir, log });
@@ -223,15 +239,105 @@ describe('durable result queue', () => {
     b.stop();
   });
 
-  it('a room shows pending while storage is down and saved once the queue stores it; a conflicting result is reported failed', async () => {
+  it('a spooled result is stored with the scoring policy shown at the finish, even after the points are reconfigured', async () => {
+    const dir = spoolDir();
+    const log = memoryLogger();
+    const store = new Flaky();
+    const e = env({ rows: [['a', 'finished', 'acct'], ['b', 'finished', 'acct']] });
+    const shown = makeScoring([10, 6, 4]);
+    const a = new DurableSink(store, { dir, log, scoring: shown, retryMs: 60_000 });
+    expect(await a.consume(e, shown)).toBe('queued');
+    expect(JSON.parse(readFileSync(join(dir, `${e.raceId}.json`), 'utf8')).scoring).toEqual({ version: 'career-1:10-6-4', podium: [10, 6, 4] });
+    a.stop();
+    // restart with SLOTRUSH_CAREER_POINTS changed: the queued race still stores the policy its room showed
+    store.down = false;
+    const b = new DurableSink(store, { dir, log, scoring: makeScoring([25, 18, 15]) });
+    await b.start();
+    expect(store.scored).toEqual(['career-1:10-6-4']);
+    expect(log.lines.some((l) => l.includes('result.spool_scoring'))).toBe(true);
+    b.stop();
+  });
+
+  it('a spool file whose scoring policy was altered (points without the matching version) is refused', async () => {
+    const dir = spoolDir();
+    const log = memoryLogger();
+    const store = new Flaky();
+    const e = env({ rows: [['a', 'finished', 'acct'], ['b', 'finished', 'acct']] });
+    const a = new DurableSink(store, { dir, log, retryMs: 60_000 });
+    await a.consume(e, S); a.stop();
+    const f = join(dir, `${e.raceId}.json`);
+    const j = JSON.parse(readFileSync(f, 'utf8')) as { scoring: { podium: number[] } };
+    j.scoring.podium = [100, 60, 40];
+    writeFileSync(f, JSON.stringify(j));
+    store.down = false;
+    const b = new DurableSink(store, { dir, log });
+    await b.start();
+    expect(store.inner.stored.size).toBe(0);
+    expect(readdirSync(dir)).toEqual([`${e.raceId}.json.bad`]);
+    b.stop();
+  });
+
+  it('a result the spool cannot write is reported unsaved, never queued; it turns pending once the spool takes it', async () => {
+    const dir = blockedSpool();
+    const log = memoryLogger();
+    const store = new Flaky();
+    const e = env({ rows: [['a', 'finished', 'acct'], ['b', 'finished', 'acct']] });
+    const a = new DurableSink(store, { dir, log, retryMs: 60_000 });
+    const settled: string[] = [];
+    a.onSettled = (id, r) => settled.push(`${id}:${r}`);
+    expect(await a.consume(e, S)).toBe('unsaved');
+    expect(await a.consume(e, S)).toBe('unsaved');   // a re-delivery is not acknowledged as durable either
+    expect([a.pending, a.unsaved]).toEqual([1, 1]);
+    expect(log.lines.some((l) => l.includes('result.spool_failed'))).toBe(true);
+    // the disk problem clears while the database is still down: the next pass writes it to the spool
+    unlinkSync(dir);
+    await a.drain();
+    expect(settled).toEqual([`${e.raceId}:pending`]);
+    expect([a.pending, a.unsaved]).toEqual([1, 0]);
+    expect(readdirSync(dir)).toEqual([`${e.raceId}.json`]);
+    expect(await a.consume(e, S)).toBe('queued');
+    a.stop();
+    expect(log.lines.some((l) => l.includes('result.lost'))).toBe(false);
+  });
+
+  it('stopping with a result held only in memory logs it as lost; without a spool directory nothing is reported queued', async () => {
+    const log = memoryLogger();
+    const a = new DurableSink(new Flaky(), { dir: null, log, retryMs: 60_000 });
+    expect(await a.consume(env({ rows: [['a', 'finished', 'acct']] }), S)).toBe('unsaved');
+    a.stop();
+    expect(log.lines.some((l) => l.includes('result.lost'))).toBe(true);
+  });
+
+  it('a room whose result the spool cannot write shows unsaved, then pending once it is on disk, then saved', async () => {
     const h = harness();
     const store = new Flaky();
-    const durable = new DurableSink(store, { dir: null, log: h.log, retryMs: 60_000 });
+    const dir = blockedSpool();
+    const durable = new DurableSink(store, { dir, log: h.log, retryMs: 60_000 });
     (h.mgr as unknown as { deps: { sink: ResultSink } }).deps.sink = durable;
     durable.onSettled = (id, r) => h.mgr.settled(id, r);
     const { room, peers, ids } = fourAccounts(h, 'circuit-3');
     drive(h, room, peers, ids);
-    await new Promise((r) => setTimeout(r, 5));
+    await settledFrom(room, 'saving');
+    expect(room.awards?.sync).toBe('unsaved');
+    unlinkSync(dir);
+    await durable.drain();
+    expect(room.awards?.sync).toBe('pending');
+    store.down = false;
+    await durable.drain();
+    for (const p of peers) expect(p.of('awards').map((m) => m.awards.sync)).toEqual(['saving', 'unsaved', 'pending', 'saved']);
+    expect(store.scored).toEqual([S.version]);
+    durable.stop();
+  });
+
+  it('a room shows pending while storage is down and saved once the queue stores it; a conflicting result is reported failed', async () => {
+    const h = harness();
+    const store = new Flaky();
+    const durable = new DurableSink(store, { dir: spoolDir(), log: h.log, retryMs: 60_000 });
+    (h.mgr as unknown as { deps: { sink: ResultSink } }).deps.sink = durable;
+    durable.onSettled = (id, r) => h.mgr.settled(id, r);
+    const { room, peers, ids } = fourAccounts(h, 'circuit-3');
+    drive(h, room, peers, ids);
+    await settledFrom(room, 'saving');
     expect(room.awards?.sync).toBe('pending');
     expect(peers[0].of('awards').at(-1)!.awards.sync).toBe('pending');
     store.down = false;

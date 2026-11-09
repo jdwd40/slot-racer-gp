@@ -24,7 +24,7 @@ export interface NetHooks {
   state?(m: Extract<ServerMsg, { t: 'state' }>, at: number): void;
   /** `fresh` is false for a result this tab has already seen (a resend after a reconnect, or a duplicate message) */
   result?(r: ResultView, fresh: boolean): void;
-  /** the server's career awards for the last result and whether they are stored yet (saving, saved, pending, failed) */
+  /** the server's career awards for the last result and whether they are stored yet (saving, saved, pending, unsaved, failed) */
   awards?(a: AwardsView): void;
   conn?(c: Conn): void;
   end?(why: EndReason, detail?: string): void;

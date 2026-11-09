@@ -86,8 +86,8 @@ export class RoomManager {
     return r.ok ? { ...r, room } : r;
   }
 
-  /** A queued result was stored later (server/spool.ts): the room that showed it 'pending' says so. */
-  settled(raceId: string, sync: 'saved' | 'failed'): void {
+  /** A queued result moved on (server/spool.ts): stored later, refused, or written to the spool; its room says so. */
+  settled(raceId: string, sync: 'saved' | 'failed' | 'pending'): void {
     for (const r of this.rooms.values()) if (r.awards?.raceId === raceId) r.settled(raceId, sync);
   }
 

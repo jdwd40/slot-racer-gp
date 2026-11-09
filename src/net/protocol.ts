@@ -120,10 +120,11 @@ export type ServerMsg =
 export interface AwardRow { participant: string; pos: number | null; status: 'finished' | 'dq' | 'dnf'; credit: boolean; points: number; }
 /**
  * Where a race's account updates stand: `saving` (being written), `saved` (stored with its award ledger), `pending` (storage
- * failed; the result is queued durably on the server and retried, never counted twice), `failed` (refused: a conflicting
- * result for the same race exists; nothing was awarded from this one).
+ * failed; the result is written to disk on the server and retried, never counted twice), `unsaved` (storage failed and no
+ * durable copy could be written either: retried from memory, lost if the server restarts first; becomes `pending` once the
+ * spool takes it), `failed` (refused: a conflicting result for the same race exists; nothing was awarded from this one).
  */
-export type AwardSync = 'saving' | 'saved' | 'pending' | 'failed';
+export type AwardSync = 'saving' | 'saved' | 'pending' | 'unsaved' | 'failed';
 export interface AwardsView {
   raceId: string; scoring: string;
   /** false for practice ('practice') and for aborted or unclassified races ('incomplete'): no points for anyone */

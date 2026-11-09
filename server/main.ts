@@ -26,14 +26,14 @@ async function main(): Promise<void> {
   const scoring = makeScoring(cfg.careerPoints);
   // every result goes to the database through a durable queue: one the database cannot take yet is spooled to disk and
   // retried (also after a restart) instead of being lost; storage is idempotent by race id, so a retry never awards twice
-  const durable = new DurableSink(pool ? new PgResultSink(pool, scoring) : new MemoryResultSink(), { dir: pool ? cfg.spoolDir : null, log });
+  const durable = new DurableSink(pool ? new PgResultSink(pool, scoring) : new MemoryResultSink(), { dir: pool ? cfg.spoolDir : null, log, scoring });
   // results still being written when a stop begins are awaited (within the 5 s stop budget) before the pool closes
   const pending = new Set<Promise<unknown>>();
-  const sink: ResultSink = { consume: (e) => { const p = durable.consume(e); pending.add(p); void p.finally(() => pending.delete(p)).catch(() => undefined); return p; } };
+  const sink: ResultSink = { consume: (e, s) => { const p = durable.consume(e, s); pending.add(p); void p.finally(() => pending.delete(p)).catch(() => undefined); return p; } };
   const manager = new RoomManager({ cfg, log, sink, scoring });
   durable.onSettled = (raceId, r) => manager.settled(raceId, r);
   await durable.start();
-  const app = createApp({ cfg, log, manager, pool, scoring, pendingResults: () => durable.pending });
+  const app = createApp({ cfg, log, manager, pool, scoring, pendingResults: () => durable.pending, unsavedResults: () => durable.unsaved });
   const { port } = await app.listen();
   manager.start();
   log.info('server.listen', { host: cfg.host, port, version: cfg.version, roomCap: cfg.roomCap, env: cfg.env, db: !!pool, scoring: scoring.version, spool: !!cfg.spoolDir, pendingResults: durable.pending });

@@ -79,15 +79,24 @@ results stored before it are not scored retroactively):
   recovery is reproducible: the ledger can always be re-derived from the stored envelope with the same pure function
   (`computeAwards`). Ledger rows and results are immutable (update triggers).
 - **Durable queue** (`server/spool.ts`): if storage fails (database down, timeout), the envelope is written to
-  `SLOTRUSH_SPOOL_DIR/<raceId>.json` (fsync, then rename) before the room is told `pending`. It is retried with back-off
-  and drained at every start. A spool file whose digest does not match (edited on disk) is set aside as `.bad`, never
-  stored. Because storage is idempotent by race id, a retry after a commit whose reply was lost cannot award twice.
-  Health reports `pendingResults`. Without a spool directory (development) the queue is in memory and that is logged;
+  `SLOTRUSH_SPOOL_DIR/<raceId>.json` (fsync of the file, rename, fsync of the directory) before the room is told
+  `pending`. The file also records the scoring policy (`version` and `podium`) the room showed at the finish, and a replay
+  stores exactly that policy, so reconfiguring `SLOTRUSH_CAREER_POINTS` while results are queued never changes the
+  points or scoring version they are stored with. The queue is retried with back-off and drained at every start. A spool
+  file whose digest does not match (edited envelope), or whose points do not match its scoring version, is set aside as
+  `.bad`, never stored. Because storage is idempotent by race id, a retry after a commit whose reply was lost cannot
+  award twice.
+- **When the spool cannot be written** (directory unwritable, disk full) the result is held in memory only. It is
+  never reported `pending`: the sink answers `unsaved`, logs `result.spool_failed` (error), and retries both the
+  database and the spool write on every pass; once the spool takes it the room is told `pending`. A stop with such a
+  result still in memory logs `result.lost`. Health reports `pendingResults` (all queued) and `unsavedResults` (memory
+  only; alert on any non-zero value). Without a spool directory (development) every queued result is `unsaved`;
   production refuses to start without one.
 - **What players see:** every member of the room receives the same `awards` message (the rows computed from the
   envelope, without account ids) with `sync` = `saving` → `saved`, or `pending` (shown as **"Pending sync: the result is
   safe on the server and will be added to accounts once storage is back. It is never counted twice."**) → `saved` once
-  the queue stores it; `failed` only for a conflicting result. A reconnecting client gets the result and the awards
+  the queue stores it; `unsaved` (shown as **"Not saved yet: storage is unavailable and the server could not keep a safe
+  copy…"**) → `pending` or `saved` while no durable copy exists; `failed` only for a conflicting result. A reconnecting client gets the result and the awards
   replayed.
 
 ## Profile view
@@ -121,10 +130,11 @@ additions:
 3. Add to `/etc/slotrush-server/env`: `SLOTRUSH_SPOOL_DIR=/var/lib/slotrush-server/spool` and
    `SLOTRUSH_CAREER_POINTS=10,6,4`. (Without the spool variable the production service refuses to start.)
 4. Step 6 applies `003_career_awards_bests`; `admin status` must list it.
-5. Step 8: `/api/health` must show `"career":true,"scoring":"career-1:10-6-4","pendingResults":0,"db":"ok"`.
+5. Step 8: `/api/health` must show `"career":true,"scoring":"career-1:10-6-4","pendingResults":0,"unsavedResults":0,"db":"ok"`.
 6. After the client is enabled: sign in on a phone and a desktop browser, race one connected solo race to the finish,
    check the points and podium count on both browsers' account screens, rename, and check the history stays.
-7. Watch `pendingResults` in health and `result.spooled` / `result.retry_stored` in the journal. Spool files are small
+7. Watch `pendingResults` and `unsavedResults` in health and `result.spooled` / `result.retry_stored` /
+   `result.spool_failed` / `result.lost` in the journal. Spool files are small
    JSON (a few KB per race); the directory should be empty in normal operation.
 
 **Resource impact:** one extra transaction of a few rows per race and one read per profile view; no extra process,

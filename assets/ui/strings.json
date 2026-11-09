@@ -477,6 +477,7 @@
     { "id": "career.sync.saving", "text": "Saving to driver accounts…" },
     { "id": "career.sync.saved", "text": "✓ Saved to driver accounts." },
     { "id": "career.sync.pending", "text": "⏳ Pending sync: the result is safe on the server and will be added to accounts once storage is back. It is never counted twice." },
+    { "id": "career.sync.unsaved", "text": "⚠ Not saved yet: storage is unavailable and the server could not keep a safe copy. It keeps retrying, but this result may be lost if the server restarts first." },
     { "id": "career.sync.failed", "text": "This result could not be recorded (a conflicting result exists). No points were added from it." },
     { "id": "career.onlineNote", "text": "Connected races are run and classified by the server: podiums earn verified career points (10/6/4) and valid laps set verified personal bests." },
     { "id": "career.guestNote", "text": "Playing as a guest: sign in to earn career points and verified personal bests in connected races." },

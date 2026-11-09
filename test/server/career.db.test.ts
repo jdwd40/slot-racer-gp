@@ -13,6 +13,7 @@ import type { AwardsView, CareerStats, ServerMsg } from '../../src/net/protocol'
 import { createApp, type App } from '../../server/app';
 import { testConfig, type Config } from '../../server/config';
 import { buildEnvelope, trackVersion, type EnvelopeParticipant, type ResultEnvelope } from '../../server/envelope';
+import type { Scoring } from '../../server/career';
 import { memoryLogger } from '../../server/log';
 import { migrate, MIGRATIONS } from '../../server/migrations';
 import { PgResultSink, type ResultSink } from '../../server/results';
@@ -30,7 +31,7 @@ const checksum = (sql: string): string => createHash('sha256').update(sql).diges
 class Switch implements ResultSink {
   down = false;
   constructor(public inner: ResultSink) {}
-  async consume(e: Readonly<ResultEnvelope>) { if (this.down) throw new Error('connect ECONNREFUSED 127.0.0.1:5432'); return this.inner.consume(e); }
+  async consume(e: Readonly<ResultEnvelope>, s?: Scoring) { if (this.down) throw new Error('connect ECONNREFUSED 127.0.0.1:5432'); return this.inner.consume(e, s); }
 }
 
 describe.skipIf(!URL)('PostgreSQL: career points, award ledger, personal bests', () => {

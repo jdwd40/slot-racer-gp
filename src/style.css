@@ -308,6 +308,7 @@ small { color: #9ca3af; font-weight: 500; }
 .awards .sync { font-weight: 700; color: #9ca3af; }
 .awards .sync[data-sync="saved"] { color: #86efac; }
 .awards .sync[data-sync="pending"] { color: #fde047; }
+.awards .sync[data-sync="unsaved"] { color: #fdba74; }
 .awards .sync[data-sync="failed"] { color: #fca5a5; }
 @media (max-width: 420px) { .career .tiles { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
 .account .net-msg[data-kind="ok"] { color: #86efac; }

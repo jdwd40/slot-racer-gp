@@ -463,16 +463,18 @@ export class Room {
 
   /**
    * Hand the envelope to storage once. The awards shown are computed from the same envelope by the same function storage
-   * uses, so what every member sees is what the ledger records; `sync` says whether it is stored yet. A storage failure is
-   * queued durably by the sink ('pending') and settled later through `settled`.
+   * uses, with the same policy (passed along, so a later replay stores what was shown); `sync` says whether it is stored
+   * yet. A storage failure the sink wrote to disk is 'pending'; one it could only hold in memory is 'unsaved'. Both are
+   * settled later through `settled`. An unexpected sink error is never reported as safe.
    */
   private consume(env: Readonly<ResultEnvelope>): void {
-    this.awards = { ...computeAwards(env, this.deps.scoring ?? DEFAULT_SCORING).view, sync: 'saving' };
-    this.deps.sink.consume(env).then(
-      (r) => { this.log.info('result.consumed', { race: env.raceId, result: r }); this.settled(env.raceId, r === 'queued' ? 'pending' : 'saved'); },
+    const scoring = this.deps.scoring ?? DEFAULT_SCORING;
+    this.awards = { ...computeAwards(env, scoring).view, sync: 'saving' };
+    this.deps.sink.consume(env, scoring).then(
+      (r) => { this.log.info('result.consumed', { race: env.raceId, result: r }); this.settled(env.raceId, r === 'queued' ? 'pending' : r === 'unsaved' ? 'unsaved' : 'saved'); },
       (err: unknown) => {
         this.log.error('result.consume_failed', { race: env.raceId, error: String(err) });
-        this.settled(env.raceId, err instanceof ResultConflict ? 'failed' : 'pending');
+        this.settled(env.raceId, err instanceof ResultConflict ? 'failed' : 'unsaved');
       },
     );
   }
