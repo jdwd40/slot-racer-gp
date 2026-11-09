@@ -37,6 +37,20 @@ export class PgSessionStore extends session.Store {
   override touch(sid: string, s: session.SessionData, cb?: (err?: unknown) => void): void {
     this.pool.query('UPDATE sessions SET expires_at = $2 WHERE sid = $1', [sid, this.expiry(s)]).then(() => cb?.(), (e) => cb?.(e));
   }
+  /**
+   * Of these (session, account) bindings, the session IDs that still exist, have not expired and still belong to that
+   * account. Logout, a new sign-in (which replaces the session ID), expiry and the owner's password reset all drop a
+   * session from this set; WebSockets bound to it lose their sign-in.
+   */
+  async live(bindings: readonly { sid: string; accountId: string }[]): Promise<Set<string>> {
+    if (!bindings.length) return new Set();
+    const r = await this.pool.query<{ sid: string }>(
+      `SELECT s.sid FROM sessions s JOIN unnest($1::text[], $2::bigint[]) AS b(sid, account_id) ON s.sid = b.sid AND s.account_id = b.account_id
+       WHERE s.expires_at > now()`,
+      [bindings.map((b) => b.sid), bindings.map((b) => b.accountId)],
+    );
+    return new Set(r.rows.map((x) => x.sid));
+  }
   async prune(): Promise<number> {
     const r = await this.pool.query('DELETE FROM sessions WHERE expires_at <= now()').catch(() => null);
     return r?.rowCount ?? 0;

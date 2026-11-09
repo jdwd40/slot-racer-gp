@@ -19,6 +19,7 @@ const ORIGIN = 'http://localhost:5173';
 describe.skipIf(!URL)('PostgreSQL: migrations, accounts, sessions, admin reset and results', () => {
   let pool: pg.Pool;
   let app: App;
+  let mgr: RoomManager;
   let base = '';
   const log = memoryLogger();
   const sink = { stored: [] as string[] };
@@ -27,9 +28,9 @@ describe.skipIf(!URL)('PostgreSQL: migrations, accounts, sessions, admin reset a
     pool = new pg.Pool({ connectionString: URL, max: 3 });
     await pool.query('DROP SCHEMA public CASCADE; CREATE SCHEMA public');
     const cfg = testConfig({ port: 0, databaseUrl: URL!, sessionSecret: 'test-session-secret-0123456789abcdef', cookieSecure: false });
-    const mgr = new RoomManager({ cfg, log, sink: new PgResultSink(pool) });
+    mgr = new RoomManager({ cfg, log, sink: new PgResultSink(pool) });
     void sink;
-    app = createApp({ cfg, log, manager: mgr, pool });
+    app = createApp({ cfg, log, manager: mgr, pool, sessionCheckMs: 300 });
     // the service refuses an unmigrated schema: health reports it before migration
     const { port } = await app.listen();
     base = `http://127.0.0.1:${port}`;
@@ -135,6 +136,55 @@ describe.skipIf(!URL)('PostgreSQL: migrations, accounts, sessions, admin reset a
     expect(await run(['status'], pool, io(''))).toBe(0);
     expect(await run(['bogus'], pool, io(''))).toBe(2);
     for (const line of log.lines) expect(line).not.toContain(gen);
+  });
+
+  it('a WebSocket signs out with its session: logout and a new sign-in end it at once, a reset is caught on entry and while seated', async () => {
+    const ws = async (cookie: string) => {
+      const c = new OnlineClient(base.replace('http', 'ws') + '/ws', WebSocket as unknown as SocketCtor, { headers: { origin: ORIGIN, cookie } });
+      await c.connect();
+      return c;
+    };
+    const closedBy = async (c: OnlineClient) => {
+      for (let i = 0; i < 50 && !c.closed; i++) await new Promise((res) => setTimeout(res, 50));
+      expect(c.closed?.code).toBe(4003);
+      expect(c.received.find((m) => m.t === 'bye')).toMatchObject({ code: 'expired', detail: 'session' });
+    };
+    const accountSeats = (id: string) => mgr.list.flatMap((r) => r.publicRoom().participants.filter((p) => !p.guest && r.participant(p.id)?.accountId === id));
+    const c1 = cookieOf(await post('/api/auth/register', { username: 'erin', password: 'erin password 1' }));
+    const id = (await pool.query<{ id: string }>("SELECT id::text FROM accounts WHERE username_key = 'erin'")).rows[0].id;
+
+    // logout: the socket opened with that session is signed out and closed at once
+    const a = await ws(c1);
+    expect((await post('/api/auth/logout', {}, { cookie: c1 })).status).toBe(200);
+    await closedBy(a);
+
+    // a new sign-in replaces the session ID: sockets on the old one end too
+    const c2 = cookieOf(await post('/api/auth/login', { username: 'erin', password: 'erin password 1' }));
+    const b = await ws(c2);
+    const c3 = cookieOf(await post('/api/auth/login', { username: 'erin', password: 'erin password 1' }, { cookie: c2 }));
+    expect(c3).not.toBe(c2);
+    await closedBy(b);
+
+    // the owner's reset runs in another process and only deletes session rows: a create right after it is refused
+    const seated = await ws(c3);
+    expect(await seated.request({ t: 'create', name: 'Erin', mode: 'solo', settings: {} })).toMatchObject({ t: 'joined' });
+    expect(accountSeats(id)).toHaveLength(1);
+    const cred = seated.credential()!;
+    const idle = await ws(c3);
+    const io = { stdin: async () => 'erin new password 2\n', out: () => undefined, err: () => undefined };
+    expect(await run(['reset-password', 'erin'], pool, io)).toBe(0);
+    const r = await idle.request({ t: 'create', name: 'Erin', mode: 'solo', settings: {} }).catch((e: Error) => e);
+    if (!(r instanceof Error)) expect(r).toMatchObject({ t: 'nack', ref: 'create', code: 'expired' });
+    await closedBy(idle);
+    // ...and the seated socket is signed out by the periodic check; its account seat now waits out the grace, and a
+    // guest holding the token still cannot take it
+    await closedBy(seated);
+    expect(accountSeats(id)).toHaveLength(1);
+    expect(mgr.room(cred.room)!.publicRoom().participants[0].connected).toBe(false);
+    const guest = await ws('');
+    expect(await guest.request({ t: 'resume', ...cred })).toMatchObject({ t: 'nack', code: 'forbidden' });
+    guest.close();
+    mgr.room(cred.room)!.close('test');
   });
 
   it('result storage is idempotent by race id and immutable: the same envelope is a duplicate, a different one a conflict', async () => {

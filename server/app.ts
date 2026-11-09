@@ -14,7 +14,11 @@ import type { Peer, Room } from './room';
 import type { RoomManager } from './rooms';
 import { PgSessionStore, type SessionAccount } from './sessionStore';
 
-export interface AppDeps { cfg: Config; log: Logger; manager: RoomManager; pool?: Pool | null; }
+export interface AppDeps {
+  cfg: Config; log: Logger; manager: RoomManager; pool?: Pool | null;
+  /** how often signed-in sockets re-check their session (ms); tests shorten it */
+  sessionCheckMs?: number;
+}
 export interface App {
   server: http.Server;
   wss: WebSocketServer;
@@ -23,12 +27,16 @@ export interface App {
   connections(): number;
 }
 
-type Req = IncomingMessage & { session?: session.Session & Partial<session.SessionData>; originalUrl?: string };
+type Req = IncomingMessage & { session?: session.Session & Partial<session.SessionData>; sessionID?: string; originalUrl?: string };
+
+/** A WebSocket's sign-in: the session it was opened with. It lasts only as long as that session does. */
+interface SocketAuth { readonly sid: string; readonly account: SessionAccount; end(): void; }
 
 const BODY_MAX = 4096;
 const MAX_RATE_STRIKES = 3;
+const SESSION_CHECK_MS = 10000;
 
-export function createApp({ cfg, log, manager, pool = null }: AppDeps): App {
+export function createApp({ cfg, log, manager, pool = null, sessionCheckMs = SESSION_CHECK_MS }: AppDeps): App {
   const started = Date.now();
   const accounts = pool ? new Accounts(pool) : null;
   const store = pool ? new PgSessionStore(pool) : null;
@@ -38,6 +46,9 @@ export function createApp({ cfg, log, manager, pool = null }: AppDeps): App {
   }) : null;
   const perIp = new Map<string, number>();
   let conns = 0;
+  /** every open signed-in socket, so a session that ends also ends the sign-in of the sockets opened with it */
+  const signedIn = new Set<SocketAuth>();
+  const endSession = (sid: string | undefined): void => { if (sid) for (const a of [...signedIn]) if (a.sid === sid) a.end(); };
 
   const clientIp = (req: IncomingMessage): string => {
     const remote = req.socket.remoteAddress ?? '';
@@ -108,7 +119,13 @@ export function createApp({ cfg, log, manager, pool = null }: AppDeps): App {
     // same-origin only: a cross-site form or script cannot sign anybody in or out
     if (!originOk(req)) { json(res, 403, { error: 'origin' }); return; }
     if (!String(req.headers['content-type'] ?? '').startsWith('application/json')) { json(res, 415, { error: 'content_type' }); return; }
-    if (what === 'logout') { await new Promise<void>((r) => s.destroy(() => r())); json(res, 200, { ok: true }); return; }
+    if (what === 'logout') {
+      const sid = req.sessionID;
+      await new Promise<void>((r) => s.destroy(() => r()));
+      endSession(sid);
+      json(res, 200, { ok: true });
+      return;
+    }
     if (what !== 'register' && what !== 'login') { json(res, 404, { error: 'not_found' }); return; }
     let body: Record<string, unknown>;
     try { body = (await readBody(req)) as Record<string, unknown>; } catch (e) { json(res, (e as Error).message === 'too_large' ? 413 : 400, { error: (e as Error).message }); return; }
@@ -129,8 +146,10 @@ export function createApp({ cfg, log, manager, pool = null }: AppDeps): App {
       json(res, what === 'register' ? 409 : 401, { error: what === 'register' ? 'username_taken' : 'invalid_credentials' });
       return;
     }
-    // a fresh session ID on every sign-in (no session fixation)
+    // a fresh session ID on every sign-in (no session fixation); the replaced session, and its sockets' sign-in, end
+    const oldSid = req.sessionID;
     await new Promise<void>((r) => s.regenerate(() => r()));
+    endSession(oldSid);
     req.session!.account = { id: acct.id, username: acct.username };
     await new Promise<void>((r) => req.session!.save(() => r()));
     log.info(what === 'register' ? 'account.register' : 'account.login', { account: acct.id });
@@ -162,7 +181,8 @@ export function createApp({ cfg, log, manager, pool = null }: AppDeps): App {
     socket.once('close', release);
     void runSession(req, {}).then(() => {
       const acct = req.session?.account ?? null;
-      wss.handleUpgrade(req, socket, head, (ws) => { ws.once('close', release); connection(ws, ip, acct); });
+      const sid = acct ? req.sessionID ?? null : null;
+      wss.handleUpgrade(req, socket, head, (ws) => { ws.once('close', release); connection(ws, ip, acct && sid ? { sid, account: acct } : null); });
     }, () => { release(); reject(socket, 500, 'Internal Server Error'); });
   });
 
@@ -178,8 +198,39 @@ export function createApp({ cfg, log, manager, pool = null }: AppDeps): App {
   }, 25000);
   keepalive.unref();
 
-  function connection(ws: WebSocket, ip: string, account: SessionAccount | null): void {
+  // Sessions end outside this process too (the owner's password reset, expiry), so signed-in sockets re-check theirs. A
+  // database error ends nobody's sign-in; room entry checks again on its own.
+  let checking = false;
+  const sessionCheck = store ? setInterval(() => {
+    if (checking || !signedIn.size) return;
+    checking = true;
+    const list = [...signedIn];
+    store.live(list.map((a) => ({ sid: a.sid, accountId: a.account.id })))
+      .then((live) => { for (const a of list) if (!live.has(a.sid)) a.end(); }, (e: unknown) => log.warn('ws.session_check_failed', { error: String(e) }))
+      .finally(() => { checking = false; });
+  }, sessionCheckMs) : null;
+  sessionCheck?.unref();
+
+  function connection(ws: WebSocket, ip: string, signIn: { sid: string; account: SessionAccount } | null): void {
     alive.set(ws, true);
+    // the socket's sign-in: dropped (and the socket closed) as soon as its session ends, so a revoked or expired session
+    // never creates, joins or resumes an account seat, and never keeps driving one
+    let auth: SocketAuth | null = null;
+    if (signIn) {
+      const a: SocketAuth = {
+        ...signIn,
+        end: () => {
+          if (auth !== a) return;
+          auth = null; signedIn.delete(a);
+          log.info('ws.session_ended', { account: a.account.id });
+          send({ t: 'bye', code: 'expired', detail: 'session' });
+          ws.close(4003, 'session');
+        },
+      };
+      auth = a; signedIn.add(a);
+    }
+    /** messages that arrived while a room entry waits on its session check: handled after it, in order */
+    let backlog: ClientMsg[] | null = null;
     ws.on('pong', () => alive.set(ws, true));
     let hello = false;
     let room: Room | null = null;
@@ -205,10 +256,11 @@ export function createApp({ cfg, log, manager, pool = null }: AppDeps): App {
       tokens--;
       const p = parseClientMessage(isBinary ? null : data.toString('utf8'));
       if (!p.ok) { send({ t: 'nack', ref: p.ref, code: p.code }); return; }
-      dispatch(p.msg);
+      handle(p.msg);
     });
     ws.on('close', () => {
       clearTimeout(helloTimer);
+      if (auth) { signedIn.delete(auth); auth = null; }
       if (room && pid) room.disconnect(pid, peer, manager.now());
       room = null; pid = null;
     });
@@ -223,7 +275,19 @@ export function createApp({ cfg, log, manager, pool = null }: AppDeps): App {
       if (r.room.state === 'results' && r.room.result) send({ t: 'result', envelope: r.room.result });
     }
 
-    function dispatch(m: ClientMsg): void {
+    function handle(m: ClientMsg): void {
+      if (backlog) { backlog.push(m); return; }
+      const waiting = dispatch(m);
+      if (!waiting) return;
+      backlog = [];
+      void waiting.catch((e: unknown) => { log.error('ws.dispatch_error', { error: String(e) }); ws.terminate(); }).finally(() => {
+        const q = backlog ?? [];
+        backlog = null;
+        for (const x of q) handle(x);
+      });
+    }
+
+    function dispatch(m: ClientMsg): Promise<void> | void {
       if (!hello) {
         if (m.t !== 'hello') { send({ t: 'nack', ref: m.t, code: 'hello_required' }); return; }
         if (m.v !== PROTOCOL_VERSION || m.proto !== PROTOCOL_NAME) {
@@ -240,20 +304,32 @@ export function createApp({ cfg, log, manager, pool = null }: AppDeps): App {
       if (room && room.state === 'closed') { room = null; pid = null; }
       if (m.t === 'create' || m.t === 'join' || m.t === 'resume') {
         if (room) { send({ t: 'nack', ref: m.t, code: 'already_in_room' }); return; }
-        const accountId = account?.id ?? null;
-        const r = m.t === 'create'
-          ? manager.create(peer, { name: m.name, livery: m.livery, accountId, mode: m.mode, settings: m.settings, championship: m.championship })
-          : m.t === 'join'
-            ? manager.join(peer, ip, { code: m.code, name: m.name, livery: m.livery, accountId })
-            : manager.resume(peer, ip, m.room, m.participant, m.token, accountId);
-        if (!r.ok) { send({ t: 'nack', ref: m.t, code: r.code, ...(r.detail ? { detail: r.detail } : {}) }); return; }
-        bind(r, m.t === 'resume');
-        return;
+        if (!auth) { enter(m, null); return; }
+        // a signed-in entry binds the seat to the account: the session must still be live right now
+        const a = auth;
+        return store!.live([{ sid: a.sid, accountId: a.account.id }]).then((live) => {
+          if (ws.readyState !== ws.OPEN || auth !== a) return;
+          if (!live.has(a.sid)) { send({ t: 'nack', ref: m.t, code: 'expired', detail: 'session' }); a.end(); return; }
+          enter(m, a.account.id);
+        }, (e: unknown) => {
+          log.warn('ws.session_check_failed', { error: String(e) });
+          send({ t: 'nack', ref: m.t, code: 'unavailable', detail: 'sign-in check failed, try again' });
+        });
       }
       if (!room || !pid) { send({ t: 'nack', ref: m.t, code: 'not_in_room' }); return; }
       const reply = room.handle(pid, m, manager.now());
       if (reply) send(reply);
       if (m.t === 'leave') { room = null; pid = null; }
+    }
+
+    function enter(m: Extract<ClientMsg, { t: 'create' | 'join' | 'resume' }>, accountId: string | null): void {
+      const r = m.t === 'create'
+        ? manager.create(peer, { name: m.name, livery: m.livery, accountId, mode: m.mode, settings: m.settings, championship: m.championship })
+        : m.t === 'join'
+          ? manager.join(peer, ip, { code: m.code, name: m.name, livery: m.livery, accountId })
+          : manager.resume(peer, ip, m.room, m.participant, m.token, accountId);
+      if (!r.ok) { send({ t: 'nack', ref: m.t, code: r.code, ...(r.detail ? { detail: r.detail } : {}) }); return; }
+      bind(r, m.t === 'resume');
     }
   }
 
@@ -266,6 +342,7 @@ export function createApp({ cfg, log, manager, pool = null }: AppDeps): App {
     }),
     close: async () => {
       clearInterval(keepalive);
+      if (sessionCheck) clearInterval(sessionCheck);
       store?.close();
       for (const c of wss.clients) c.terminate();
       await new Promise<void>((r) => wss.close(() => r()));

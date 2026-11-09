@@ -145,6 +145,10 @@ No account awards are computed.
   - A new session ID is issued on every sign-in.
   - POSTs need an allowed `Origin` and `application/json`, with a body of at most 4 KB.
   - The WebSocket upgrade reads the same session, so a signed-in seat records its `accountId`.
+  - A signed-in socket stays bound to that session ID and is signed in only while the session lives. Logout, a new sign-in (which replaces the session ID), expiry and the owner's password reset all end it. The server then sends `bye` `expired` (detail `session`) and closes the socket with 4003.
+    - Logout and sign-in end the session's sockets at once.
+    - `create`, `join` and `resume` from a signed-in socket re-check the session first. A dead session gets `nack` `expired`, so it can never make an account seat. If the check itself fails, the reply is `unavailable`.
+    - Every 10 s the server re-checks all signed-in sockets. That catches a reset run from the admin process, or an expiry, while a socket sits in a seat. The seat then waits out its grace like any dropped link, and only the same account can resume it.
 - **Recovery** is owner-run on the host, with no email: `node server-dist/admin.mjs reset-password <username>`.
   - It reads the new password from stdin. With empty stdin, it generates a 20-character password and prints it once.
   - It sets the new Argon2id hash and deletes every session of that account in one transaction.
