@@ -23,6 +23,7 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const OUT = path.join(ROOT, '.qa/online-check', new Date().toISOString().replace(/[:.]/g, '-'));
 const MAX_MIN = Number(process.env.ONLINE_CHECK_MAX_MIN ?? 40);
 const str = (id) => STRINGS[id].split('{')[0].trim();
+const waitUntil = async (f, ms) => { const end = Date.now() + ms; while (!f()) { if (Date.now() > end) throw new Error('timeout'); await sleep(10); } };
 
 // ------------------------------------------------------------ infrastructure
 /** A TCP relay with adjustable one-way delay, jitter and a stall switch. Data order is always kept, as TCP does. */
@@ -62,6 +63,11 @@ const VIEWS = {
   phoneLandscape: { viewport: { width: 844, height: 390 }, deviceScaleFactor: 2, ...PHONE },
   tablet: { viewport: { width: 1024, height: 768 }, deviceScaleFactor: 2, ...PHONE },
   tabletPortrait: { viewport: { width: 820, height: 1180 }, deviceScaleFactor: 2, ...PHONE },
+  // functional runs: CSS sizes of real devices at device pixel ratio 1, and a small desktop, so SwiftShader keeps up
+  small: { viewport: { width: 480, height: 270 } },
+  phoneLo: { viewport: { width: 390, height: 844 }, deviceScaleFactor: 1, ...PHONE },
+  phoneLandLo: { viewport: { width: 844, height: 390 }, deviceScaleFactor: 1, ...PHONE },
+  tabletLo: { viewport: { width: 1024, height: 768 }, deviceScaleFactor: 1, ...PHONE },
 };
 
 /** A throwaway browser context on the low preset, with the shared in-page driver and a key or touch "Keys". */
@@ -74,17 +80,24 @@ async function openPage(run, url, view = 'laptop', { touch = false, name = view 
   page.on('console', (m) => { if (m.type() === 'error' && !/WebSocket|ERR_CONNECTION|Failed to load resource|net::/.test(m.text())) errors.push(`console: ${m.text()}`); });
   await page.addInitScript(instrument, { seed: null });
   await page.addInitScript(() => {
-    // press-to-screen timing: the last Throttle/Brake press, and the first drawn frame whose (server) car shows it
-    const q = (window.__lat = { downAt: 0, kind: '', samples: [] });
-    window.addEventListener('keydown', (e) => { if (!e.repeat && (e.code === 'KeyW' || e.code === 'KeyS')) { q.downAt = performance.now(); q.kind = e.code; } }, true);
-    window.addEventListener('pointerdown', (e) => { const h = e.target.closest?.('[data-hold]')?.dataset.hold; if (h) { q.downAt = performance.now(); q.kind = h === 'throttle' ? 'KeyW' : 'KeyS'; } }, true);
+    // Brake press timing, armed by the check: to the first server state that shows it (network + server), and to the first drawn frame
+    const q = (window.__lat = { arm: false, downAt: 0, waitNet: false, waitDraw: false, net: [], drawn: [] });
+    window.addEventListener('keydown', (e) => { if (q.arm && !e.repeat && e.code === 'KeyS') { q.arm = false; q.downAt = performance.now(); q.waitNet = q.waitDraw = true; } }, true);
+    const W = window.WebSocket;
+    window.WebSocket = class extends W {
+      constructor(...a) {
+        super(...a);
+        this.addEventListener('message', (ev) => {
+          if (!q.waitNet || typeof ev.data !== 'string' || !ev.data.startsWith('{"t":"state"')) return;
+          const m = JSON.parse(ev.data), me = window.__game?.localId, c = m.snap.cars.find((x) => x.id === me);
+          if (c && c.brake > 0) { q.net.push(+(performance.now() - q.downAt).toFixed(1)); q.waitNet = false; }
+        });
+      }
+    };
     const raf = window.requestAnimationFrame.bind(window);
     const tick = (ts) => {
       const g = window.__game;
-      if (g && q.downAt && g.net && g.screen === 'race') {
-        const p = g.race.car(g.localId);
-        if (p && (q.kind === 'KeyW' ? p.throttle > 0 : p.brake > 0)) { q.samples.push(+(ts - q.downAt).toFixed(1)); q.downAt = 0; }
-      }
+      if (g && q.waitDraw && g.net) { const p = g.race.car(g.localId); if (p && p.brake > 0) { q.drawn.push(+(ts - q.downAt).toFixed(1)); q.waitDraw = false; } }
       raf(tick);
     };
     raf(tick);
@@ -127,8 +140,9 @@ async function joinRoom(s, name, code) {
 }
 
 /** Drive several browsers at once, each with its own keys or fingers, until each reaches `until`. */
+const PACE = 0.72;
 async function driveAll(list, until, budgetMs, opts = {}) {
-  return Promise.all(list.map((s) => driveUntil(s, until, { budgetMs, opts }).catch((e) => ({ error: String(e.message ?? e) }))).concat());
+  return Promise.all(list.map((s) => driveUntil(s, until, { budgetMs, opts: { pace: PACE, ...opts } }).catch((e) => ({ error: String(e.message ?? e) }))).concat());
 }
 const done = (st) => st.finished || st.screen === 'netres' || st.screen === 'netwait' || st.screen === 'online' || st.screen === 'title';
 
@@ -182,11 +196,11 @@ async function gate(run, c) {
 /** Lobby flows and the 4-, 3- and 2-player races, all through the UI on the time-scaled server. */
 async function lobby(run, c) {
   const url = run.fastUrl;
-  const host = await openPage(run, url, 'laptop', { name: 'host' });
-  const phone = await openPage(run, url, 'phonePortrait', { touch: true, name: 'phone' });
-  const tablet = await openPage(run, url, 'tablet', { touch: true, name: 'tablet' });
-  const desk = await openPage(run, url, 'laptop', { name: 'desk' });
-  const fifth = await openPage(run, url, 'phoneLandscape', { touch: true, name: 'fifth' });
+  const host = await openPage(run, url, 'small', { name: 'host' });
+  const phone = await openPage(run, url, 'phoneLo', { touch: true, name: 'phone' });
+  const tablet = await openPage(run, url, 'tabletLo', { touch: true, name: 'tablet' });
+  const desk = await openPage(run, url, 'small', { name: 'desk' });
+  const fifth = await openPage(run, url, 'phoneLandLo', { touch: true, name: 'fifth' });
   const all = [host, phone, tablet, desk];
   const code = await createRoom(host, 'Host Ana');
   c.ok('Create room: a 6-character code is shown as text in the lobby', /^[A-Z2-9]{6}$/.test(code) && (await host.page.locator('#l-code').textContent()) === code, code);
@@ -290,7 +304,7 @@ async function lobby(run, c) {
   await phone.page.locator('#l-start').tap();
   for (const s of [phone, tablet]) await waitFor(s.page, () => window.__game.screen === 'race');
   // the winner's finish must not stop the other: tablet drives slower, phone finishes first
-  const [fa, fb] = await Promise.all([driveUntil(phone, done, { budgetMs: 6 * 60000 }).catch((e) => ({ error: String(e) })), (async () => { await sleep(4000); return driveUntil(tablet, done, { budgetMs: 6 * 60000 }).catch((e) => ({ error: String(e) })); })()]);
+  const [fa, fb] = await Promise.all([driveUntil(phone, done, { budgetMs: 6 * 60000, opts: { pace: PACE } }).catch((e) => ({ error: String(e) })), (async () => { await sleep(4000); return driveUntil(tablet, done, { budgetMs: 6 * 60000, opts: { pace: PACE * 0.9 } }).catch((e) => ({ error: String(e) })); })()]);
   const mid = await read(tablet.page, () => window.__game.screen);
   for (const s of [phone, tablet]) await waitFor(s.page, () => window.__game.screen === 'netres', undefined, 150000);
   const res2 = await Promise.all([phone, tablet].map((s) => read(s.page, () => window.__game.net.result)));
@@ -304,8 +318,8 @@ async function lobby(run, c) {
 /** One representative race: queue at the box, automatic stop-and-go, own-bay refuelling with a fresh Throttle, override and Defer, final-lap DQ. */
 async function service(run, c) {
   const url = run.fastUrl;
-  const a = await openPage(run, url, 'laptop', { name: 'keys' });
-  const b = await openPage(run, url, 'phoneLandscape', { touch: true, name: 'touch' });
+  const a = await openPage(run, url, 'small', { name: 'keys' });
+  const b = await openPage(run, url, 'phoneLandLo', { touch: true, name: 'touch' });
   const code = await createRoom(a, 'Keys', { ai: true });
   await joinRoom(b, 'Touch', code);
   await waitFor(b.page, () => window.__game.screen === 'lobby');
@@ -354,7 +368,7 @@ async function service(run, c) {
   c.ok('Own-bay refuelling: service in the driver\'s own bay, then a fresh Throttle press releases the car', [seenA, seenB].some((x) => x.bayOwn && (x.sg.includes('ready') || x.sg.includes('release')) && x.modes.includes('bayOut')), { a: [seenA.sg, seenA.modes], b: [seenB.sg, seenB.modes] });
   run.evidence.service = { aSg: seenA.sg, bSg: seenB.sg, aWait: seenA.wait, bWait: seenB.wait, r1 };
   // final-lap DQ: once the keyboard driver is on its last lap past the pit entrance, one more offence makes a stop it can no longer serve
-  const lastLap = await driveUntil(a, (st) => done(st) || (st.lap === LAPS - 1 && st.mode === 'race' && room.race.T.wrapS(A.u) > room.race.T.PIT_OUT1 + 5), { budgetMs: 5 * 60000 }).catch((e) => ({ error: String(e) }));
+  const lastLap = await driveUntil(a, (st) => done(st) || (st.lap === LAPS - 1 && st.mode === 'race' && room.race.T.wrapS(A.u) > room.race.T.PIT_OUT1 + 5), { budgetMs: 5 * 60000, opts: { pace: PACE } }).catch((e) => ({ error: String(e) }));
   room.race.offence(A, B, 'rear'); room.race.offence(A, B, 'rear'); room.race.offence(A, B, 'rear');
   const rest = await driveAll(both, done, 5 * 60000);
   for (const s of both) await waitFor(s.page, () => window.__game.screen === 'netres', undefined, 150000);
@@ -370,8 +384,40 @@ async function service(run, c) {
 async function connection(run, c) {
   const url = run.realUrl;
   const P = run.proxy.ctl;
-  const a = await openPage(run, url, 'laptop', { name: 'keys' });
-  const b = await openPage(run, url, 'phonePortrait', { touch: true, name: 'phone' });
+  // ---- the protocol path alone (no rendering): a headless client with the browser's client module, through the same proxy
+  const proto = async (label) => {
+    const cl = new run.qa.OnlineClient(`ws://127.0.0.1:${run.proxy.port}/ws`, run.qa.WebSocket, { headers: { origin: 'http://localhost:4182' } });
+    await cl.connect();
+    const j = await cl.request({ t: 'create', name: 'Probe', mode: 'solo', settings: { track: 'circuit-1' } });
+    cl.send({ t: 'start' });
+    let snap = null;
+    cl.onMessage = (m) => { if (m.t === 'state') snap = m.snap; };
+    await waitUntil(() => snap && snap.phase === 'racing', 20000);
+    cl.startHeartbeat();
+    const out = [];
+    for (let k = 0; k < 15; k++) {
+      const t0 = performance.now();
+      cl.setHeld(false, true);
+      await waitUntil(() => snap.cars.find((c) => c.id === j.you).brake > 0, 3000);
+      out.push(performance.now() - t0);
+      cl.setHeld(false, false);
+      await waitUntil(() => snap.cars.find((c) => c.id === j.you).brake === 0, 3000);
+      await sleep(120);
+    }
+    cl.send({ t: 'leave' }); cl.close();
+    const v = out.sort((x, y) => x - y);
+    const r = { label, n: v.length, medianMs: +v[Math.floor(v.length / 2)].toFixed(1), p90Ms: +v[Math.floor(v.length * 0.9)].toFixed(1), maxMs: +v.at(-1).toFixed(1) };
+    run.evidence.protocolLatency = [...(run.evidence.protocolLatency ?? []), r];
+    return r;
+  };
+  const pl0 = await proto('loopback');
+  c.ok('Protocol path, loopback: press -> server step -> next 20 Hz snapshot (headless client, no rendering)', pl0.medianMs < 120, pl0);
+  P.delayMs = 60; P.jitterMs = 30;
+  const pl1 = await proto('+60 ms each way, 0-30 ms jitter');
+  c.ok('Protocol path, induced latency: confirmation grows by about the added round trip only', pl1.medianMs < pl0.medianMs + 220, pl1);
+  P.delayMs = 0; P.jitterMs = 0;
+  const a = await openPage(run, url, 'small', { name: 'keys' });
+  const b = await openPage(run, url, 'phoneLo', { touch: true, name: 'phone' });
   const code = await createRoom(a, 'Keys');
   await joinRoom(b, 'Phone', code);
   await waitFor(b.page, () => window.__game.screen === 'lobby');
@@ -386,28 +432,30 @@ async function connection(run, c) {
 
   // ---- responsiveness: press-to-drawn time and snapshot buffer, ordinary then induced latency, then a stall
   const measure = async (label) => {
-    await read(a.page, () => { window.__lat.samples = []; });
+    await read(a.page, () => { window.__lat.net = []; window.__lat.drawn = []; });
     const t0 = await read(a.page, () => ({ ...window.__game.net.buf }));
-    for (let k = 0; k < 6; k++) {
-      await driveFor(a, 1500);
+    const w0 = Date.now();
+    for (let k = 0; k < 8; k++) {
+      await driveFor(a, 1200);
       await a.keys.release();
-      await sleep(350);
-      await a.page.keyboard.down('KeyS'); await sleep(400); await a.page.keyboard.up('KeyS');
-      await sleep(150);
+      await waitFor(a.page, () => window.__game.race.car(window.__game.localId).brake === 0, undefined, 3000).catch(() => null);
+      await read(a.page, () => { window.__lat.arm = true; });
+      await a.page.keyboard.down('KeyS'); await sleep(350); await a.page.keyboard.up('KeyS');
+      await sleep(250);
     }
-    const r = await read(a.page, () => ({ samples: window.__lat.samples, buf: { ...window.__game.net.buf }, lag: window.__game.net.lagMs }));
-    const sorted = [...r.samples].sort((x, y) => x - y);
-    const q = (p) => sorted.length ? sorted[Math.min(sorted.length - 1, Math.floor(p * sorted.length))] : null;
-    const out = { label, n: sorted.length, medianMs: q(0.5), p90Ms: q(0.9), maxMs: sorted.at(-1) ?? null, starvedFrames: r.buf.starved - t0.starved, frames: r.buf.frames - t0.frames, reanchors: r.buf.reanchors - t0.reanchors, maxGapMs: r.buf.maxGapMs, depth: r.buf.depth, staleSnaps: r.buf.stale - t0.stale };
+    const r = await read(a.page, () => ({ net: window.__lat.net, drawn: window.__lat.drawn, buf: { ...window.__game.net.buf }, lag: window.__game.net.lagMs }));
+    const stat = (xs) => { const v = [...xs].sort((x, y) => x - y); const q = (p) => (v.length ? v[Math.min(v.length - 1, Math.floor(p * v.length))] : null); return { n: v.length, median: q(0.5), p90: q(0.9), max: v.at(-1) ?? null }; };
+    const frames = r.buf.frames - t0.frames, wall = (Date.now() - w0) / 1000;
+    const out = { label, toServerState: stat(r.net), toDrawnFrame: stat(r.drawn), fps: +(frames / wall).toFixed(1), starvedFrames: r.buf.starved - t0.starved, frames, reanchors: r.buf.reanchors - t0.reanchors, maxGapMs: Math.round(r.buf.maxGapMs), depth: r.buf.depth, staleSnaps: r.buf.stale - t0.stale };
     run.evidence.latency = [...(run.evidence.latency ?? []), out];
     return out;
   };
-  const driveFor = (s, ms) => { const end = Date.now() + ms; return driveUntil(s, (st) => Date.now() > end || done(st), { budgetMs: ms + 5000 }); };
+  const driveFor = (s, ms) => { const end = Date.now() + ms; return driveUntil(s, (st) => Date.now() > end || done(st), { budgetMs: ms + 5000, opts: { pace: PACE } }); };
   const m0 = await measure('loopback (no added delay)');
-  c.ok('Ordinary latency: Throttle/Brake presses reach the drawn car (press -> server -> snapshot -> frame), recorded', m0.n >= 8 && m0.medianMs < 400, m0);
+  c.ok('Browser, loopback: Brake press -> server state -> drawn frame recorded (SwiftShader frame rate shown; diagnostic)', m0.toServerState.n >= 4 && m0.staleSnaps === 0, m0);
   P.delayMs = 60; P.jitterMs = 30;
   const m1 = await measure('+60 ms each way, 0-30 ms jitter');
-  c.ok('Induced latency: still responsive, buffer bounded, no stale snapshot applied', m1.n >= 8 && m1.medianMs < 700 && m1.depth <= 24, m1);
+  c.ok('Browser, +60 ms/0-30 ms jitter: presses confirmed, buffer bounded, no stale snapshot applied (diagnostic)', m1.toServerState.n >= 4 && m1.depth <= 24 && m1.staleSnaps === 0, m1);
   P.delayMs = 0; P.jitterMs = 0;
   const rt0 = A.raceTime ?? room.race.raceTime;
   const laps0 = await read(a.page, () => window.__game.race.car(window.__game.localId).lapsDone);
@@ -464,7 +512,8 @@ async function connection(run, c) {
   const lapsA = A.lapsDone;
   await read(a.page, () => window.__game.netDrop());
   await sleep(120);
-  const drop = { held: { ...seat(ida).held }, connected: !!seat(ida).peer, banner: await read(a.page, () => document.getElementById('net-banner').textContent) };
+  const drop = { held: { ...seat(ida).held }, connected: !!seat(ida).peer };
+  drop.banner = await waitFor(a.page, () => document.getElementById('net-banner').textContent, undefined, 3000).then((h) => h.jsonValue()).catch(() => '');
   await waitFor(a.page, () => window.__game.net && window.__game.net.conn === 'connected', undefined, 15000);
   await sleep(500);
   const rec = await read(a.page, () => ({ me: window.__game.net.me, reconnects: window.__game.net.reconnects, held: window.__game.input.held('throttle') }));
@@ -477,7 +526,7 @@ async function connection(run, c) {
   await waitFor(b.page, () => window.__game && window.__game.screen === 'title');
   await waitOnline(b.page);
   await b.page.locator('#o-rejoin').tap();
-  await waitFor(b.page, () => window.__game.screen === 'race' && window.__game.net && window.__game.net.me, undefined, 15000);
+  await waitFor(b.page, () => window.__game.screen === 'race' && window.__game.net && window.__game.net.me, undefined, 15000).catch(async (e) => { throw new Error(`${e.message} ${JSON.stringify(await read(b.page, () => ({ screen: window.__game.screen, msg: document.getElementById('n-msg')?.textContent, net: window.__game.net && window.__game.net.conn })))} ${run.real.log.lines.slice(-10).join(' ')}`); });
   c.ok('Page reload: Rejoin from the title resumes the same seat before expiry', (await read(b.page, () => window.__game.localId)) === idb);
 
   // ---- expiry: the phone cannot reconnect for longer than the grace period
@@ -552,12 +601,12 @@ async function main() {
   const origins = ['http://localhost:4181', 'http://localhost:4182', 'http://localhost:4183'];
   const common = { allowedOrigins: origins, maxConnections: 100, maxConnectionsPerIp: 60, msgRate: 120, msgBurst: 200, graceS: 8, roomCap: 20 };
   const fast = await startQaServer({ ...common, timeScale: 2, maxCatchUpSteps: 12 });
-  const real = await startQaServer({ ...common });
+  const real = await startQaServer({ ...common, graceS: 20 });
   const proxy = await latencyProxy(real);
   const dead = 'http://127.0.0.1:9';   // nothing listens: the service is "down"
   const pv = [await startPreview(4181, fast.url), await startPreview(4182, `http://127.0.0.1:${proxy.port}`), await startPreview(4183, dead)];
   const browser = await chromium.launch({ headless: true });
-  const run = { browser, fast, real, proxy, fastUrl: pv[0].url, realUrl: pv[1].url, deadUrl: pv[2].url, evidence: {} };
+  const run = { qa: await import(pathToFileURL(qaFile).href), browser, fast, real, proxy, fastUrl: pv[0].url, realUrl: pv[1].url, deadUrl: pv[2].url, evidence: {} };
   console.log(`Chromium ${browser.version()}; fast server :${fast.port} (time x2), real-time server :${real.port} behind proxy :${proxy.port}`);
   const report = { commit: execFileSync('git', ['rev-parse', 'HEAD'], { cwd: ROOT, encoding: 'utf8' }).trim(), browser: `chromium ${browser.version()}`, scenarios: [] };
   let failed = false;

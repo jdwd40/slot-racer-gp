@@ -1220,6 +1220,14 @@ banner.id = 'net-banner';
 banner.setAttribute('role', 'status');
 app.appendChild(banner);
 let bannerKey = '';
+/** This browser's held pedals for its own seat: sent the moment they change (and checked every frame), never another seat's. */
+function sendHeld(): void {
+  if (!net || !netRaceId) return;
+  const driving = screen === 'race';
+  net.setHeld(driving && input.held('throttle'), driving && input.held('brake'));
+}
+input.onChange = sendHeld;
+
 function syncBanner(): void {
   let key = '', text = '';
   if (net && net.conn === 'reconnecting') { key = 'rec'; text = t('net.reconnecting', { n: net.room?.graceS ?? 20 }); }
@@ -1270,9 +1278,8 @@ function frame(now: number): void {
   let poses: Pose[];
   let alpha = 1;
   if (net && netRaceId) {
-    // online: never simulated here. This browser's pedals go to the server; cars are drawn from buffered snapshots
-    const driving = screen === 'race' || screen === 'netwait';
-    net.setHeld(driving && input.held('throttle'), driving && input.held('brake'));
+    // online: never simulated here. This browser's pedals go to the server (sendHeld); cars are drawn from buffered snapshots
+    sendHeld();
     const at = netBuf.sample(performance.now());
     poses = race.cars.map((c) => at?.get(c.id) ?? poseOf(c));
   } else {

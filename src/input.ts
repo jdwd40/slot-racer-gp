@@ -12,13 +12,15 @@ export const KEY_TAPS: Readonly<Record<string, TapAction>> = { Space: 'lane', Ke
 /** Which sources hold which action. Every key and every pointer is its own source, so one letting go never releases another. */
 export class DrivingInput {
   private holds = new Map<string, HoldAction>();
+  /** Runs after any hold changes, so an online client can send it at once instead of waiting for the next frame. */
+  onChange: (() => void) | null = null;
 
   constructor(private taps: Record<TapAction, () => void>) {}
 
-  press(source: string, action: HoldAction): void { this.holds.set(source, action); }
-  release(source: string): void { this.holds.delete(source); }
+  press(source: string, action: HoldAction): void { this.holds.set(source, action); this.onChange?.(); }
+  release(source: string): void { if (this.holds.delete(source)) this.onChange?.(); }
   /** Forget every source: whatever is still physically down needs a fresh press to count again. */
-  clear(): void { this.holds.clear(); }
+  clear(): void { const had = this.holds.size > 0; this.holds.clear(); if (had) this.onChange?.(); }
   held(action: HoldAction): boolean {
     for (const a of this.holds.values()) if (a === action) return true;
     return false;

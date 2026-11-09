@@ -116,6 +116,7 @@ function instrument({ seed }) {
         target = Math.min(target, pr[at(s)], pr[at(s + look / 2)], pr[at(s + look)]);
       }
       if (p.recoverT > 0) target *= 0.8;
+      target *= o.pace ?? 1;   // online checks drive below the limit: SwiftShader frames and the network make every key late
       for (const c of r.cars) {
         if (c === p || c.mode === 'off' || c.mode === 'tow' || Math.abs(c.d - p.d) > T.CAR_W) continue;
         const gap = T.gapS(s, T.wrapS(c.u));

@@ -6,6 +6,8 @@ import { testConfig, type Config } from '../server/config';
 import { memoryLogger } from '../server/log';
 import { MemoryResultSink } from '../server/results';
 import { RoomManager } from '../server/rooms';
+export { OnlineClient } from '../src/net/client';
+export { default as WebSocket } from 'ws';
 
 export async function startQaServer(over: Partial<Config>) {
   const cfg = testConfig({ host: '127.0.0.1', port: 0, ...over });
