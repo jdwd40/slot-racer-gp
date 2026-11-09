@@ -117,6 +117,8 @@ describe('headless clients race over WebSockets', () => {
     // Scenario setup on the server (as the race-core tests do): two drivers are given a stop-and-go due on the same pit
     // approach, placed 30 m and 37 m short of the entrance; the first human past the last pit entrance on the final lap is
     // given a stop-and-go it can no longer serve. Everything after that (routing, takeover, queueing, service, release, DQ) is the server's.
+    // Each car is placed on its own lap from lap 3 on, not on one shared lap: the bots' early laps vary with timing, and a
+    // driver who loses a lap early would never share a lap count with the other again, so the setup could never fire.
     let contention = false, finalDq = false, dqId = '';
     // checked after every simulation step (not every tick: under load one tick may run many steps)
     const r = rm.race!;
@@ -125,7 +127,7 @@ describe('headless clients race over WebSockets', () => {
       update(dt, inputs);
       if (r.phase !== 'racing') return;
       const a = r.car(A)!, b = r.car(B)!, c = r.car(C)!;
-      if (!contention && a.crossed === 3 && b.crossed === 3 && a.mode === 'race' && b.mode === 'race' && !a.pitReq && !b.pitReq && !a.fuelReq && !b.fuelReq) {
+      if (!contention && a.crossed >= 3 && b.crossed >= 3 && a.mode === 'race' && b.mode === 'race' && !a.pitReq && !b.pitReq && !a.fuelReq && !b.fuelReq) {
         for (const [car, before] of [[a, 30], [b, 37]] as const) {
           car.u = car.crossed * r.T.L + r.T.PIT_IN0 - before; car.hiU = car.u; car.laneSide = -1; car.d = -r.T.LANE_HALF; car.change = null;
           car.v = 12; car.sectors = 7; car.lapValid = false;
@@ -264,7 +266,6 @@ describe('protocol and access checks', () => {
     expect(rm.participant(me)).toMatchObject({ peer: null, held: { up: false, down: false } });
     const back = await client();
     const r = await back.request({ t: 'resume', ...cred });
-    console.log("DBG resume", JSON.stringify(r));
     expect(r).toMatchObject({ t: 'joined', resumed: true, you: me });
     expect((r as { ctlSeq: number }).ctlSeq).toBe(seq);
     expect(back.received.some((m) => m.t === 'state')).toBe(true);   // current at once
