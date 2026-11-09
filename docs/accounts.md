@@ -29,6 +29,7 @@ No third-party identity provider, mail service or paid service is used or needed
 | Restore | `GET /api/auth/me` | `{ account, profile, session: 'active' }`, or `{ account: null, session: 'none' \| 'expired' }`. `expired` means the browser sent a session cookie the server no longer accepts (expired, signed out elsewhere, owner reset); the reply also clears that cookie |
 | Profile | `GET /api/profile`, `POST /api/profile` `{ displayName, expectAccount? }` | The session's own profile only. `401 signed_out` / `session_expired`; `409 identity_changed` when `expectAccount` (the account the form was opened for) is not the session's |
 | Sign out | `POST /api/auth/logout` | Deletes the session row and clears the cookie; sockets opened with it are signed out at once (`bye expired`, close 4003). If the store cannot delete the row: `503 unavailable`, cookie kept |
+| Store unreadable | any of the above, a WebSocket upgrade | When the session store cannot be read (database down or timing out), every request that carries a session cookie gets `503 unavailable` (a socket upgrade: HTTP 503), and the cookie is kept. Nobody knows the session ended, so it is never reported as `expired` and the browser does not clear its sign-in |
 | Recover | admin `reset-password` (above) | No email. The owner verifies the player out of band, then gives them the new password privately |
 
 **Session lifetime:** 30 days absolute from sign-in (`rolling: false`); there is no "remember me" variant. Expired rows are

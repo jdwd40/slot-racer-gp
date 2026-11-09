@@ -82,11 +82,23 @@ export function createApp({ cfg, log, manager, pool = null, sessionCheckMs = SES
     return remote;
   };
   const originOk = (req: IncomingMessage): boolean => typeof req.headers.origin === 'string' && cfg.allowedOrigins.includes(req.headers.origin);
-  const runSession = (req: Req, res: ServerResponse | object): Promise<void> => new Promise((resolve) => {
+  /** Load the request's session. Rejects when the store cannot be read: that is not an expired session. */
+  const runSession = (req: Req, res: ServerResponse | object): Promise<void> => new Promise((resolve, reject) => {
     if (!sessions) { resolve(); return; }
     req.originalUrl = req.url;
-    sessions(req as never, res as never, () => resolve());
+    sessions(req as never, res as never, (err?: unknown) => { if (err) reject(err); else resolve(); });
   });
+  /**
+   * runSession for an HTTP request. If the store cannot be read, answer 503 and keep the cookie: nobody knows the session
+   * ended, so neither this response nor the client may treat it as a sign-out.
+   */
+  const loadSession = async (req: Req, res: ServerResponse): Promise<boolean> => {
+    try { await runSession(req, res); return true; } catch (e) {
+      log.error('session.read_failed', { error: String(e) });
+      json(res, 503, { error: 'unavailable' });
+      return false;
+    }
+  };
 
   // ---------------------------------------------------------------------------------------------- HTTP
   const json = (res: ServerResponse, status: number, body: unknown): void => {
@@ -158,7 +170,7 @@ export function createApp({ cfg, log, manager, pool = null, sessionCheckMs = SES
 
   async function auth(req: Req, res: ServerResponse, what: string): Promise<void> {
     if (!accounts) { json(res, 503, { error: 'accounts_unavailable' }); return; }
-    await runSession(req, res);
+    if (!await loadSession(req, res)) return;
     const s = req.session!;
     if (req.method === 'GET' && what === 'me') {
       if (!s.account) {
@@ -237,7 +249,7 @@ export function createApp({ cfg, log, manager, pool = null, sessionCheckMs = SES
   async function profile(req: Req, res: ServerResponse): Promise<void> {
     if (!accounts) { json(res, 503, { error: 'accounts_unavailable' }); return; }
     if (req.method !== 'GET' && !writeGuard(req, res)) return;
-    await runSession(req, res);
+    if (!await loadSession(req, res)) return;
     const acct = req.session?.account;
     if (!acct) {
       const expired = staleCookie(req);
@@ -291,7 +303,7 @@ export function createApp({ cfg, log, manager, pool = null, sessionCheckMs = SES
       const acct = req.session?.account ?? null;
       const sid = acct ? req.sessionID ?? null : null;
       wss.handleUpgrade(req, socket, head, (ws) => { ws.once('close', release); connection(ws, ip, acct && sid ? { sid, account: acct } : null); });
-    }, () => { release(); reject(socket, 500, 'Internal Server Error'); });
+    }, (e: unknown) => { log.error('session.read_failed', { error: String(e) }); release(); reject(socket, 503, 'Service Unavailable'); });
   });
 
   // keepalive: a ping every 25 s keeps idle lobby sockets inside Nginx's proxy_read_timeout, and a peer that misses a pong
