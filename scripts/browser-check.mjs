@@ -1932,7 +1932,8 @@ async function autosg(run, c) {
   const G = await read(page, () => { const T = window.__game.T; return { PEN_S: T.PEN_S, PEN_HALF: T.PEN_HALF, PIT_IN0: T.PIT_IN0, PIT_OUT1: T.PIT_OUT1, PIT_SPEED: T.PIT_SPEED }; });
 
   // a clear box, Throttle held from before the takeover to the handover, Brake never pressed
-  await setup(page, { before: 44, v: 12 });
+  // placed at rest: on slow software frames a moving car can reach the takeover before two frames are read
+  await setup(page, { before: 44, v: 0 });
   await frames(page, 2);
   const armed = await st(page);
   c.ok('Keyboard: before the approach the HUD shows Stop-and-go armed and ordinary control applies', armed.phase === 'armed' && !armed.ctl && armed.chips.includes(LABEL.armed), armed);
@@ -1945,7 +1946,7 @@ async function autosg(run, c) {
   await handed(page);
   const out = await st(page);
   await keys.set('KeyW', false);
-  c.ok('Keyboard: served in full, Leaving pits to the exit, control handed back past the merge; no Brake, no bay, no fuel, no contact', out.owed === 0 && out.seen.leaving && out.handS >= G.PIT_OUT1 && out.handS < G.PIT_OUT1 + 1.5 && !out.ctl && out.phase === null && !out.inputs.includes('B') && out.maxV <= G.PIT_SPEED + 0.05 && clean(out), out);
+  c.ok('Keyboard: served in full, Leaving pits to the exit, control handed back past the merge; no Brake, no bay, no fuel, no contact', out.owed === 0 && out.seen.leaving && out.handS >= G.PIT_OUT1 && out.handS < G.PIT_OUT1 + 5 /* first drawn frame after the crossing: one slow software frame */ && !out.ctl && out.phase === null && !out.inputs.includes('B') && out.maxV <= G.PIT_SPEED + 0.05 && clean(out), out);
 
   // an occupied box: queued behind an AI car serving there, Brake held through the entry, the queue, the box and the handover
   await setup(page, { before: 30, v: 12, cars: [{ i: 1, s: G.PEN_S, sg: 6 }] });

@@ -241,7 +241,7 @@ export class Hud {
       if (p.mode === 'pitlane') st = wait === 'bay' ? `<b class="org">${t('hud.qBayLine')}</b>` : wait === 'queued' || sgp === 'queued' ? `<b class="org">${t('hud.sgL.queued')}</b>` : `<b class="red">${t('hud.sgBox')}</b>`;
       else {
         const lead = sgp === 'entry' ? 'hud.sgL.entry' : sgp === 'queued' ? 'hud.sgL.queued' : sgp === 'deferred' ? 'hud.sgL.deferred' : 'hud.sgOwed';
-        st = `<b class="${sgp === 'deferred' ? 'yel' : 'red'}">${t(lead)}</b> · ${t('hud.sgDetail', { n: Math.round(p.sgOwed), due: dueText(p.sgDue) }).replace(/ · $/, '')}`;
+        st = `<b class="${sgp === 'deferred' ? 'yel' : 'red'}">${t(lead)}</b> · ${t('hud.sgDetail', { n: Math.round(p.sgOwed), due: sgp === 'deferred' ? '' : dueText(p.sgDue) }).replace(/ · $/, '')}`;
         if (!held && sgp !== 'entry' && race.boxBusy(p)) st += ` · <small>${t(race.deferBlock(p) === null ? 'hud.boxBusy' : 'hud.boxBusyFinal')}</small>`;
       }
     } else if (wait && wait !== 'exit' && p.mode !== 'service') {
