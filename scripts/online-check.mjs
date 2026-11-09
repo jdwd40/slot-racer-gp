@@ -401,6 +401,15 @@ async function service(run, c) {
   B.svcBreach = 'stopGo';
   room.race.retire(idb);
   const dqSeen = await waitFor(b.page, () => window.__game.screen === 'netwait' && document.querySelector('.netwait .place')?.textContent, undefined, 15000).then((h) => h.jsonValue()).catch(() => '');
+  // the pending card is updated by every snapshot: its buttons must stay the same elements, and keep the keyboard focus
+  const kept = await read(b.page, async () => {
+    const watch = document.getElementById('w-watch'), leave = document.getElementById('w-leave');
+    leave?.focus();
+    const tick0 = window.__game.net.tick;
+    await new Promise((r) => setTimeout(r, 1500));
+    return { snaps: window.__game.net.tick - tick0, same: !!watch && watch.isConnected && document.getElementById('w-watch') === watch && document.getElementById('w-leave') === leave, focus: document.activeElement?.id ?? '' };
+  });
+  c.ok('Pending card: Watch and Leave stay mounted and keep focus while snapshots update the standings', kept.snaps > 5 && kept.same && kept.focus === 'w-leave', kept);
   room.race.retire(ida);
   for (const s of both) await waitFor(s.page, () => window.__game.screen === 'netres', undefined, 150000);
   const res = await Promise.all(both.map((s) => read(s.page, () => ({ r: window.__game.net.result, rows: [...document.querySelectorAll('.netres tbody tr')].map((x) => `${x.dataset.status}|${x.children[2].textContent}|${x.children[5].textContent}`) }))));
@@ -448,7 +457,6 @@ async function connection(run, c) {
   c.ok('Protocol path, induced latency: confirmation grows by about the added round trip only', pl1.medianMs < pl0.medianMs + 220, pl1);
   P.delayMs = 0; P.jitterMs = 0;
   const a = await openPage(run, url, 'small', { name: 'keys' });
-  const b = await openPage(run, url, 'phoneLo', { touch: true, name: 'phone', fpsCap: CAP });
   const code = await createRoom(a, 'Keys');
   await joinRoom(b, 'Phone', code);
   await waitFor(b.page, () => window.__game.screen === 'lobby');

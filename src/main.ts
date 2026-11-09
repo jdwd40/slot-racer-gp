@@ -1157,29 +1157,39 @@ function standingRows(rows: { id: string; name: string; color: number; num: numb
 }
 const STAND_HEAD = (): string => `<thead><tr><th>#</th><th>${t('res.driver')}</th><th>${t('res.time')}</th><th>${t('res.best')}</th><th>${t('res.pits')}</th><th>${t('res.pen')}</th></tr></thead>`;
 
+/** what the pending card last showed: unchanged content is left alone, so a selection or a screen reader's place in the table is not reset for nothing */
+let netWaitShown = { head: '', rows: '' };
 /** This driver is done but the race is not: live state with no positions invented for anyone still running. */
 function showNetWait(): void {
   enter('netwait');
+  netWaitShown = { head: '', rows: '' };
   overlay.className = 'overlay show see';
+  // the card and its buttons are built once; each snapshot updates only the heading and the standings, so a press or the
+  // keyboard focus on Watch or Leave survives the 20 Hz updates
+  overlay.innerHTML = `<div class="card results netwait">
+    <h2>${t('net.pendingTitle')}</h2>
+    <div class="place" id="w-head"></div>
+    <p><small>${t('net.pendingNote')}</small></p>
+    <div class="tscroll"><table>${STAND_HEAD()}<tbody id="w-rows"></tbody></table></div>
+    <div class="row"><button class="cta" id="w-watch">${t('net.watch')}</button><button class="cta alt" id="w-leave">${t('net.leave')}</button></div>
+  </div>`;
+  overlay.querySelector('#w-watch')!.addEventListener('click', closeNetWait);
+  overlay.querySelector('#w-leave')!.addEventListener('click', () => net?.leave());
   renderNetWait();
 }
 function closeNetWait(): void { netWatch = true; resume(); }
 function renderNetWait(): void {
+  const headEl = overlay.querySelector('#w-head'), rowsEl = overlay.querySelector('#w-rows');
+  if (!headEl || !rowsEl) return;
   const p = me();
   const rows = race.order().map((c) => ({
     id: c.id, name: c.name, color: c.color, num: c.num, pos: null, status: c.status, time: c.status === 'finished' ? c.finishTime + c.timePen : null,
     best: c.bestLap, pits: c.pitStops, reason: c.status === 'dq' ? t(`res.dqReason.${c.dqReason}`) : c.status === 'dnf' ? t(`net.dnf.${c.dnfReason}`) : flags(c), lap: `${Math.min(LAPS, c.lapsDone + 1)}/${LAPS}`,
   }));
   const head = p.status === 'dq' ? `${t('res.youDq')} · ${t(`res.dqReason.${p.dqReason}`)}` : p.status === 'dnf' ? t('res.youDnf') : t('net.youFinished');
-  overlay.innerHTML = `<div class="card results netwait">
-    <h2>${t('net.pendingTitle')}</h2>
-    <div class="place">${head}</div>
-    <p><small>${t('net.pendingNote')}</small></p>
-    <div class="tscroll"><table>${STAND_HEAD()}<tbody>${standingRows(rows)}</tbody></table></div>
-    <div class="row"><button class="cta" id="w-watch">${t('net.watch')}</button><button class="cta alt" id="w-leave">${t('net.leave')}</button></div>
-  </div>`;
-  overlay.querySelector('#w-watch')!.addEventListener('click', closeNetWait);
-  overlay.querySelector('#w-leave')!.addEventListener('click', () => net?.leave());
+  const body = standingRows(rows);
+  if (netWaitShown.head !== head) { headEl.innerHTML = head; netWaitShown.head = head; }
+  if (netWaitShown.rows !== body) { rowsEl.innerHTML = body; netWaitShown.rows = body; }
 }
 
 /** The server's final standings, identical for every member of the room. */
