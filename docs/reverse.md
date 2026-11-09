@@ -47,7 +47,7 @@ AI cars never reverse. `reverseControl` runs only for the player, and AI speed s
 
 ## Service
 
-- **Stop-and-go.** Brake held through the stop keeps the car still for all of it. The press stays latched after service, so finishing never makes the car back away. A player who overshoots the box stops beyond it and holds Brake. The car reverses and, on reaching the box, the `service` refusal brakes it to rest inside the box (in about 0.15 m), where the stop is served. Releasing Brake inside the box also serves it. Service checks speed by magnitude, so a car rolling backwards is not stationary, and moving off resets the countdown as before.
+- **Stop-and-go.** Since [automatic stop-and-go](auto-stop-go.md), the controller holds the car still for the whole stop and ignores Brake and Throttle. Reverse is refused (`assist`) while it has the car, and that refusal latches the press, so Brake held through the entry, queue, box and exit never backs away at the handover. A car beyond the box (only reachable by scripted placement or an earlier overshoot) is driven by hand: holding Brake reverses it, and once it is back inside the box the controller takes it, brings it to rest and serves the stop. Service checks speed by magnitude, so a car rolling backwards is not stationary.
 - **Bays.** Capture still needs a speed magnitude under 0.7 m/s, and never happens while reverse is engaged. Reversing past a bay with Brake held does not capture it. Releasing in a free bay's window captures it in the usual way. Occupied bays are never captured. Brake held through bay entry, refuelling and exit is latched, so the car does not reverse when it rejoins the pit lane.
 
 ## Recovery limits

@@ -1,6 +1,6 @@
 # Pit and stop-and-go lane routing
 
-While a pit request or stop-and-go is active, the player's car takes the outside lane at every switch. This is lane routing only: the player still controls throttle and braking and must stop correctly.
+While a pit request or stop-and-go is active, the player's car takes the outside lane at every switch. This is lane routing only. For a fuel stop the player still controls throttle and braking. For a stop-and-go, the pedals are taken over 40 m before the entrance: see [automatic stop-and-go](auto-stop-go.md).
 
 ## Behaviour
 

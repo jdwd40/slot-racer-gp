@@ -1,6 +1,6 @@
 # Shared pit-lane queues, reservations and safe exits
 
-Cars arriving at an occupied stop-and-go box, a busy pit lane or a car leaving its bay now queue behind it with a real stopping gap. Nobody overlaps, passes through a stopped car or jumps lanes to get out of a queue. Automatic stopping at the box and at the car's own bay is left for the next tasks. The player still brakes into the box and the bay, and the AI drives itself as before.
+Cars arriving at an occupied stop-and-go box, a busy pit lane or a car leaving its bay now queue behind it with a real stopping gap. Nobody overlaps, passes through a stopped car or jumps lanes to get out of a queue. Automatic stopping at the box is now done by [automatic stop-and-go](auto-stop-go.md). Automatic stopping at the car's own bay is left for the next task. The player still brakes into the bay, and the AI drives itself as before.
 
 ## Ownership
 
@@ -98,6 +98,6 @@ Every scenario asserts no overlapping cars on one path, no offences, and that ea
 
 ### Known limits
 
-- Automatic stopping at the box and the car's own bay is not here. A player who stops level with an occupied bay, inside a departing car's merge zone, keeps that car waiting until the player moves on. The player is never held there automatically.
+- Automatic stopping at the car's own bay is not here (the box is: see [automatic stop-and-go](auto-stop-go.md)). A player who stops level with an occupied bay, inside a departing car's merge zone, keeps that car waiting until the player moves on. The player is never held there automatically.
 - The assisted cap protects a road car only from the held pit queue ahead on the outside lane, not from ordinary racing traffic.
 - Two or more cars owing a stop and arriving together depends on the AI or the player stopping in the box. The queue itself only orders and holds them.

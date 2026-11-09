@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Bounded browser validation of the real game. Procedure and results: docs/validation.md.
 //
-//   node scripts/browser-check.mjs [tracks race controlled routing practice championship touch responsive touchrace reverse service queue]   functional checks (default: all)
+//   node scripts/browser-check.mjs [tracks race controlled routing practice championship touch responsive touchrace reverse service queue autosg]   functional checks (default: all)
 //   node scripts/browser-check.mjs perf --label updated --machine "<name>"          frame-time capture
 //   node scripts/browser-check.mjs compare <baseline.json> <updated.json>           like-for-like comparison
 //
@@ -1663,7 +1663,7 @@ async function reverse(run, c) {
     const r = g.race, p = r.player;
     r.cars.forEach((o2, i) => { if (i) { o2.u = p.u + T.L / 2 + i * 8; o2.laneSide = 1; o2.d = T.LANE_HALF; o2.mode = 'race'; o2.change = null; } });
     r.squeezeQ.length = 0;
-    Object.assign(p, { u: o.s, v: 0, change: null, laneSide: -1, mode: o.pit ? 'pitlane' : 'race', d: o.pit ? T.pitD(o.s) : -T.LANE_HALF, throttle: 0, revMark: null, serviced: false, fuel: o.fuel ?? 1, sgOwed: o.sgOwed ?? 0, sgDue: o.sgOwed ? 99 : 0, sgServed: 0, sgServing: false });
+    Object.assign(p, { u: o.s, v: 0, change: null, laneSide: -1, mode: o.pit ? 'pitlane' : 'race', d: o.pit ? T.pitD(o.s) : -T.LANE_HALF, throttle: 0, revMark: null, serviced: false, fuel: o.fuel ?? 1, sgOwed: o.sgOwed ?? 0, sgDue: o.sgOwed ? 99 : 0, sgServed: 0, sgServing: false, sgLeave: false, sgCommit: -1, sgCtl: false, sgPhase: null, pitFuel: false });
     if (o.sgOwed) { p.pitReq = true; p.pitPenaltyOnly = true; }
   }, x);
   const P = (page) => read(page, () => { const g = window.__game, r = g.race, p = r.player, T = g.T; return { s: T.wrapS(p.u), v: p.v, revOn: p.revOn, latch: p.revLatch, mode: p.mode, sgOwed: p.sgOwed, sgServing: p.sgServing, timePen: p.timePen, bay: p.bay, pitStops: p.pitStops, screen: g.screen, chips: document.getElementById('h-chips').textContent, brakeCue: document.getElementById('t-brake').dataset.cue, brakeText: document.getElementById('t-brake-cue').textContent }; });
@@ -1683,11 +1683,14 @@ async function reverse(run, c) {
   await page.screenshot({ path: path.join(run.out, 'reverse-hud.png') });
   await waitFor(page, () => window.__game.race.player.sgServing, null, 15000);
   const serving = await P(page);
+  await read(page, () => { clearInterval(window.__qa.revMinT); window.__qa.revMinV = 0; window.__qa.revMinT = setInterval(() => { window.__qa.revMinV = Math.min(window.__qa.revMinV, window.__game.race.player.v); }, 5); });
   await waitFor(page, () => window.__game.race.player.sgOwed === 0, null, 20000);
+  // automatic stop-and-go (docs/auto-stop-go.md): the penalty-only visit is then driven to the pit exit with Brake still held
+  await waitFor(page, () => window.__game.race.player.mode === 'race', null, 20000).catch(() => null);
   await sleep(1200);
-  const after = await P(page);
+  const after = { ...(await P(page)), minV: await read(page, () => window.__qa.revMinV) };
   c.ok('Box: backing up with Brake held stops in the box and serves the full stop', Math.abs(serving.s - T0.PEN_S) < T0.PEN_HALF && after.sgOwed === 0 && after.timePen === 0, { serving, after });
-  c.ok('Box: Brake still held after service does not reverse', after.v === 0 && !after.revOn && Math.abs(after.s - serving.s) < 0.2 && after.latch, after);
+  c.ok('Box: Brake still held after service never reverses, through the automatic exit and after the handover', after.mode === 'race' && after.v === 0 && !after.revOn && after.minV >= 0 && after.latch, after);
   await keys.set('ArrowDown', false);
 
   await setup(page, { s: T0.BAY3 + T0.BAY_HALF + 0.5, pit: true, fuel: 0.3 });
@@ -1866,6 +1869,169 @@ async function queue(run, c) {
   return s;
 }
 
+/**
+ * Automatic stop-and-go (docs/auto-stop-go.md): real keys and emulated touch through the takeover, entry, queue, box, exit and
+ * handover; Brake held throughout; deferral by N and by the touch button; pause mid-service. Cars are placed by script.
+ */
+async function autosg(run, c) {
+  const PH = ['armed', 'entry', 'queued', 'serving', 'leaving', 'deferred'];
+  const LABEL = Object.fromEntries(PH.map((k) => [k, text(`hud.sgA.${k}`)]));
+  const st = (page) => read(page, () => {
+    const g = window.__game, r = g.race, p = r.player, T = g.T, q = window.__qa;
+    return { screen: g.screen, mode: p.mode, s: +T.wrapS(p.u).toFixed(2), v: +p.v.toFixed(3), phase: p.sgPhase, ctl: p.sgCtl, owed: p.sgOwed, served: +p.sgServed.toFixed(2), due: p.sgDue, deferred: p.sgDeferred, box: r.pit.box,
+      bayGrants: r.pit.log.filter((e) => e.car === p.idx && e.zone.startsWith('bay') && e.op === 'grant').length, boxGrants: r.pit.log.filter((e) => e.car === p.idx && e.zone === 'box' && e.op === 'grant').length,
+      revOn: p.revOn, latch: p.revLatch, fuel: +p.fuel.toFixed(4), offences: r.cars.reduce((n, x) => n + x.offences, 0) - q.off0,
+      chips: document.getElementById('h-chips').textContent, status: document.getElementById('h-status').textContent, toast: document.getElementById('h-toast').textContent,
+      brakeCue: document.getElementById('t-brake').dataset.cue, brakeText: document.getElementById('t-brake-cue').textContent,
+      minV: q.minV, vIn: q.vIn, maxV: q.maxVPit, handS: q.handS, phases: q.phases.join('>'), seen: q.seen, inputs: q.inputs.join(' '), fuelUp: q.fuelUp };
+  });
+  /** lap 3 under way, the player placed `before` m short of the pit entrance and given a stop-and-go; listed AI cars placed too */
+  const setup = (page, o) => read(page, (x) => {
+    const g = window.__game, T = g.T, L = 3;
+    if (g.screen !== 'race') g.startSession('race');
+    if (g.race.phase === 'countdown') g.advance(7);
+    const r = g.race, p = r.player;
+    r.pit = new r.pit.constructor(r);
+    r.squeezeQ.length = 0;
+    const put = (car, s, mode, v, side = -1) => Object.assign(car, { u: L * T.L + s, hiU: L * T.L + s, v, change: null, laneSide: side, mode, d: mode === 'pitlane' ? T.pitD(s) : side * T.LANE_HALF, throttle: 0, graceT: 0, recoverT: 0, cutT: 0, pushedT: 0, revMark: null, revOn: false, crossed: L, lapsDone: L - 1, serviced: false, exitReq: false, sgOwed: 0, sgServed: 0, sgServing: false, sgDue: 0, sgDeferred: false, sgCommit: -1, sgLeave: false, sgCtl: false, sgPhase: null, svcBreach: null, pitPlan: false, pitReq: false, fuelReq: false, fuelDue: 0, pitFuel: false, laneOverride: false, routeHold: -1, offences: 0, fuel: 0.6, refuelTarget: 1 });
+    r.cars.forEach((car, i) => { if (i) put(car, T.L / 2 + i * 8, 'race', 0, 1); });
+    put(p, T.PIT_IN0 - x.before, 'race', x.v);
+    for (const k of x.cars ?? []) { const car = r.cars[k.i]; put(car, k.s, 'pitlane', 0); Object.assign(car, { sgOwed: k.sg, sgDue: 13, pitReq: true }); }
+    if (!r.__ai) { const ai = r.ai.bind(r); r.__ai = ai; r.ai = (car, dt) => (car.mode === 'race' && car.laneSide > 0 && !car.sgOwed ? { t: 0, b: 1 } : ai(car, dt)); }
+    p.offences = 2; r.offence(p, r.cars[1], 'rear'); r.cars[1].offences = 0;
+    const q = window.__qa;
+    Object.assign(q, { minV: 0, vIn: -1, maxVPit: 0, handS: -1, phases: [], seen: {}, inputs: [], fuelUp: false, off0: r.cars.reduce((n, y) => n + y.offences, 0) });
+    if (!q.sgObs) {
+      const el = document.getElementById('h-chips');
+      q.sgObs = new MutationObserver(() => { const e = el.querySelector('.sgp'); if (e) q.seen[e.dataset.sg] = el.textContent.includes(x.labels[e.dataset.sg]); });
+      q.sgObs.observe(el, { childList: true, subtree: true, characterData: true });
+    }
+    clearInterval(q.sgT);
+    let last = { mode: p.mode, fuel: p.fuel };
+    q.sgT = setInterval(() => {
+      const rr = window.__game.race, pp = rr.player;
+      q.minV = Math.min(q.minV, pp.v);
+      if (pp.mode === 'pitlane') q.maxVPit = Math.max(q.maxVPit, pp.v);
+      if (last.mode === 'race' && pp.mode === 'pitlane') q.vIn = +pp.v.toFixed(2);
+      if (last.mode === 'pitlane' && pp.mode === 'race' && q.handS < 0) q.handS = +T.wrapS(pp.u).toFixed(2);
+      if (pp.fuel > last.fuel + 1e-9) q.fuelUp = true;
+      if (q.phases.at(-1) !== pp.sgPhase) q.phases.push(pp.sgPhase);
+      const ik = `${window.__game.input.held('throttle') ? 'T' : '-'}${window.__game.input.held('brake') ? 'B' : '-'}${pp.sgCtl ? 'A' : '-'}${pp.mode[0]}`;
+      if (q.inputs.at(-1)?.split('@')[0] !== ik) q.inputs.push(`${ik}@${T.wrapS(pp.u).toFixed(1)}`);
+      last = { mode: pp.mode, fuel: pp.fuel };
+    }, 5);
+  }, { labels: LABEL, ...o });
+  const handed = (page, ms = 40000) => waitFor(page, () => { const p = window.__game.race.player; return p.sgOwed === 0 && p.mode === 'race'; }, null, ms).catch(() => null);
+  const clean = (a) => a.minV >= 0 && a.offences === 0 && a.bayGrants === 0 && !a.fuelUp;
+
+  // ---- keyboard
+  const s = await open(run);
+  const { page, keys } = s;
+  await pickRaceSetup(page);
+  await page.click('#o-start');
+  const G = await read(page, () => { const T = window.__game.T; return { PEN_S: T.PEN_S, PEN_HALF: T.PEN_HALF, PIT_IN0: T.PIT_IN0, PIT_OUT1: T.PIT_OUT1, PIT_SPEED: T.PIT_SPEED }; });
+
+  // a clear box, Throttle held from before the takeover to the handover, Brake never pressed
+  await setup(page, { before: 44, v: 12 });
+  await frames(page, 2);
+  const armed = await st(page);
+  c.ok('Keyboard: before the approach the HUD shows Stop-and-go armed and ordinary control applies', armed.phase === 'armed' && !armed.ctl && armed.chips.includes(LABEL.armed), armed);
+  await keys.set('KeyW', true);
+  await waitFor(page, () => window.__game.race.player.sgServing, null, 30000).catch(() => null);
+  await frames(page, 2);
+  const serving = await st(page);
+  await page.screenshot({ path: path.join(run.out, 'autosg-serving.png') });
+  c.ok('Keyboard: Throttle held, the car is taken over, enters at the pit limit and stops in the box (Auto entry, then Serving with a countdown)', serving.seen.entry && serving.phase === 'serving' && Math.abs(serving.s - G.PEN_S) < G.PEN_HALF && serving.v === 0 && serving.vIn > 0 && serving.vIn <= G.PIT_SPEED + 0.05 && /\d/.test(serving.chips) && serving.status.includes(text('hud.sgServing')) && serving.brakeCue === 'auto', serving);
+  await handed(page);
+  const out = await st(page);
+  await keys.set('KeyW', false);
+  c.ok('Keyboard: served in full, Leaving pits to the exit, control handed back past the merge; no Brake, no bay, no fuel, no contact', out.owed === 0 && out.seen.leaving && out.handS >= G.PIT_OUT1 && out.handS < G.PIT_OUT1 + 1.5 && !out.ctl && out.phase === null && !out.inputs.includes('B') && out.maxV <= G.PIT_SPEED + 0.05 && clean(out), out);
+
+  // an occupied box: queued behind an AI car serving there, Brake held through the entry, the queue, the box and the handover
+  await setup(page, { before: 30, v: 12, cars: [{ i: 1, s: G.PEN_S, sg: 6 }] });
+  await keys.set('ArrowDown', true);
+  await waitFor(page, () => window.__game.race.player.sgPhase === 'queued', null, 20000).catch(() => null);
+  await frames(page, 2);
+  const queued = await st(page);
+  c.ok('Keyboard: Brake held, the occupied box queues the car short of it; HUD shows Queued and auto · no R', queued.phase === 'queued' && queued.chips.includes(LABEL.queued) && queued.s < G.PEN_S - G.PEN_HALF && queued.box !== 0, queued);
+  await handed(page, 60000);
+  await sleep(1500);
+  const held = await st(page);
+  c.ok('Keyboard: still holding Brake, the stop is served after the AI car and the handover never reverses', held.owed === 0 && held.mode === 'race' && held.seen.serving && held.seen.leaving && !held.revOn && held.latch && held.v === 0 && clean(held), held);
+  await keys.set('ArrowDown', false);
+  await frames(page, 2);
+  await keys.set('ArrowDown', true);
+  await waitFor(page, () => window.__game.race.player.revOn, null, 10000).catch(() => null);
+  const rev = await st(page);
+  c.ok('Keyboard: a fresh Brake press after the handover is deliberate reverse', rev.revOn, rev);
+  await keys.set('ArrowDown', false);
+
+  // Defer (N) before the takeover: Deferred — due next lap, and the entrance is driven past
+  await setup(page, { before: 60, v: 0 });
+  await keys.tap('KeyN');
+  await frames(page, 3);
+  const dfr = await st(page);
+  c.ok('Keyboard: N before the approach defers the stop; HUD shows Deferred — due next lap', dfr.phase === 'deferred' && dfr.chips.includes(LABEL.deferred) && dfr.due === 4 && dfr.deferred, dfr);
+  await read(page, () => { const g = window.__game, p = g.race.player; p.u = p.hiU = 3 * g.T.L + g.T.PIT_IN0 - 3; p.v = 8; });
+  await waitFor(page, () => { const g = window.__game; return g.T.wrapS(g.race.player.u) > g.T.PIT_IN0 + 2; }, null, 10000).catch(() => null);
+  const past = await st(page);
+  c.ok('Keyboard: the deferred approach is not taken over or entered; the debt stays', past.mode === 'race' && !past.seen.entry && past.owed > 0 && past.boxGrants === 0, past);
+
+  // pause mid-service (Esc), then resume with nothing pressed: the stop carries on and completes on its own
+  await setup(page, { before: 20, v: 10 });
+  await waitFor(page, () => window.__game.race.player.sgServed > 0.5, null, 20000).catch(() => null);
+  await keys.tap('Escape');
+  await waitFor(page, () => window.__game.screen === 'pause', null, 5000).catch(() => null);
+  const p1 = await st(page);
+  await sleep(1200);
+  const p2 = await st(page);
+  c.ok('Keyboard: pausing mid-service freezes the stop and keeps the debt and the one box reservation', p1.screen === 'pause' && p2.served === p1.served && p2.owed === p1.owed && p2.box === 0 && p2.boxGrants === 1, { p1, p2 });
+  await keys.tap('Escape');
+  await handed(page);
+  const res = await st(page);
+  c.ok('Keyboard: resumed with no key, the stop completes in full and hands over once', res.owed === 0 && res.mode === 'race' && res.boxGrants === 1 && clean(res), res);
+
+  // the help: keyboard rules explain the automatic stop and the DQ consequence
+  await keys.tap('Escape');
+  await waitFor(page, () => window.__game.screen === 'pause', null, 5000).catch(() => null);
+  const help = await page.locator('.overlay').textContent().catch(() => '');
+  c.ok('Keyboard: the pause help explains the automatic stop-and-go, the override and the DQ', help.includes(STRINGS['ctl.rules']), help.slice(0, 120));
+  await keys.tap('Escape');
+
+  // ---- emulated touch
+  const t = await open(run, { viewport: { width: 844, height: 390 }, device: PHONE });
+  await read(t.page, () => window.__game.setTouchMode('on'));
+  await pickRaceSetup(t.page);
+  await t.page.click('#o-start');
+  const f = new Fingers(t.page, await t.context.newCDPSession(t.page));
+  await setup(t.page, { before: 30, v: 12, cars: [{ i: 1, s: G.PEN_S, sg: 12 }] });
+  const thr = await f.put('#t-throttle');
+  await waitFor(t.page, () => window.__game.race.player.sgPhase === 'queued', null, 20000).catch(() => null);
+  await frames(t.page, 2);
+  const tq = await st(t.page);
+  const overlap = await read(t.page, () => {
+    const chip = document.querySelector('#h-chips .sgp')?.getBoundingClientRect();
+    if (!chip) return null;
+    return [...document.querySelectorAll('#t-pad .tbtn')].filter((b) => !b.hidden).some((b) => { const r = b.getBoundingClientRect(); return !(r.right <= chip.left || r.left >= chip.right || r.bottom <= chip.top || r.top >= chip.bottom); });
+  });
+  await t.page.screenshot({ path: path.join(run.out, 'autosg-touch-queued.png') });
+  c.ok('Touch: Throttle held by finger, the car is queued automatically; Brake shows auto · no R; the state chip covers no control', tq.phase === 'queued' && tq.chips.includes(LABEL.queued) && tq.brakeCue === 'auto' && tq.brakeText === STRINGS['touch.brake.auto'] && overlap === false, { ...tq, overlap });
+  await handed(t.page, 60000);
+  const tdone = await st(t.page);
+  await f.lift(thr);
+  c.ok('Touch: served and handed back at the pit exit with the finger still on Throttle, no Brake', tdone.owed === 0 && tdone.mode === 'race' && tdone.seen.serving && tdone.seen.leaving && !tdone.inputs.includes('B') && clean(tdone), tdone);
+  // touch Defer before the approach
+  await setup(t.page, { before: 60, v: 0 });
+  await frames(t.page, 3);
+  await f.tap('#t-defer');
+  await frames(t.page, 3);
+  const td = await st(t.page);
+  c.ok('Touch: the Defer button defers the stop; HUD shows Deferred — due next lap', td.phase === 'deferred' && td.chips.includes(LABEL.deferred) && td.due === 4, td);
+  c.ok('Touch: no page or console errors', t.errors.length === 0, t.errors.slice(0, 5));
+  await t.context.close();
+  return s;
+}
+
 /** Real-time frame capture with the renderer on. Reports presentation and clock separately. */
 async function perf(run) {
   const s = await open(run);
@@ -1897,8 +2063,8 @@ async function perf(run) {
 }
 
 // ------------------------------------------------------------ cli
-const SCENARIOS = { tracks, race, controlled, routing, practice, championship, touch, responsive, touchrace, reverse, service, queue };
-const USAGE = 'usage: browser-check.mjs [tracks|race|controlled|routing|practice|championship|touch|responsive|touchrace|reverse|service|queue ...] | perf | compare <a.json> <b.json>\n'
+const SCENARIOS = { tracks, race, controlled, routing, practice, championship, touch, responsive, touchrace, reverse, service, queue, autosg };
+const USAGE = 'usage: browser-check.mjs [tracks|race|controlled|routing|practice|championship|touch|responsive|touchrace|reverse|service|queue|autosg ...] | perf | compare <a.json> <b.json>\n'
   + 'options: --dist <dir> --url <url> --commit <sha> --machine <name> --label <name> --viewport WxH --dpr N --preset low|balanced|high\n'
   + '         --seconds N --headed --channel <chrome|msedge> --out <dir> --max-minutes N';
 
