@@ -785,7 +785,7 @@ async function touch(run, c) {
   const padShown = (page) => read(page, () => ({ body: document.body.classList.contains('touch'), pad: !document.getElementById('t-pad').hidden }));
   const radio = (page) => read(page, () => document.querySelector('[data-touch][aria-checked="true"]').dataset.touch);
   /** count every call the race receives, so a double dispatch cannot hide behind a toggle */
-  const countActions = (page) => read(page, () => { const r = window.__game.race, n = (window.__qa.actions = { lane: 0, pit: 0, armed: [] }); for (const [m, k] of [['requestLane', 'lane'], ['requestPit', 'pit']]) { const f = r[m].bind(r); r[m] = () => { n[k]++; f(); if (k === 'lane') n.armed.push(r.car(window.__game.localId).laneReq); }; } });
+  const countActions = (page) => read(page, () => { const r = window.__game.race, n = (window.__qa.actions = { lane: 0, pit: 0, armed: [] }); for (const [m, k] of [['requestLane', 'lane'], ['requestPit', 'pit']]) { const f = r[m].bind(r); r[m] = (...a) => { n[k]++; f(...a); if (k === 'lane') n.armed.push(r.car(window.__game.localId).laneReq); }; } });
   const actions = (page) => read(page, () => window.__qa.actions);
   const state = (page) => read(page, () => { const r = window.__game.race, p = r.car(window.__game.localId), cue = (x) => document.getElementById(x); return { laneReq: p.laneReq, pitReq: p.pitReq, only: p.pitPenaltyOnly, override: p.laneOverride, route: r.nextRoute(p), laneCue: cue('t-lane').dataset.cue, pitCue: cue('t-pit').dataset.cue, laneText: cue('t-lane-cue').textContent, pitText: cue('t-pit-cue').textContent, chips: cue('h-chips').textContent }; });
 

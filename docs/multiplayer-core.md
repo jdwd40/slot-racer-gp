@@ -49,7 +49,24 @@ All on the build host (Linux, no GPU). Browser runs use Chromium with SwiftShade
 - `npm run build`: OK.
 - Browser checks (`node scripts/browser-check.mjs`, SwiftShader, diagnostics only): see the table below. The new `localslot` scenario puts the local driver in slot 2 and checks the camera, marker, HUD, fuel readout, own bay, motor volume and personal toast, then checks that slot 0 restores the solo grid.
 
-BROWSER_TABLE
+Chromium 156 headless with SwiftShader, 480×270 at DPR 1 on the Low preset unless the scenario sets its own size, scripted driver on real keys, seed 20261028. These are diagnostics only.
+
+| Scenario | Result | Notes |
+| --- | --- | --- |
+| `tracks` | 6/6 pass | All five circuits draw in follow and full views |
+| `race` | 22/22 pass | Full 13-lap race on real keys: countdown, camera, pause, lane, two pit visits, results, play again |
+| `controlled` | 17 pass, 1 n/a | De-slot and recovery, warnings, stop-and-go served, DQ at the flag, synthetic blur and hidden tab, stall, resize, restart. Real window blur is not automatable |
+| `routing` | 11 pass, 0 fail, incomplete | Every check that ran passed (fuel routing chips and arrows, override, routed entry on circuits 1–4). The run was cut off by the build host's 30-minute background-job limit before it finished |
+| `practice` | 10/10 pass | PB lap, practice board, ghost saved, loaded and replayed against the recording, fixture saves preserved |
+| `championship` | 9/9 pass | Rounds stored once from the final result, fixture championship continued |
+| `touch` | 53/53 pass | Emulated multi-touch pads, taps, holds, second finger, mode setting. The first run failed 2 checks because this script's request counter dropped the new driver-ID argument; the fixed script passes |
+| `reverse` | 9/9 pass | Hold-Brake reverse into the box and bay, no reverse after service |
+| `autosg` | 16/16 pass | Automatic stop-and-go phases, queue, defer, pause mid-service |
+| `autobay` | 27/27 pass | Own-bay visits, release/ready/fresh-press departure, blocked merge and exit |
+| `queue` | 12/12 pass | Shared pit queue, bay and exit waits |
+| `localslot` (new) | 11/11 pass | Local driver in slot 2: camera, marker, HUD row/position/fuel, own bay, motor emphasis, personal toast, back to slot 0 |
+
+`touchrace` (a 13-lap race on emulated touch only) was not run in this round. Neither were the late batch scenarios listed below unless noted, because the build host's time limits did not leave room. No physical touch device or GPU was available.
 
 ## Next service task (rooms)
 
