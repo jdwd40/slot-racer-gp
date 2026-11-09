@@ -7,7 +7,7 @@ An authoritative server for private rooms of up to four human drivers, plus serv
 ## Architecture
 
 - **One Node 22 process** (`server/`, bundled to `server-dist/main.mjs`). It serves HTTP `/api/*` and WebSocket `/ws` on `127.0.0.1:8787`. On the production host, Nginx proxies both on `slotrush.jdwd40.com`, so the page and the server share an origin and there is no CORS.
-- **Rooms share one thread and one tick loop.** `RoomManager` runs `pump(now)` on every room every 10 ms. Rooms share no mutable state: each race has its own `Track` context, seeded RNG, inputs and events. The host has one vCPU, so there are **no worker threads**. A fault in one room aborts only that room's race (no result is produced) and closes the room.
+- **Rooms share one thread and one tick loop.** `RoomManager` runs `pump(now)` on every room every 10 ms. The timer runs only while at least one room exists (no idle wakeups). Rooms and races are timed from their own wall timestamps, so restarting it after an idle period catches nothing up. Rooms share no mutable state: each race has its own `Track` context, seeded RNG, inputs and events. The host has one vCPU, so there are **no worker threads**. A fault in one room aborts only that room's race (no result is produced) and closes the room.
 - **The mutable-track hazard from #21 is fixed.**
   - `trackFor()` contexts are deep-frozen and shared read-only. `BAYS` is frozen.
   - `fuelRate()` no longer defaults to the displayed track's length.

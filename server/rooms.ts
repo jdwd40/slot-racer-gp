@@ -20,6 +20,8 @@ export class RoomManager {
   private codes = new Map<string, Room>();
   private fails = new Map<string, { n: number; until: number }>();
   private timer: NodeJS.Timeout | null = null;
+  /** start() was called and shutdown() not since: the tick timer runs while this is set and at least one room exists */
+  private enabled = false;
   /** worst tick duration over the last health window (ms): how busy the loop is */
   tickMaxMs = 0;
   readonly now: () => number;
@@ -27,6 +29,8 @@ export class RoomManager {
   constructor(private deps: ManagerDeps) { this.now = deps.now ?? (() => Date.now()); }
 
   get size(): number { return this.rooms.size; }
+  /** the tick timer is active (only while started and at least one room exists: no idle wakeups) */
+  get running(): boolean { return this.timer !== null; }
   get list(): Room[] { return [...this.rooms.values()]; }
   room(id: string): Room | undefined { return this.rooms.get(id); }
   byCode(code: string): Room | undefined { return this.codes.get(code.toUpperCase()); }
@@ -62,6 +66,7 @@ export class RoomManager {
       return { ok: false, code: 'bad_settings', detail: (e as Error).message };
     }
     this.rooms.set(room.id, room); this.codes.set(room.code, room);
+    this.syncTimer();
     this.deps.log.info('room.create', { room: room.id, mode: o.mode, rooms: this.rooms.size });
     const r = room.join(peer, o, this.now(), true);
     if (!r.ok) { room.close('empty'); return r; }
@@ -95,6 +100,21 @@ export class RoomManager {
     this.rooms.delete(r.id);
     if (this.codes.get(r.code) === r) this.codes.delete(r.code);
     this.deps.log.info('room.forget', { room: r.id, rooms: this.rooms.size });
+    this.syncTimer();
+  }
+
+  /**
+   * Run the tick timer only while it has rooms to pump. Restarting it needs no clock reset: rooms and races are timed from
+   * their own wall timestamps (createdAt, baseWall), never from the interval between ticks, so an idle period is never
+   * caught up. Stopping it resets tickMaxMs, which can no longer decay without ticks, so it never blocks the next room.
+   */
+  private syncTimer(): void {
+    if (this.enabled && this.rooms.size > 0) {
+      if (!this.timer) this.timer = setInterval(() => this.tick(), TICK_MS);
+    } else if (this.timer) {
+      clearInterval(this.timer); this.timer = null;
+      this.tickMaxMs = 0;
+    }
   }
 
   /** Pump every room once. */
@@ -109,17 +129,19 @@ export class RoomManager {
       }
     }
     const dt = performance.now() - t0;
-    this.tickMaxMs = Math.max(this.tickMaxMs * 0.98, dt);
+    this.tickMaxMs = this.rooms.size ? Math.max(this.tickMaxMs * 0.98, dt) : 0;
   }
 
+  /** Enable the tick loop; the timer itself starts with the first room and stops with the last. */
   start(): void {
-    if (this.timer) return;
-    this.timer = setInterval(() => this.tick(), TICK_MS);
+    this.enabled = true;
+    this.syncTimer();
   }
 
   /** Abort every race (no results are invented) and close every room: SIGTERM, or a test teardown. */
   shutdown(reason = 'shutdown'): void {
-    if (this.timer) { clearInterval(this.timer); this.timer = null; }
+    this.enabled = false;
+    this.syncTimer();
     const now = this.now();
     for (const r of [...this.rooms.values()]) r.abortAndClose(reason, now);
   }
