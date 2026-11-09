@@ -311,7 +311,7 @@ export interface RaceSnapshot {
   finishWindow: number | null; timeLimit: number | null;
   cars: CarSnapshot[];
   pit: { box: DriverId | null; exit: DriverId | null; bays: (DriverId | null)[]; merges: (DriverId | null)[]; order: DriverId[] };
-  /** highest applied action sequence number per human driver */
+  /** highest applied action sequence number per human driver (a null-prototype table: every driver ID is an own key) */
   lastSeq: Record<DriverId, number>;
   final: Standing[] | null;
 }
@@ -417,8 +417,8 @@ export class Race {
   readonly timeLimit: number;
   /** the final standings, set once when the race closes; null until then */
   final: readonly Standing[] | null = null;
-  /** highest action sequence number applied, per driver */
-  lastSeq: Record<DriverId, number> = {};
+  /** highest action sequence number applied, per driver: a null-prototype table, so any string driver ID (even `__proto__`) is an own key */
+  lastSeq: Record<DriverId, number> = Object.create(null) as Record<DriverId, number>;
   private pending: DriverAction[] = [];
 
   constructor(opts: RaceOpts = {}) {
@@ -1727,7 +1727,7 @@ export class Race {
         bays: this.pit.bays.map(idOf), merges: this.pit.merges.map(idOf),
         order: this.pit.order.map(idOf).filter((x): x is DriverId => x !== null),
       },
-      lastSeq: { ...this.lastSeq },
+      lastSeq: Object.assign(Object.create(null) as Record<DriverId, number>, this.lastSeq),
       final: this.final ? this.final.map((x) => ({ ...x })) : null,
     };
   }

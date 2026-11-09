@@ -183,6 +183,28 @@ describe('sequenced actions', () => {
     expect(r.snapshot().lastSeq).toEqual({ h0: 1, h1: 1 });
   });
 
+  it('acknowledges and deduplicates actions for a driver whose ID is an Object.prototype key', () => {
+    const r = room([{ id: '__proto__', control: 'human' }, { id: 'constructor', control: 'human' }]);
+    for (const c of r.cars) place(r, c, LAP * r.T.L + 60 + c.idx * 20, 1, 0);
+    expect(r.lastSeq.constructor).toBeUndefined();
+    expect(r.act({ driver: '__proto__', seq: 1, type: 'lane' })).toBe('queued');
+    expect(r.act({ driver: 'constructor', seq: 1, type: 'lane' })).toBe('queued');
+    r.update(DT, {});
+    expect(car(r, '__proto__').laneReq).toBe(true);
+    expect(Object.prototype.hasOwnProperty.call(r.lastSeq, '__proto__')).toBe(true);
+    expect(r.lastSeq['__proto__']).toBe(1);
+    expect(r.lastSeq.constructor).toBe(1);
+    // the applied action is not queued or applied again
+    expect(r.act({ driver: '__proto__', seq: 1, type: 'lane' })).toBe('stale');
+    car(r, '__proto__').laneReq = false;
+    r.update(DT, {});
+    expect(car(r, '__proto__').laneReq).toBe(false);
+    // the snapshot carries the acknowledgement, on the wire too
+    const snap = r.snapshot();
+    expect(Object.keys(snap.lastSeq).sort()).toEqual(['__proto__', 'constructor']);
+    expect(JSON.parse(JSON.stringify(snap)).lastSeq).toEqual(JSON.parse('{"__proto__":1,"constructor":1}'));
+  });
+
   it('direct requests address a driver by ID and ignore AI entries', () => {
     const r = room([{ id: 'a', control: 'human' }, { id: 'bot', control: 'ai' }, { id: 'b', control: 'human' }]);
     for (const c of r.cars) place(r, c, LAP * r.T.L + 60 + c.idx * 20, -1, 0);
