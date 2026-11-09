@@ -2,7 +2,7 @@
 // outlive a sign-out or pass to the next person on the same browser. No DOM: main.ts renders it; tests drive it with a fake
 // fetch. The session itself is the server's HttpOnly cookie, which no script here can read, so nothing secret is ever
 // stored by this module. See docs/accounts.md.
-import { checkDisplayName } from './protocol';
+import { checkDisplayName, type CareerStats } from './protocol';
 
 export interface SignedIn { id: string; username: string; displayName: string; }
 export type AuthState =
@@ -243,5 +243,20 @@ export class AccountClient {
       if (this.account?.id === cur.id) this.apply({ state: 'signed-in', account: acct });
       return { ok: true, account: acct };
     } finally { this.idle(); this.onChange?.(this.auth); }
+  }
+
+  /**
+   * The signed-in driver's career (points, podiums, verified bests, recent results), read-only from the server. An answer
+   * for another account than the one this tab shows (the cookie was switched in another tab meanwhile) is dropped, so one
+   * driver's career is never shown under another's name.
+   */
+  async stats(): Promise<{ ok: true; stats: CareerStats } | { ok: false; error: AuthError }> {
+    const cur = this.account;
+    if (!cur) return { ok: false, error: 'signed_out' };
+    const r = await this.call('/api/profile/stats');
+    if (!r) return { ok: false, error: 'unreachable' };
+    if (r.status !== 200) return { ok: false, ...AccountClient.error(r.status, r.data) };
+    if (r.data.account !== cur.id || this.account?.id !== cur.id) { void this.restore({ keep: true }); return { ok: false, error: 'identity_changed' }; }
+    return { ok: true, stats: r.data.stats as CareerStats };
   }
 }

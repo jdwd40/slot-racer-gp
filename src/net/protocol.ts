@@ -108,8 +108,39 @@ export type ServerMsg =
   | { t: 'ack'; seq: number; result: 'queued' }
   | { t: 'nack'; ref: ClientMsgType | 'unknown'; seq?: number; code: ErrorCode; detail?: string }
   | { t: 'result'; envelope: unknown }
+  | { t: 'awards'; awards: AwardsView }
   | { t: 'pong'; id: number; now: number }
   | { t: 'bye'; code: ErrorCode | 'left' | 'closed' | 'shutdown'; detail?: string };
+
+// ------------------------------------------------------------------------------------------------ career (docs/career.md)
+/**
+ * One classified row of a finalized race, as scored by the server. `credit`: a signed-in driver whose account receives the
+ * points; AI and guest rows keep their position with `credit: false`. Account ids are never sent to the room.
+ */
+export interface AwardRow { participant: string; pos: number | null; status: 'finished' | 'dq' | 'dnf'; credit: boolean; points: number; }
+/**
+ * Where a race's account updates stand: `saving` (being written), `saved` (stored with its award ledger), `pending` (storage
+ * failed; the result is written to disk on the server and retried, never counted twice), `unsaved` (storage failed and no
+ * durable copy could be written either: retried from memory, lost if the server restarts first; becomes `pending` once the
+ * spool takes it), `failed` (refused: a conflicting result for the same race exists; nothing was awarded from this one).
+ */
+export type AwardSync = 'saving' | 'saved' | 'pending' | 'unsaved' | 'failed';
+export interface AwardsView {
+  raceId: string; scoring: string;
+  /** false for practice ('practice') and for aborted or unclassified races ('incomplete'): no points for anyone */
+  eligible: boolean; reason: 'practice' | 'incomplete' | null;
+  sync: AwardSync;
+  rows: AwardRow[];
+}
+
+/** GET /api/profile/stats: the signed-in account's own career. Every number is computed by the server from its ledger. */
+export interface CareerStats {
+  displayName: string;
+  scoring: { version: string; podium: number[] };
+  career: { points: number; races: number; wins: number; seconds: number; thirds: number; dq: number; dnf: number };
+  bests: { track: string; trackVersion: string; current: boolean; mode: Mode; rules: string; lapMs: number; lap: number; livery: string; raceId: string; setAt: string }[];
+  recent: { raceId: string; mode: Mode; championship: ChampionshipTag | null; track: string; pos: number | null; status: 'finished' | 'dq' | 'dnf'; points: number; field: number; humans: number; scoring: string; rules: string; finishedAt: string }[];
+}
 
 // ------------------------------------------------------------------------------------------------ validation
 export type Parsed = { ok: true; msg: ClientMsg } | { ok: false; code: 'malformed' | 'too_large'; ref: ClientMsgType | 'unknown' };

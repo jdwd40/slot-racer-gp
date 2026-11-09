@@ -91,10 +91,10 @@ describe.skipIf(!URL)('PostgreSQL: driver profiles, ownership, session lifecycle
       await c.query("INSERT INTO accounts (username, username_key, password_hash) VALUES ('legacy_driver_name1', 'legacy_driver_name1', 'x')");
     } finally { c.release(); }
     expect((await req('/api/health')).status).toBe(503);   // the running build needs 002
-    expect(await migrate(pool)).toEqual(['002_driver_profiles']);
+    expect(await migrate(pool)).toEqual(MIGRATIONS.slice(1).map((m) => m.id));
     const row = (await pool.query("SELECT p.display_name FROM profiles p JOIN accounts a ON a.id = p.account_id WHERE a.username_key = 'legacy_driver_name1'")).rows[0];
     expect(row.display_name).toBe('legacy_driver_na');   // 16 characters
-    expect(((await (await req('/api/health')).json()) as Record<string, unknown>)).toMatchObject({ ok: true, profiles: true, schema: '002_driver_profiles' });
+    expect(((await (await req('/api/health')).json()) as Record<string, unknown>)).toMatchObject({ ok: true, profiles: true, schema: MIGRATIONS.at(-1)!.id });
     // the database itself refuses blank, padded and over-long names, whatever the application does
     const id = (await pool.query("SELECT id FROM accounts WHERE username_key = 'legacy_driver_name1'")).rows[0].id;
     for (const bad of ['', ' x', 'x ', 'a'.repeat(17), 'a\tb']) await expect(pool.query('UPDATE profiles SET display_name = $2 WHERE account_id = $1', [id, bad])).rejects.toThrow(/profiles_display_name_shape/);
@@ -271,7 +271,11 @@ describe.skipIf(!URL)('PostgreSQL: driver profiles, ownership, session lifecycle
     expect(gp).toMatchObject({ name: 'Guest Gil', guest: true });
     // the public room never carries a username, an account id, a session or a token
     const pub = JSON.stringify(gj.room);
-    for (const s of ['zoe_seat', z.id, 'srsid', 'token', 'password']) expect(pub).not.toContain(s);
+    for (const s of ['zoe_seat', 'srsid', 'token', 'password', 'accountId']) expect(pub).not.toContain(s);
+    // the account id is a short number: compared as whole values (a random room UUID may contain its digits)
+    const values: string[] = [];
+    JSON.parse(pub, (_k, v: unknown) => { values.push(String(v)); return v; });
+    expect(values).not.toContain(z.id);
     // the same account cannot take a second seat in the room
     const dupe = await socket(z.cookie);
     expect(await dupe.request({ t: 'join', code: j.room.code, name: 'Zoe again' })).toMatchObject({ t: 'nack', code: 'already_joined' });

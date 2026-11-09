@@ -296,6 +296,21 @@ small { color: #9ca3af; font-weight: 500; }
 .acct-form .cta { margin-top: 8px; min-height: 48px; }
 .account .cta, .account .tab { min-height: 44px; }
 .account .net-msg[data-kind="err"] { color: #fca5a5; }
+/* career (docs/career.md): profile tiles, verified bests, recent results, and per-race award status */
+.career { text-align: left; margin: 8px 0; }
+.career h3 { font-size: 15px; margin: 10px 0 4px; }
+.career small, .career-note small, .awards small { color: #9ca3af; line-height: 1.35; }
+.career .tiles { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 6px; }
+.career .tile { background: rgba(255,255,255,0.06); border-radius: 10px; padding: 6px 4px; text-align: center; display: flex; flex-direction: column; }
+.career .tile b { font-size: 20px; color: #ffe066; }
+.career table, .awards table { font-size: 13px; }
+.awards { margin: 8px 0; }
+.awards .sync { font-weight: 700; color: #9ca3af; }
+.awards .sync[data-sync="saved"] { color: #86efac; }
+.awards .sync[data-sync="pending"] { color: #fde047; }
+.awards .sync[data-sync="unsaved"] { color: #fdba74; }
+.awards .sync[data-sync="failed"] { color: #fca5a5; }
+@media (max-width: 420px) { .career .tiles { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
 .account .net-msg[data-kind="ok"] { color: #86efac; }
 .account .acct-who b { color: #ffe066; overflow-wrap: anywhere; }
 .acct-form[aria-busy="true"] { cursor: progress; }

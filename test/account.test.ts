@@ -385,3 +385,26 @@ describe('AccountClient', () => {
     expect(clearAccountState(null, null)).toEqual([]);
   });
 });
+
+describe('career stats in the browser (#25)', () => {
+  it('reads only the signed-in account\'s stats; an answer for another account (switched in another tab) is dropped, and account switching clears the connected championship', async () => {
+    const { srv, c, local, keepsSaves } = setup();
+    await c.restore();
+    expect(await c.stats()).toEqual({ ok: false, error: 'signed_out' });
+    await c.register('ann_c', 'ann password 1');
+    const stats = (id: string) => ({ displayName: 'x', scoring: { version: 'career-1:10-6-4', podium: [10, 6, 4] }, career: { points: Number(id) * 10, races: 1, wins: 1, seconds: 0, thirds: 0, dq: 0, dnf: 0 }, bests: [], recent: [] });
+    srv.override('/api/profile/stats', (_b, ck) => ({ status: 200, body: { account: srv.sessions.get(ck), stats: stats(srv.sessions.get(ck)!) } }));
+    expect(await c.stats()).toMatchObject({ ok: true, stats: { career: { points: 10 } } });
+    // the GET carries no body: there is nothing a client could submit
+    expect(srv.calls.filter((x) => x.path === '/api/profile/stats').every((x) => x.body === null)).toBe(true);
+    local.setItem(accountKey('1', 'cchamp'), JSON.stringify({ id: 'cc-1', round: 3 }));
+    // another tab switched the shared cookie to a different account: this tab must not show that account's career
+    await c.logout(); await c.register('bob_c', 'bob password 1');
+    const bob = srv.jar;
+    await c.login('ann_c', 'ann password 1');
+    srv.jar = bob;
+    expect(await c.stats()).toEqual({ ok: false, error: 'identity_changed' });
+    expect(local.getItem(accountKey('1', 'cchamp'))).toBe(null);
+    keepsSaves();
+  });
+});

@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 // Bounded browser checks of online play: independent browser contexts against the real room server. Results: docs/online-client-evidence.md.
 //
-//   node scripts/online-check.mjs [gate lobby service connection layout accounts]   (default: all)
-//   accounts needs SLOTRUSH_TEST_DATABASE_URL (e.g. $(node scripts/local-pg.mjs env) after `node scripts/local-pg.mjs start`)
+//   node scripts/online-check.mjs [gate lobby service connection layout accounts career]   (default: all)
+//   accounts and career need SLOTRUSH_TEST_DATABASE_URL (e.g. $(node scripts/local-pg.mjs env) after `node scripts/local-pg.mjs start`)
 //
 // What runs: an online-enabled build (VITE_ONLINE=1) in dist-online/, two vite previews (same-origin /api and /ws proxies, as
 // Nginx does in production), and two in-process room servers built from server/ (scripts/qa-server.ts):
@@ -809,7 +809,106 @@ async function accounts(run, c) {
   return [a, l];
 }
 
-const SCENARIOS = { gate, lobby, service, connection, layout, accounts };
+/**
+ * Career (#25): a signed-in connected solo race scored by the server, pending sync while storage is down then saved, the
+ * profile's points/podiums/best/history, the same career on a second browser, a rename keeping history, and an account
+ * switch showing nothing of the previous account. The finish is seeded on the server (the AI cars retire and the driver's
+ * car is placed just short of the line on its final lap), so no 13-lap SwiftShader race is needed: diagnostics only.
+ */
+async function career(run, c) {
+  if (!run.acctUrl) { c.unavailable('Career in the browser', 'SLOTRUSH_TEST_DATABASE_URL not set: no local database for the account server'); return []; }
+  const USER = `kai_${Date.now().toString(36).slice(-6)}`, PASS = 'kai browser pw 1';
+  const a = await openPage(run, run.acctUrl, 'laptop', { name: 'desktop A' });
+  await waitOnline(a.page);
+  await waitFor(a.page, () => window.__game.auth.state === 'guest', undefined, 15000);
+  await a.page.click('#o-account');
+  await a.page.click('#a-tab-register');
+  await a.page.fill('#a-user-in', USER); await a.page.fill('#a-pass', PASS); await a.page.fill('#a-name', 'Kai');
+  await a.page.click('#a-submit');
+  await waitFor(a.page, () => window.__game.auth.state === 'signed-in', undefined, 15000);
+  await waitFor(a.page, () => !document.querySelector('#a-career[aria-busy]'), undefined, 10000);
+  const empty = await read(a.page, () => ({ points: document.querySelector('#a-career [data-k="points"] b')?.textContent, text: document.getElementById('a-career').textContent }));
+  c.ok('New account: the profile shows a career of 0 points and no races or bests yet', empty.points === '0' && empty.text.includes(STRINGS['career.noRaces']), empty);
+  await a.page.click('#a-back');
+  await a.page.click('#o-online');
+  const menu = await read(a.page, () => ({ champ: !!document.getElementById('n-champ'), note: document.querySelector('.online')?.textContent ?? '' }));
+  c.ok('Online menu (signed in): connected championship round offered and the verified-points rule stated', menu.champ && menu.note.includes(str('career.onlineNote')), { champ: menu.champ });
+  await a.page.click('#n-solo');
+  await waitFor(a.page, () => window.__game.screen === 'lobby');
+  const code = (await netOf(a.page)).room.code;
+  await a.page.click('#l-start');
+  await waitFor(a.page, () => window.__game.screen === 'race', undefined, 30000);
+  const room = run.accts.room(code);
+  await waitUntil(() => room.race && room.race.phase === 'racing', 30000);
+  // seed the finish: AI cars retire, the driver's car is just short of the line on its final lap at speed, with a valid lap
+  const me = (await netOf(a.page)).me;
+  run.accts.storage.down = true;
+  const r = room.race;
+  for (const car of r.cars) if (car.id !== me) r.retire(car.id);
+  const car = r.car(me);
+  car.crossed = LAPS; car.lapsDone = LAPS - 1; car.sectors = 7; car.lapValid = true; car.lapStartT = r.raceTime - 8.4; car.revMark = null;
+  car.u = r.T.FINISH_S + LAPS * r.T.L + 0.3; car.hiU = car.u; car.v = 12; car.mode = 'race'; car.change = null;
+  // the race core's own lap counting for this position: the final-lap event and the finish, exactly as a crossing makes them
+  r.laps(car);
+  const fin = { status: car.status, lapsDone: car.lapsDone };
+  c.ok('Seeded finish: the server classified the driver as finished on lap 13', fin.status === 'finished' && fin.lapsDone === LAPS, fin);
+  await waitFor(a.page, () => window.__game.screen === 'netres', undefined, 60000);
+  await waitFor(a.page, () => document.querySelector('#r-awards .sync')?.dataset.sync === 'pending', undefined, 15000);
+  const pend = await read(a.page, () => ({ sync: document.querySelector('#r-awards .sync').textContent, pts: [...document.querySelectorAll('#r-awards tr[data-pts]')].map((x) => x.dataset.pts), place: document.querySelector('.netres .place')?.textContent }));
+  c.ok('Storage down at the finish: the result says P1, +10 career points and "pending sync"', pend.sync === STRINGS['career.sync.pending'] && pend.pts.join() === '10', pend);
+  await snapshotOf(a.page, 'career-pending-laptop.png');
+  const before = (await run.accts.pool.query('SELECT count(*)::int AS n FROM career_awards')).rows[0].n;
+  run.accts.storage.down = false;
+  await run.accts.durable.drain();
+  await waitFor(a.page, () => document.querySelector('#r-awards .sync')?.dataset.sync === 'saved', undefined, 15000);
+  const saved = await read(a.page, () => document.querySelector('#r-awards .sync').textContent);
+  const after = (await run.accts.pool.query('SELECT count(*)::int AS n FROM career_awards')).rows[0].n;
+  c.ok('Storage back: the same screen turns to saved, and the ledger gained exactly one row', saved === STRINGS['career.sync.saved'] && after === before + 1, { saved, before, after });
+  await run.accts.durable.drain();   // a second drain changes nothing
+  c.ok('A repeated drain does not add another award', (await run.accts.pool.query('SELECT count(*)::int AS n FROM career_awards')).rows[0].n === after, null);
+  await a.page.click('#r-leave');
+  await waitFor(a.page, () => window.__game.screen === 'title' && window.__game.net === null);
+  await a.page.click('#o-account');
+  await waitFor(a.page, () => !document.querySelector('#a-career[aria-busy]'), undefined, 10000);
+  const prof = await read(a.page, () => { const k = (n) => document.querySelector(`#a-career [data-k="${n}"] b`)?.textContent; return { points: k('points'), wins: k('wins'), races: k('races'), bests: [...document.querySelectorAll('#a-career tr[data-mode]')].map((x) => x.textContent), recent: document.querySelectorAll('#a-career tr[data-race]').length }; });
+  c.ok('Profile after the race: 10 points, 1 win, 1 race, a verified solo best with lap number, one recent result', prof.points === '10' && prof.wins === '1' && prof.races === '1' && prof.bests.length === 1 && /0:0?8\.\d{3}/.test(prof.bests[0]) && prof.recent === 1, prof);
+  await snapshotOf(a.page, 'career-profile-laptop.png');
+
+  // second browser (phone): same career after sign-in; renaming there keeps history
+  const b = await openPage(run, run.acctUrl, 'phonePortrait', { touch: true, name: 'phone B' });
+  await waitOnline(b.page);
+  await waitFor(b.page, () => window.__game.auth.state === 'guest', undefined, 15000);
+  await b.page.click('#o-account');
+  await b.page.fill('#a-user-in', USER); await b.page.fill('#a-pass', PASS);
+  await b.page.locator('#a-submit').tap();
+  await waitFor(b.page, () => window.__game.auth.state === 'signed-in', undefined, 15000);
+  await waitFor(b.page, () => document.querySelector('#a-career [data-k="points"]') !== null, undefined, 10000);
+  const html = (page) => read(page, () => [...document.querySelectorAll('#a-career .tile b, #a-career tr')].map((x) => x.textContent).join('|'));
+  const ha = await html(a.page), hb = await html(b.page);
+  c.ok('Second browser (phone): the same points, podiums, best and history', ha === hb && ha.length > 0, { same: ha === hb });
+  const lf = await layoutFacts(b.page);
+  await snapshotOf(b.page, 'career-profile-phonePortrait.png');
+  c.ok('Phone portrait profile with career fits the width without sideways scroll', lf.fitsWidth && !lf.docScrollX, lf.card);
+  await b.page.fill('#a-name', 'Kai Renamed');
+  await b.page.locator('#a-submit').tap();
+  await waitFor(b.page, () => window.__game.auth.displayName === 'Kai Renamed' && !window.__game.auth.busy, undefined, 10000);
+  await waitFor(b.page, () => document.querySelector('#a-career [data-k="points"]') !== null, undefined, 10000);
+  const hb2 = await html(b.page);
+  c.ok('Rename keeps the career and history unchanged', hb2.replace('Kai Renamed', 'Kai') === hb.replace('Kai Renamed', 'Kai') && (await read(b.page, () => document.querySelector('#a-career h3')?.textContent)).includes('Kai Renamed'), null);
+  // account switch on the phone: another account sees none of this career
+  await b.page.locator('#a-logout').tap();
+  await waitFor(b.page, () => window.__game.auth.state === 'guest', undefined, 10000);
+  await b.page.click('#a-tab-register');
+  await b.page.fill('#a-user-in', `${USER}x`); await b.page.fill('#a-pass', PASS);
+  await b.page.locator('#a-submit').tap();
+  await waitFor(b.page, () => window.__game.auth.state === 'signed-in', undefined, 15000);
+  await waitFor(b.page, () => document.querySelector('#a-career [data-k="points"]') !== null, undefined, 10000);
+  const other = await read(b.page, () => ({ points: document.querySelector('#a-career [data-k="points"] b').textContent, rows: document.querySelectorAll('#a-career tr[data-race], #a-career tr[data-mode]').length }));
+  c.ok('Switching to another account shows its own empty career: nothing leaks or transfers', other.points === '0' && other.rows === 0, other);
+  return [a, b];
+}
+
+const SCENARIOS = { gate, lobby, service, connection, layout, accounts, career };
 
 async function main() {
   const names = process.argv.slice(2).length ? process.argv.slice(2) : Object.keys(SCENARIOS);
@@ -832,7 +931,7 @@ async function main() {
   const pv = [await startPreview(4181, fast.url), await startPreview(4182, `http://127.0.0.1:${proxy.port}`), await startPreview(4183, dead)];
   // accounts: a third server with the local test database (its own schema, recreated each run); needs SLOTRUSH_TEST_DATABASE_URL
   const dbUrl = process.env.SLOTRUSH_TEST_DATABASE_URL;
-  const accts = names.includes('accounts') && dbUrl ? await startQaServer({ ...common, timeScale: 2, maxCatchUpSteps: 12 }, { url: dbUrl, schema: 't_browser' }) : null;
+  const accts = (names.includes('accounts') || names.includes('career')) && dbUrl ? await startQaServer({ ...common, timeScale: 2, maxCatchUpSteps: 12 }, { url: dbUrl, schema: 't_browser' }) : null;
   if (accts) pv.push(await startPreview(4184, accts.url));
   const browser = await chromium.launch({ headless: true });
   const run = { contexts: new Set(), qa: await import(pathToFileURL(qaFile).href), browser, fast, real, proxy, accts, fastUrl: pv[0].url, realUrl: pv[1].url, deadUrl: pv[2].url, acctUrl: accts ? pv[3].url : null, evidence: {} };

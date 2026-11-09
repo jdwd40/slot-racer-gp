@@ -409,7 +409,7 @@ describe('races, results and timing', () => {
     expect(s.room.result!.classification).toHaveLength(4);
 
     const cp = new FakePeer();
-    const c = h.mgr.create(cp, { name: 'Champ', accountId: null, mode: 'championship', settings: { track: 'circuit-5' }, championship: { id: 'cup-1', round: 2 } });
+    const c = h.mgr.create(cp, { name: 'Champ', accountId: null, mode: 'championship', settings: { track: 'circuit-2' }, championship: { id: 'cup-1', round: 2 } });
     if (!c.ok) throw new Error();
     expect(c.room.publicRoom()).toMatchObject({ mode: 'championship', championship: { id: 'cup-1', round: 2 } });
 
