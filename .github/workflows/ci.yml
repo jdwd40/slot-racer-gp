@@ -45,6 +45,9 @@ jobs:
         run: python3 -m unittest discover -s deploy -p 'test_*.py' -v
 
       - name: Production build
+        # online play is live (docs/online-server.md runbook step 11); still gated at runtime by /api/health
+        env:
+          VITE_ONLINE: '1'
         run: npm run build
 
       - name: Package this checked build (no VPS rebuild)
