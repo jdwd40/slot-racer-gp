@@ -407,7 +407,9 @@ export class Room {
       if (e.type === 'lap') this.laps.push({ driver: e.car, lap: e.lapsDone, time: e.time, valid: e.valid, raceT: round3(race.raceTime) });
     }
     if (this.evBuf.length > 256) this.evBuf.splice(0, this.evBuf.length - 256);   // bounded even if no snapshot goes out
-    if (race.final) { this.broadcastState(now); this.finalize('completed', null, now); return; }
+    // practice has no classification: the only way it closes on its own is the race-time limit, and that is still a
+    // laps-only session end (never a DNF "timeout" result)
+    if (race.final) { this.broadcastState(now); this.finalize(this.rules.practice ? 'ended' : 'completed', null, now); return; }
     if (this.stepsDone % this.snapEvery === 0) this.broadcastState(now);
   }
 

@@ -428,6 +428,22 @@ describe('races, results and timing', () => {
     expect(pr.room.state).toBe('closed');
   });
 
+  it('a practice session that runs into the race-time limit still ends laps-only, never as a completed DNF timeout', () => {
+    const h = harness();
+    const pp = new FakePeer();
+    const pr = h.mgr.create(pp, { name: 'Prac', accountId: null, mode: 'practice', settings: { track: 'circuit-1' } });
+    if (!pr.ok) throw new Error();
+    pr.room.handle(pr.participant, { t: 'start' }, h.now);
+    drive(h, pr.room, [pp], [pr.participant], 1_300_000);
+    expect(pr.room.state).toBe('results');
+    expect(pr.room.results).toHaveLength(1);
+    const env = pr.room.result!;
+    expect(env).toMatchObject({ mode: 'practice', outcome: 'ended', abortReason: null, classification: null });
+    expect(env.times.raceTimeS).toBeGreaterThan(1200);
+    expect(env.laps.length).toBeGreaterThan(0);
+    expect(pp.of('result')).toHaveLength(1);
+  }, 60_000);
+
   it('rooms on different circuits run side by side exactly as they run alone: track, RNG, controls and results stay separate', () => {
     const run = (tracks: string[]) => {
       const h = harness({}, 99);
