@@ -1,6 +1,6 @@
 # Service obligations, deferral and disqualification
 
-A stop-and-go stays owed until it is served. A pit visit the player puts back a lap must be made on that lap. If a deadline is missed, or a stop is still owed when the car finishes, the car is **disqualified when it crosses the line at the end of its final lap**. Unserved stops are no longer turned into time penalties. Lane routing is in [pit routing](pit-routing.md). Recovery by reversing is in [reverse](reverse.md).
+A stop-and-go stays owed until it is served. A pit visit the player puts back a lap must be made on that lap. If a deadline is missed, or a stop is still owed when the car finishes, the car is **disqualified when it crosses the line at the end of its final lap**. Unserved stops are no longer turned into time penalties. Lane routing is in [pit routing](pit-routing.md). The player's stop is driven automatically: see [automatic stop-and-go](auto-stop-go.md). Recovery by reversing is in [reverse](reverse.md).
 
 ## Visit reasons
 
