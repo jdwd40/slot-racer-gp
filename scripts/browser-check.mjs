@@ -1502,7 +1502,9 @@ async function responsive(run, c) {
   await waitFor(page, () => window.__game.screen === 'title');
   await page.locator('#o-champ-cont').tap();
   await waitFor(page, () => window.__game.screen === 'race' && window.__game.mode === 'champ');
-  await read(page, () => { const g = window.__game; g.race.phase = 'done'; });
+  // end the round for real: every car terminally classified, then the race closes and freezes its final standings (a
+  // championship only records race.final, never a live order)
+  await read(page, () => { const r = window.__game.race; r.classifyRunning('timeout'); r.humansDoneT = r.t - 4; });
   await waitFor(page, () => window.__game.screen === 'champ');
   await menus('championship');
   await size(page, 360, 640);

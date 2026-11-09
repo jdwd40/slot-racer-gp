@@ -64,9 +64,11 @@ Chromium 156 headless with SwiftShader, 480×270 at DPR 1 on the Low preset unle
 | `autosg` | 16/16 pass | Automatic stop-and-go phases, queue, defer, pause mid-service |
 | `autobay` | 27/27 pass | Own-bay visits, release/ready/fresh-press departure, blocked merge and exit |
 | `queue` | 12/12 pass | Shared pit queue, bay and exit waits |
+| `service` | 16/16 pass | Defer, due and overdue states, deadlines, keyboard and touch |
+| `responsive` | 71/71 pass | Phone, tablet and desktop layouts under mobile emulation, menus, championship by touch. The first run failed 1 check: the script forced `phase = 'done'` mid-race, which skips the race's close step, so no `final` existed and no round was recorded. That refusal is the intended rule now. The script ends the round by terminal classification instead, and the check passes |
 | `localslot` (new) | 11/11 pass | Local driver in slot 2: camera, marker, HUD row/position/fuel, own bay, motor emphasis, personal toast, back to slot 0 |
 
-`touchrace` (a 13-lap race on emulated touch only) was not run in this round. Neither were the late batch scenarios listed below unless noted, because the build host's time limits did not leave room. No physical touch device or GPU was available.
+`touchrace` (a 13-lap race on emulated touch only) was not run, and `routing` did not finish, because of the build host's time limits; the touch pads and the routing logic are covered by `touch`, the unit tests and the `routing` checks that did run. No physical phone, tablet, touch device or GPU was available, so smooth play on real devices is unverified.
 
 ## Next service task (rooms)
 
