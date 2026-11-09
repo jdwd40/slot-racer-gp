@@ -8,12 +8,14 @@ import { STEP } from '../src/timing';
 import {
   LIMITS, LIVERIES, cleanName, isLivery, neutral,
   type ChampionshipTag, type ClientMsg, type ErrorCode, type LiveryId, type Mode, type PublicAi, type PublicParticipant,
-  type PublicRoom, type RoomSettings, type RoomState, type ServerMsg,
+  type AwardsView, type AwardSync, type PublicRoom, type RoomSettings, type RoomState, type ServerMsg,
 } from '../src/net/protocol';
+import { CHAMP_TRACKS } from '../src/records';
+import { computeAwards, makeScoring, type Scoring } from './career';
 import type { Config } from './config';
 import type { Logger } from './log';
 import { buildEnvelope, type EnvelopeLap, type EnvelopeParticipant, type ResultEnvelope } from './envelope';
-import type { ResultSink } from './results';
+import { ResultConflict, type ResultSink } from './results';
 
 /** A connected client as the room sees it. The WebSocket layer implements it; tests use an in-memory double. */
 export interface Peer {
@@ -26,6 +28,8 @@ export interface RoomDeps {
   cfg: Config;
   log: Logger;
   sink: ResultSink;
+  /** career points policy (server/career.ts); the default is 10/6/4 */
+  scoring?: Scoring;
   /** a seed for each new race (tests fix it; the default is cryptographically random) */
   seed?: () => number;
   onClose?: (room: Room) => void;
@@ -98,6 +102,8 @@ export class Room {
   private snapEvery: number;
   /** the finalized envelope of the last race (state 'results'); built once per race */
   result: Readonly<ResultEnvelope> | null = null;
+  /** the last race's career awards and where their storage stands (sent to every member, replayed on resume) */
+  awards: AwardsView | null = null;
   /** every envelope this room produced, in order (one per race) */
   readonly results: Readonly<ResultEnvelope>[] = [];
 
@@ -119,6 +125,15 @@ export class Room {
   private applySettings(s: Partial<RoomSettings>): string | null {
     if (s.track !== undefined && !isTrackId(s.track)) return 'unknown track';
     if (s.aiFill !== undefined && this.rules.aiFill !== 'setting' && s.aiFill !== (this.rules.aiFill === 'always')) return `aiFill is fixed for ${this.mode}`;
+    if (this.mode === 'championship') {
+      // a connected championship round runs on that round's circuit (the local championship calendar)
+      const c = this.championship;
+      if (!c || c.round > CHAMP_TRACKS.length) return `championship round 1-${CHAMP_TRACKS.length} required`;
+      const want = CHAMP_TRACKS[c.round - 1];
+      if (s.track !== undefined && s.track !== want) return `round ${c.round} runs on ${want}`;
+      this.settings = { track: want, aiFill: true };
+      return null;
+    }
     this.settings = { track: s.track ?? this.settings.track, aiFill: s.aiFill ?? this.settings.aiFill };
     return null;
   }
@@ -296,7 +311,7 @@ export class Room {
       case 'rematch':
         if (!host) return nack('forbidden', 'only the room host calls a rematch');
         if (this.state !== 'results') return nack('bad_state');
-        this.state = 'lobby'; this.race = null; this.raceId = null; this.result = null; this.roster = [];
+        this.state = 'lobby'; this.race = null; this.raceId = null; this.result = null; this.awards = null; this.roster = [];
         for (const x of this.parts) { x.ready = false; x.inRace = false; }
         this.touch(now); this.broadcastRoom();
         return null;
@@ -435,24 +450,38 @@ export class Room {
     this.results.push(env);
     this.state = 'results'; this.resultsAt = now;
     this.log.info('race.final', { room: this.id, race: env.raceId, outcome, reason, digest: env.digest });
-    this.consume(env, 0);
+    this.consume(env);
     // seats given up during the race are freed now; the rest stay for a rematch
     this.parts = this.parts.filter((p) => !p.left);
     for (const p of this.parts) { p.inRace = false; p.ready = false; p.held = neutral(); }
     this.ensureHost();
     this.broadcast({ t: 'result', envelope: env });
+    this.broadcast({ t: 'awards', awards: this.awards! });
     if (!this.active().length) { this.close('empty'); return; }
     this.broadcastRoom();
   }
 
-  private consume(env: Readonly<ResultEnvelope>, attempt: number): void {
+  /**
+   * Hand the envelope to storage once. The awards shown are computed from the same envelope by the same function storage
+   * uses, so what every member sees is what the ledger records; `sync` says whether it is stored yet. A storage failure is
+   * queued durably by the sink ('pending') and settled later through `settled`.
+   */
+  private consume(env: Readonly<ResultEnvelope>): void {
+    this.awards = { ...computeAwards(env, this.deps.scoring ?? DEFAULT_SCORING).view, sync: 'saving' };
     this.deps.sink.consume(env).then(
-      (r) => this.log.info('result.consumed', { race: env.raceId, result: r }),
+      (r) => { this.log.info('result.consumed', { race: env.raceId, result: r }); this.settled(env.raceId, r === 'queued' ? 'pending' : 'saved'); },
       (err: unknown) => {
-        this.log.error('result.consume_failed', { race: env.raceId, attempt, error: String(err) });
-        if (attempt < 3 && !(err instanceof Error && err.name === 'ResultConflict')) setTimeout(() => this.consume(env, attempt + 1), 1000 * 2 ** attempt).unref?.();
+        this.log.error('result.consume_failed', { race: env.raceId, error: String(err) });
+        this.settled(env.raceId, err instanceof ResultConflict ? 'failed' : 'pending');
       },
     );
+  }
+
+  /** Storage of this room's last result has moved on (stored, queued, or stored later from the queue): tell every member. */
+  settled(raceId: string, sync: AwardSync): void {
+    if (!this.awards || this.awards.raceId !== raceId || this.awards.sync === sync || this.awards.sync === 'saved') return;
+    this.awards = { ...this.awards, sync };
+    if (this.state !== 'closed') this.broadcast({ t: 'awards', awards: this.awards });
   }
 
   /** Stop the race (if any) without a result, then close: used for room lifetime, overload and server shutdown. */
@@ -539,6 +568,7 @@ export class Room {
   }
 }
 
+const DEFAULT_SCORING = makeScoring();
 export function liveryColor(id: LiveryId): number { return LIVERIES.find((l) => l.id === id)!.color; }
 const iso = (ms: number): string => new Date(ms).toISOString();
 const round3 = (x: number): number => Math.round(x * 1000) / 1000;

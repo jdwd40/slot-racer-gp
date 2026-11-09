@@ -14,6 +14,10 @@ Group=slotrush-server
 WorkingDirectory=/srv/slotrush-server/current
 EnvironmentFile=/etc/slotrush-server/env
 Environment=NODE_ENV=production UV_THREADPOOL_SIZE=2
+# /var/lib/slotrush-server (owned by the service user, mode 0700, writable despite ProtectSystem=strict): the durable queue
+# for results the database could not take yet (docs/career.md); SLOTRUSH_SPOOL_DIR in the env file points inside it
+StateDirectory=slotrush-server
+StateDirectoryMode=0700
 # lean V8 heap: the server needs about 15 MB of heap; the cap leaves the rest of MemoryMax for native memory
 ExecStart=/usr/bin/node --max-old-space-size=96 --max-semi-space-size=2 server-dist/main.mjs
 Restart=on-failure

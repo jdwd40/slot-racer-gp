@@ -5,10 +5,11 @@ import { randomInt } from 'node:crypto';
 import { CODE_ALPHABET, LIMITS, type ChampionshipTag, type LiveryId, type Mode, type RoomSettings } from '../src/net/protocol';
 import type { Config } from './config';
 import type { Logger } from './log';
+import type { Scoring } from './career';
 import type { ResultSink } from './results';
 import { Room, type Fail, type JoinOk, type Peer } from './room';
 
-export interface ManagerDeps { cfg: Config; log: Logger; sink: ResultSink; now?: () => number; seed?: () => number; }
+export interface ManagerDeps { cfg: Config; log: Logger; sink: ResultSink; scoring?: Scoring; now?: () => number; seed?: () => number; }
 
 /** Join/resume failures allowed per client address per minute (room codes are short; guessing must stay expensive). */
 const JOIN_FAILS_PER_MIN = 20;
@@ -56,7 +57,7 @@ export class RoomManager {
     if (this.tickMaxMs > 50) return { ok: false, code: 'overloaded', detail: 'server busy, try again later' };
     let room: Room;
     try {
-      room = new Room(this.newCode(), o.mode, o.settings, o.championship ?? null, { cfg: this.deps.cfg, log: this.deps.log, sink: this.deps.sink, seed: this.deps.seed, onClose: (r) => this.forget(r) }, this.now());
+      room = new Room(this.newCode(), o.mode, o.settings, o.championship ?? null, { cfg: this.deps.cfg, log: this.deps.log, sink: this.deps.sink, scoring: this.deps.scoring, seed: this.deps.seed, onClose: (r) => this.forget(r) }, this.now());
     } catch (e) {
       return { ok: false, code: 'bad_settings', detail: (e as Error).message };
     }
@@ -83,6 +84,11 @@ export class RoomManager {
     const r = room.resume(peer, participant, token, accountId, this.now());
     if (!r.ok) this.noteFailure(ip);
     return r.ok ? { ...r, room } : r;
+  }
+
+  /** A queued result was stored later (server/spool.ts): the room that showed it 'pending' says so. */
+  settled(raceId: string, sync: 'saved' | 'failed'): void {
+    for (const r of this.rooms.values()) if (r.awards?.raceId === raceId) r.settled(raceId, sync);
   }
 
   private forget(r: Room): void {

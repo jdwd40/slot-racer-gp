@@ -1,6 +1,7 @@
 // Server configuration, read once from the environment (in production: the systemd EnvironmentFile, never the repo or the
 // Vite bundle). Every value is validated and bounded; a bad value stops the process with a message naming the variable.
 import { LIMITS } from '../src/net/protocol';
+import { parsePodium } from './career';
 import type { Level } from './log';
 
 export interface Config {
@@ -36,6 +37,10 @@ export interface Config {
   dbPoolMax: number;
   sessionSecret: string | null;
   cookieSecure: boolean;
+  /** career points for 1st, 2nd, 3rd... (SLOTRUSH_CAREER_POINTS, default 10,6,4); the scoring version follows from them */
+  careerPoints: readonly number[];
+  /** where results the database could not take yet are queued durably (SLOTRUSH_SPOOL_DIR); null: memory only */
+  spoolDir: string | null;
   logLevel: Level;
   version: string;
 }
@@ -73,6 +78,11 @@ export function loadConfig(env: Env = process.env): Config {
   const logLevel = (env.SLOTRUSH_LOG_LEVEL ?? 'info') as Level;
   if (!['debug', 'info', 'warn', 'error'].includes(logLevel)) throw new Error('SLOTRUSH_LOG_LEVEL must be debug, info, warn or error');
   const host = env.SLOTRUSH_HOST ?? '127.0.0.1';
+  let careerPoints: readonly number[];
+  try { careerPoints = parsePodium(env.SLOTRUSH_CAREER_POINTS); } catch { throw new Error('SLOTRUSH_CAREER_POINTS must be 1-8 comma-separated integers from 0 to 1000 (default 10,6,4)'); }
+  const spoolDir = env.SLOTRUSH_SPOOL_DIR?.trim() || null;
+  if (spoolDir && !spoolDir.startsWith('/')) throw new Error('SLOTRUSH_SPOOL_DIR must be an absolute path');
+  if (mode === 'production' && databaseUrl && !spoolDir) throw new Error('SLOTRUSH_SPOOL_DIR is required in production with DATABASE_URL (results the database cannot take yet are queued there)');
   return {
     env: mode, host,
     port: int(env, 'SLOTRUSH_PORT', 8787, 0, 65535),
@@ -96,6 +106,7 @@ export function loadConfig(env: Env = process.env): Config {
     dbPoolMax: int(env, 'SLOTRUSH_DB_POOL_MAX', 3, 1, 20),
     sessionSecret,
     cookieSecure: bool(env, 'SLOTRUSH_COOKIE_SECURE', mode === 'production'),
+    careerPoints, spoolDir,
     logLevel,
     version: env.SLOTRUSH_VERSION ?? 'dev',
   };

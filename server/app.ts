@@ -13,11 +13,17 @@ import { schemaStatus, SCHEMA_VERSION } from './migrations';
 import type { Peer, Room } from './room';
 import type { RoomManager } from './rooms';
 import { PgSessionStore, type SessionAccount } from './sessionStore';
+import { makeScoring, type Scoring } from './career';
+import { careerStats } from './stats';
 
 export interface AppDeps {
   cfg: Config; log: Logger; manager: RoomManager; pool?: Pool | null;
   /** how often signed-in sockets re-check their session (ms); tests shorten it */
   sessionCheckMs?: number;
+  /** career points policy shown with the stats (server/career.ts) */
+  scoring?: Scoring;
+  /** results waiting in the durable queue (server/spool.ts), for health */
+  pendingResults?: () => number;
 }
 export interface App {
   server: http.Server;
@@ -56,7 +62,7 @@ export class RateWindow {
   clear(key: string): void { this.m.delete(key); }
 }
 
-export function createApp({ cfg, log, manager, pool = null, sessionCheckMs = SESSION_CHECK_MS }: AppDeps): App {
+export function createApp({ cfg, log, manager, pool = null, sessionCheckMs = SESSION_CHECK_MS, scoring = makeScoring(cfg.careerPoints), pendingResults = () => 0 }: AppDeps): App {
   const started = Date.now();
   const accounts = pool ? new Accounts(pool) : null;
   const store = pool ? new PgSessionStore(pool) : null;
@@ -126,7 +132,7 @@ export function createApp({ cfg, log, manager, pool = null, sessionCheckMs = SES
       status: ok ? 200 : 503,
       body: {
         ok, service: 'slotrush-server', version: cfg.version, protocol: PROTOCOL_VERSION, rules: RULES_VERSION, schema: SCHEMA_VERSION,
-        accounts: !!accounts, profiles: !!accounts, db, uptimeS: Math.round((Date.now() - started) / 1000),
+        accounts: !!accounts, profiles: !!accounts, career: !!accounts, db, scoring: scoring.version, pendingResults: pendingResults(), uptimeS: Math.round((Date.now() - started) / 1000),
         rooms: st.rooms, roomCap: cfg.roomCap, racing: st.racing, humans: st.humans, connections: conns, maxConnections: cfg.maxConnections,
         tickMaxMs: Math.round(manager.tickMaxMs * 10) / 10, rssMb: Math.round(mem.rss / 1048576), heapMb: Math.round(mem.heapUsed / 1048576),
       },
@@ -140,6 +146,7 @@ export function createApp({ cfg, log, manager, pool = null, sessionCheckMs = SES
       if (req.method === 'GET' && url === '/api/version') { json(res, 200, { service: 'slotrush-server', version: cfg.version, protocol: PROTOCOL_VERSION, rules: RULES_VERSION, schema: SCHEMA_VERSION }); return; }
       if (url.startsWith('/api/auth/')) { await auth(req, res, url.slice('/api/auth/'.length)); return; }
       if (url === '/api/profile') { await profile(req, res); return; }
+      if (url === '/api/profile/stats') { await stats(req, res); return; }
       json(res, 404, { error: 'not_found' });
     } catch (e) {
       log.error('http.error', { url, error: String(e) });
@@ -275,6 +282,29 @@ export function createApp({ cfg, log, manager, pool = null, sessionCheckMs = SES
     log.info('profile.rename', { account: acct.id });
     json(res, 200, { profile: publicProfile(p) });
   }
+  /**
+   * The signed-in driver's career, read-only. There is no write endpoint for points, positions or bests: they are only ever
+   * written by the result sink from a server-finalized race (server/results.ts). Any other method is refused.
+   */
+  async function stats(req: Req, res: ServerResponse): Promise<void> {
+    if (!accounts || !pool) { json(res, 503, { error: 'accounts_unavailable' }); return; }
+    if (req.method !== 'GET') { json(res, 405, { error: 'method' }); return; }
+    if (!await loadSession(req, res)) return;
+    const acct = req.session?.account;
+    if (!acct) {
+      const expired = staleCookie(req);
+      if (expired) clearCookie(res);
+      json(res, 401, { error: expired ? 'session_expired' : 'signed_out' });
+      return;
+    }
+    let body;
+    try {
+      const p = await accounts.profile(acct.id);
+      if (!p) { json(res, 401, { error: 'session_expired' }); return; }
+      body = { account: acct.id, stats: await careerStats(pool, acct.id, p.displayName, scoring) };
+    } catch (e) { log.error('stats.read_failed', { error: String(e) }); json(res, 503, { error: 'unavailable' }); return; }
+    json(res, 200, body);
+  }
   const noteAuthFail = (ip: string): void => manager.noteFailure(`auth:${ip}`);
 
   const server = http.createServer((req, res) => { void onRequest(req as Req, res); });
@@ -392,7 +422,10 @@ export function createApp({ cfg, log, manager, pool = null, sessionCheckMs = SES
       const st = r.room.stateMsg(manager.now());
       if (st && ws.readyState === ws.OPEN) ws.send(st);
       // a driver who lost the link while the race closed missed the one `result` broadcast: replay the same frozen envelope
-      if (r.room.state === 'results' && r.room.result) send({ t: 'result', envelope: r.room.result });
+      if (r.room.state === 'results' && r.room.result) {
+        send({ t: 'result', envelope: r.room.result });
+        if (r.room.awards) send({ t: 'awards', awards: r.room.awards });
+      }
     }
 
     function handle(m: ClientMsg): void {

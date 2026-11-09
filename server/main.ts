@@ -4,7 +4,9 @@ import { loadConfig } from './config';
 import { createPool } from './db';
 import { createLogger } from './log';
 import { schemaStatus } from './migrations';
+import { makeScoring } from './career';
 import { MemoryResultSink, PgResultSink, type ResultSink } from './results';
+import { DurableSink } from './spool';
 import { RoomManager } from './rooms';
 
 declare const __SLOTRUSH_BUILD__: string | undefined;
@@ -21,15 +23,20 @@ async function main(): Promise<void> {
   } else {
     log.warn('db.disabled', { note: 'no DATABASE_URL: guests only, results kept in memory' });
   }
-  const store: ResultSink = pool ? new PgResultSink(pool) : new MemoryResultSink();
+  const scoring = makeScoring(cfg.careerPoints);
+  // every result goes to the database through a durable queue: one the database cannot take yet is spooled to disk and
+  // retried (also after a restart) instead of being lost; storage is idempotent by race id, so a retry never awards twice
+  const durable = new DurableSink(pool ? new PgResultSink(pool, scoring) : new MemoryResultSink(), { dir: pool ? cfg.spoolDir : null, log });
   // results still being written when a stop begins are awaited (within the 5 s stop budget) before the pool closes
   const pending = new Set<Promise<unknown>>();
-  const sink: ResultSink = { consume: (e) => { const p = store.consume(e); pending.add(p); void p.finally(() => pending.delete(p)).catch(() => undefined); return p; } };
-  const manager = new RoomManager({ cfg, log, sink });
-  const app = createApp({ cfg, log, manager, pool });
+  const sink: ResultSink = { consume: (e) => { const p = durable.consume(e); pending.add(p); void p.finally(() => pending.delete(p)).catch(() => undefined); return p; } };
+  const manager = new RoomManager({ cfg, log, sink, scoring });
+  durable.onSettled = (raceId, r) => manager.settled(raceId, r);
+  await durable.start();
+  const app = createApp({ cfg, log, manager, pool, scoring, pendingResults: () => durable.pending });
   const { port } = await app.listen();
   manager.start();
-  log.info('server.listen', { host: cfg.host, port, version: cfg.version, roomCap: cfg.roomCap, env: cfg.env, db: !!pool });
+  log.info('server.listen', { host: cfg.host, port, version: cfg.version, roomCap: cfg.roomCap, env: cfg.env, db: !!pool, scoring: scoring.version, spool: !!cfg.spoolDir, pendingResults: durable.pending });
 
   let stopping = false;
   const stop = (sig: string): void => {
@@ -38,6 +45,7 @@ async function main(): Promise<void> {
     log.info('server.stop', { signal: sig });
     // races in progress end without a result (never a fabricated one); clients are told the service is restarting
     manager.shutdown('shutdown');
+    durable.stop();
     const hard = setTimeout(() => process.exit(1), 5000); hard.unref();
     void Promise.allSettled([...pending]).then(() => app.close()).then(() => pool?.end()).then(() => process.exit(0), () => process.exit(1));
   };

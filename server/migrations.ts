@@ -67,6 +67,65 @@ CREATE TABLE profiles (
 INSERT INTO profiles (account_id, display_name) SELECT id, left(username, 16) FROM accounts;
 `,
   },
+  {
+    // #25: career points and personal bests. Additive only: existing accounts, profiles, sessions and stored results are kept
+    // as they are, and results stored before this migration are not scored retroactively (scoring_version stays NULL). The
+    // award ledger is the only source of career totals (they are summed from it), so totals can never disagree with it.
+    id: '003_career_awards_bests',
+    sql: `
+ALTER TABLE race_results ADD COLUMN scoring_version text;
+
+CREATE TABLE career_awards (
+  race_id uuid NOT NULL REFERENCES race_results(race_id),
+  participant_id text NOT NULL,
+  account_id bigint NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+  scoring_version text NOT NULL,
+  rules_version text NOT NULL,
+  mode text NOT NULL CHECK (mode IN ('multiplayer', 'solo', 'championship')),
+  championship_id text,
+  championship_round int,
+  track_id text NOT NULL,
+  track_version text NOT NULL,
+  position int CHECK (position IS NULL OR position >= 1),
+  status text NOT NULL CHECK (status IN ('finished', 'dq', 'dnf')),
+  points int NOT NULL CHECK (points >= 0),
+  field_size int NOT NULL,
+  humans int NOT NULL,
+  driver_name text NOT NULL,
+  livery text NOT NULL,
+  finished_at timestamptz NOT NULL,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (race_id, participant_id, scoring_version),
+  -- one account holds one seat per race: it can never be credited twice for the same race under any participant id
+  UNIQUE (race_id, account_id, scoring_version),
+  CONSTRAINT career_awards_points_shape CHECK ((status = 'finished' AND position IS NOT NULL) OR (status <> 'finished' AND position IS NULL AND points = 0))
+);
+CREATE INDEX career_awards_account ON career_awards (account_id, finished_at DESC);
+
+-- the ledger is append-only: an award, once written, never changes
+CREATE FUNCTION career_awards_immutable() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  RAISE EXCEPTION 'career_awards rows are immutable';
+END $$;
+CREATE TRIGGER career_awards_no_update BEFORE UPDATE ON career_awards FOR EACH ROW EXECUTE FUNCTION career_awards_immutable();
+
+-- fastest valid authoritative lap per account, circuit layout version, mode and rules version; only ever lowered
+CREATE TABLE personal_bests (
+  account_id bigint NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+  track_id text NOT NULL,
+  track_version text NOT NULL,
+  mode text NOT NULL CHECK (mode IN ('multiplayer', 'solo', 'championship', 'practice')),
+  rules_version text NOT NULL,
+  source text NOT NULL DEFAULT 'verified' CHECK (source = 'verified'),
+  lap_ms int NOT NULL CHECK (lap_ms > 0),
+  lap int NOT NULL,
+  race_id uuid NOT NULL REFERENCES race_results(race_id),
+  livery text NOT NULL,
+  set_at timestamptz NOT NULL,
+  PRIMARY KEY (account_id, track_id, track_version, mode, rules_version)
+);
+`,
+  },
 ];
 
 export const SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1].id;

@@ -173,6 +173,8 @@ Settings come from environment variables: the systemd `EnvironmentFile`, never t
 | `DATABASE_URL`, `SLOTRUSH_DB_POOL_MAX` | Unset (guests only, results in memory), 3 | |
 | `SLOTRUSH_SESSION_SECRET` | | Required with `DATABASE_URL`, at least 32 characters |
 | `SLOTRUSH_COOKIE_SECURE` | 1 in production | |
+| `SLOTRUSH_CAREER_POINTS` | `10,6,4` | Career points for 1st, 2nd, 3rd… (1–8 integers, 0–1000); the stored scoring version follows from them ([career.md](career.md)) |
+| `SLOTRUSH_SPOOL_DIR` | Unset (memory queue) | Absolute path for results the database cannot take yet. **Required in production with `DATABASE_URL`**; the unit's `StateDirectory` provides `/var/lib/slotrush-server` |
 | `SLOTRUSH_TIME_SCALE` | 1 | Tests only. **Refused in production** |
 
 **Logs** are JSON lines on stdout and stderr (journald under systemd). Reconnect tokens, passwords, cookies and session IDs are never passed to the logger. `redact()` also strips any field with a secret-looking name. Tests assert that no token or password appears in a log line.
@@ -263,7 +265,7 @@ These steps run as an administrator on the site host (`ssh app-vps`). None of th
 
    Confirm that `pg_hba.conf` already allows `scram-sha-256` from 127.0.0.1 for this role. Do not widen it.
 
-4. **Configuration.** Copy `deploy/server/slotrush-server.env.example` to `/etc/slotrush-server/env` (`root:slotrush-server`, mode 0640). Set `DATABASE_URL` and `SLOTRUSH_SESSION_SECRET` (`openssl rand -base64 48`), and keep `SLOTRUSH_ALLOWED_ORIGINS=https://slotrush.jdwd40.com`. Do not paste these values anywhere else.
+4. **Configuration.** Copy `deploy/server/slotrush-server.env.example` to `/etc/slotrush-server/env` (`root:slotrush-server`, mode 0640). Set `DATABASE_URL` and `SLOTRUSH_SESSION_SECRET` (`openssl rand -base64 48`), and keep `SLOTRUSH_ALLOWED_ORIGINS=https://slotrush.jdwd40.com`, `SLOTRUSH_SPOOL_DIR=/var/lib/slotrush-server/spool` and `SLOTRUSH_CAREER_POINTS=10,6,4`. Do not paste these values anywhere else.
 
 5. **Install the release** (root-owned and read-only to the service):
 
@@ -273,7 +275,7 @@ These steps run as an administrator on the site host (`ssh app-vps`). None of th
    sudo ln -sfn releases/slotrush-server-<rev> /srv/slotrush-server/current.new && sudo mv -T /srv/slotrush-server/current.new /srv/slotrush-server/current
    ```
 
-6. **Migrate**, then check the schema. On an existing database, back it up first ([accounts.md](accounts.md#backup-and-restore)); release #24 adds `002_driver_profiles`:
+6. **Migrate**, then check the schema. On an existing database, back it up first ([accounts.md](accounts.md#backup-and-restore)); release #24 adds `002_driver_profiles`, release #25 adds `003_career_awards_bests` ([career.md](career.md#production-activation-owner)):
 
    ```bash
    cd /srv/slotrush-server/current
@@ -317,7 +319,7 @@ These steps run as an administrator on the site host (`ssh app-vps`). None of th
 
 ### Rollback
 
-- **Server release:** point `current` back at the previous release directory (`ln -sfn releases/<previous> current.new && mv -T current.new current`), then `sudo systemctl restart slotrush-server`, then re-run step 8. Migrations are additive and the old release ignores newer tables. If a migration ever must be reverted, restore the database from the backup taken before step 6 (`pg_dump -Fc slotrush > slotrush-<ts>.dump`).
+- **Server release:** point `current` back at the previous release directory (`ln -sfn releases/<previous> current.new && mv -T current.new current`), then `sudo systemctl restart slotrush-server`, then re-run step 8. Migrations are additive and the old release ignores newer tables. A release before #25 stores results without scoring them: races finished while it runs never earn career points, even after upgrading again (a stored race is never re-scored), so prefer rolling forward. If a migration ever must be reverted, restore the database from the backup taken before step 6 (`pg_dump -Fc slotrush > slotrush-<ts>.dump`).
 - **Turn online play off entirely:** restore the backed-up static-only Nginx site file, run `nginx -t`, and reload Nginx. `/api` and `/ws` then return 404, the client's health check fails, and online play stays off. Then run `sudo systemctl disable --now slotrush-server`. The static game is unaffected throughout.
 - **Client:** remove `VITE_ONLINE` from the build and push, or roll back the static release with the existing receiver (`deployment.md`). Local saves (records, ghosts and championships) are never touched by the server or by either rollback.
 - **Revoke database access:** `ALTER ROLE slotrush NOLOGIN`. Remove the service user and `/etc/slotrush-server` only after the service is disabled.

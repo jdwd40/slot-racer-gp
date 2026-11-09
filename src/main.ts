@@ -14,9 +14,9 @@ import { GhostRecorder, GhostPlayer } from './ghost';
 import { FixedStepper, STEP, MAX_GAP, Pose, blendPose } from './timing';
 import { PRESETS, PresetId, pixelRatioFor, savedPreset, savePreset } from './graphics';
 import { NetSession, loadSeat, refusalText, type ResultView, type Seat, type EndReason } from './net/session';
-import { AccountClient, type AuthError, type AuthState } from './net/account';
+import { AccountClient, accountKey, type AuthError, type AuthState } from './net/account';
 import { SnapBuffer, applySnapshot, localEvent, mirrorRace } from './net/mirror';
-import { LIVERIES as NET_LIVERIES, LIMITS, type LiveryId, type PublicRoom, type ServerMsg } from './net/protocol';
+import { LIVERIES as NET_LIVERIES, LIMITS, type AwardsView, type CareerStats, type ChampionshipTag, type LiveryId, type PublicRoom, type ServerMsg } from './net/protocol';
 import type { RaceSnapshot, WireEvent } from './race';
 import type { SocketCtor } from './net/client';
 import { COARSE_QUERY, ControlsAnchor, DrivingInput, KEY_HOLDS, KEY_TAPS, PadButton, TOUCH_MODES, TouchMode, TouchPad, savedTouchMode, saveTouchMode, touchActive } from './input';
@@ -401,6 +401,7 @@ function showResults(): void {
     <h2>${pos === 1 && mine.status === 'finished' ? '🏆 ' + t('res.win') : t('res.title')}</h2>
     <div class="place">${place}</div>
     <div class="tscroll"><table><thead><tr><th>#</th><th>${t('res.driver')}</th><th>${t('res.time')}</th><th>${t('res.best')}</th><th>${t('res.pits')}</th><th>${t('res.pen')}</th></tr></thead><tbody>${rows}</tbody></table></div>
+    ${localCareerNote()}
     <div class="row"><button class="cta" id="o-again">${t('res.again')} <small>(R)</small></button><button class="cta alt" id="o-menu">${t('pause.menu')}</button></div>
   </div>`;
   overlay.querySelector('#o-again')!.addEventListener('click', restartSession);
@@ -455,6 +456,7 @@ function showChamp(finished: Race | null): void {
     ${roundHtml}
     <h3>${done ? t('champ.final') : t('champ.standings')}</h3>
     <div class="tscroll"><table><thead><tr><th>#</th><th>${t('res.driver')}</th><th>${t('champ.points')}</th><th>${t('champ.wins')}</th><th>${t('champ.seconds')}</th></tr></thead><tbody>${stRows}</tbody></table></div>
+    ${localCareerNote()}
     <div class="row">${done ? '' : `<button class="cta" id="o-next">${t('champ.continue', { n: c.rounds.length + 1 })}</button>`}<button class="cta alt" id="o-menu">${t('champ.menu')}</button></div>
   </div>`;
   overlay.querySelector('#o-next')?.addEventListener('click', () => { sfx.init(); startChampRound(); });
@@ -763,7 +765,9 @@ function handle(e: RaceEvent): void {
       if (e.car !== p) break;
       if (mode === 'practice') { pendingLap = e; break; }
       // online laps never enter this device's leaderboards: network results are kept apart from local records
-      if (e.valid && !p.finished && mode !== 'online' && !net) {
+      // every valid completed lap counts, the final race lap included: this event is handled after the step that also
+      // classified the finish, so the car already reads as finished here (a race core lap event is never sent after it)
+      if (e.valid && mode !== 'online' && !net) {
         const rec = R.submitLap('race', T.DEF.id, R.currentInitials(), carId, e.time * 1000);
         if (rec) { freshIds.add(rec.id); const rank = R.board('race', T.DEF.id).findIndex((r) => r.id === rec.id) + 1; hud.toast(t('msg.boardEntry', { n: rank, time: R.fmtMs(e.time * 1000) }), 'good'); break; }
       }
@@ -901,7 +905,7 @@ const netName = (): string => { try { return localStorage.getItem(NAME_KEY) ?? '
 const netLivery = (): LiveryId => { let v: string | null = null; try { v = localStorage.getItem(NLIV_KEY); } catch { /* ignore */ } return NET_LIVERIES.find((l) => l.id === v)?.id ?? LOCAL_TO_NET[carId] ?? 'yellow'; };
 const seatStore = (): Storage | null => { try { return window.sessionStorage; } catch { return null; } };
 const hashCode = (): string => /^#room=([A-Za-z0-9]{6})$/.exec(location.hash)?.[1]?.toUpperCase() ?? '';
-const modeLabel = (m: string): string => t(m === 'multiplayer' ? 'net.modeMulti' : m === 'solo' ? 'net.modeSolo' : 'net.modeOther');
+const modeLabel = (m: string): string => t(m === 'multiplayer' ? 'net.modeMulti' : m === 'solo' ? 'net.modeSolo' : m === 'championship' ? 'net.modeChamp' : m === 'practice' ? 'career.mode.practice' : 'net.modeOther');
 const hexc = (c: number): string => '#' + c.toString(16).padStart(6, '0');
 
 function onlineEntryHtml(): string {
@@ -936,7 +940,9 @@ function showOnline(): void {
         <div class="join"><input id="n-code" maxlength="${LIMITS.codeLength}" placeholder="${t('net.codePh')}" autocomplete="off" autocapitalize="characters" spellcheck="false" enterkeyhint="go"><button class="cta alt" id="n-join">${t('net.join')}</button></div>
       </div>
       <div class="mode-box"><b>${t('net.modeSolo')}</b><small>${t('net.soloDesc')}</small><button class="cta alt" id="n-solo">${t('net.startSolo')}</button></div>
+      ${accounts.account ? (() => { const c = connectedChamp(); return `<div class="mode-box"><b>${t('net.modeChamp')}</b><small>${t('net.champDesc', { n: c.round, m: R.CHAMP_TRACKS.length, track: t(`track.${R.CHAMP_TRACKS[c.round - 1]}.name`) })}</small><button class="cta alt" id="n-champ">${t('net.startChamp', { n: c.round })}</button></div>`; })() : ''}
     </div>
+    <p><small>${t(accounts.account ? 'career.onlineNote' : accountsOn() ? 'career.guestNote' : 'career.noAccounts')}</small></p>
     <p id="n-msg" class="net-msg" role="status" aria-live="polite"></p>
     <div class="row"><button class="cta alt" id="n-back">${t('boards.back')}</button></div>
   </div>`;
@@ -957,7 +963,7 @@ function showOnline(): void {
   // until the sign-in check answers, the page cannot say who would take the seat: room entry waits for it
   onlinePending = entryIdentity() === null;
   if (onlinePending) {
-    for (const id of ['#n-create', '#n-join', '#n-solo']) overlay.querySelector<HTMLButtonElement>(id)!.disabled = true;
+    for (const id of ['#n-create', '#n-join', '#n-solo', '#n-champ']) { const b = overlay.querySelector<HTMLButtonElement>(id); if (b) b.disabled = true; }
     if (!netNotice) overlay.querySelector('#n-msg')!.textContent = t('acct.loading');
   }
   overlay.querySelectorAll<HTMLElement>('[data-nlivery]').forEach((b) => b.addEventListener('click', () => {
@@ -982,6 +988,11 @@ function showOnline(): void {
   overlay.querySelector('#n-create')!.addEventListener('click', () => { const w = who(); if (w) void netBegin((s) => s.create(w.n, 'multiplayer', { track: T.DEF.id, aiFill: overlay.querySelector<HTMLInputElement>('#n-ai')!.checked }, netLivery(), w.expect)); });
   overlay.querySelector('#n-join')!.addEventListener('click', join);
   overlay.querySelector('#n-solo')!.addEventListener('click', () => { const w = who(); if (w) void netBegin((s) => s.create(w.n, 'solo', { track: T.DEF.id }, netLivery(), w.expect)); });
+  overlay.querySelector('#n-champ')?.addEventListener('click', () => {
+    const w = who(); if (!w) return;
+    const c = connectedChamp();
+    void netBegin((s) => s.create(w.n, 'championship', { track: R.CHAMP_TRACKS[c.round - 1] }, netLivery(), w.expect, c));
+  });
   overlay.querySelector('#n-back')!.addEventListener('click', () => { netNotice = ''; showTitle(); });
 }
 // ------------------------------------------------------------ accounts (docs/accounts.md)
@@ -1055,6 +1066,7 @@ function showAccount(tab: 'login' | 'register' = 'login'): void {
         <button class="cta" type="submit" id="a-submit">${t('acct.save')}</button>
       </form>
       <p id="a-msg" class="net-msg" role="status" aria-live="polite"></p>
+      <section class="career" id="a-career" aria-busy="true" aria-live="polite"><h3>${t('career.title')}</h3><p><small>${t('career.loading')}</small></p></section>
       <div class="row"><button class="cta alt" id="a-logout" type="button">${t('acct.signOut')}</button><button class="cta alt" id="a-back" type="button">${t('boards.back')}</button></div>`;
   } else if (a.state === 'loading' || a.state === 'unavailable') {
     body = `<h2>${t('acct.title')}</h2><p id="a-msg" class="net-msg" role="status" aria-live="polite">${t(a.state === 'loading' ? 'acct.loading' : 'acct.unavailable')}</p>
@@ -1095,6 +1107,7 @@ function showAccount(tab: 'login' | 'register' = 'login'): void {
   inputs.forEach((i) => i.addEventListener('input', () => i.removeAttribute('aria-invalid')));
   if (a.state === 'signed-in') {
     overlay.querySelector('#a-user')!.textContent = a.account.username;
+    loadCareer(a.account.id);
     const nameEl = overlay.querySelector<HTMLInputElement>('#a-name')!;
     nameEl.value = a.account.displayName;
     form!.addEventListener('submit', (e) => {
@@ -1178,6 +1191,7 @@ async function netBegin(req: (s: NetSession) => Promise<{ ok: true } | { ok: fal
     room: own((r) => onNetRoom(r)),
     state: own((m, at) => onNetState(m, at)),
     result: own((r, fresh) => onNetResult(r, fresh)),
+    awards: own((a) => onNetAwards(a)),
     end: own((why, detail) => onNetEnd(why, detail)),
     nack: own((m) => onNetNack(m)),
     // a dropped link lets go of everything here as well as on the server: after a reconnect a key or finger must press again
@@ -1255,12 +1269,96 @@ function onNetState(m: Extract<ServerMsg, { t: 'state' }>, at: number): void {
 /** Results are the server's alone. Shown as often as asked; nothing is recorded locally, so a repeat changes nothing. */
 function onNetResult(r: ResultView, fresh: boolean): void {
   netResult = r;
+  if (fresh) advanceConnectedChamp(r);
   if (fresh && r.outcome === 'completed') {
     const mine = r.classification?.find((x) => x.id === localId);
     if (mine?.pos === 1) sfx.fanfare();
   }
   // shown even over the race menu: once the server has classified the race there is nothing left to drive
   showNetResults(r);
+}
+
+// ------------------------------------------------------------ career (docs/career.md)
+/** Local and offline races never earn account points: said wherever the server could have offered them. */
+function localCareerNote(): string {
+  if (!accountsOn()) return '';
+  return `<p class="career-note"><small>${t(accounts.account ? 'career.localNote' : 'career.localNoteGuest')}</small></p>`;
+}
+
+/** This account's connected championship (round 1-4), kept per account in account-scoped storage. */
+function connectedChamp(): ChampionshipTag {
+  const id = accounts.account?.id;
+  const fresh = (): ChampionshipTag => ({ id: `cc-${Date.now().toString(36)}`, round: 1 });
+  if (!id) return fresh();
+  try {
+    const v = JSON.parse(localStorage.getItem(accountKey(id, 'cchamp')) ?? 'null') as ChampionshipTag | null;
+    if (v && typeof v.id === 'string' && v.id.length <= 64 && Number.isInteger(v.round) && v.round >= 1 && v.round <= R.CHAMP_TRACKS.length) return v;
+  } catch { /* ignore */ }
+  const c = fresh();
+  try { localStorage.setItem(accountKey(id, 'cchamp'), JSON.stringify(c)); } catch { /* ignore */ }
+  return c;
+}
+/** A connected championship round the server classified: the next one is offered (after round 4, a new championship). */
+function advanceConnectedChamp(r: ResultView): void {
+  const id = accounts.account?.id;
+  const c = r.championship;
+  if (!id || !c || r.outcome !== 'completed') return;
+  const cur = connectedChamp();
+  if (cur.id !== c.id || cur.round !== c.round) return;
+  try {
+    if (c.round >= R.CHAMP_TRACKS.length) localStorage.removeItem(accountKey(id, 'cchamp'));
+    else localStorage.setItem(accountKey(id, 'cchamp'), JSON.stringify({ id: c.id, round: c.round + 1 }));
+  } catch { /* ignore */ }
+}
+
+function onNetAwards(a: AwardsView): void {
+  if (screen === 'netres' && netResult && netResult.raceId === a.raceId) {
+    const el = overlay.querySelector('#r-awards');
+    if (el) el.innerHTML = awardsHtml(netResult, a);
+  }
+}
+
+/** The server's career points for this race, with whether they are stored yet. Nothing here is computed by the browser. */
+function awardsHtml(r: ResultView, a: AwardsView | null): string {
+  if (!a || a.raceId !== r.raceId) return accountsOn() ? `<p class="sync" data-sync="none"><small>${t('career.waiting')}</small></p>` : '';
+  if (!a.eligible) return `<p class="sync" data-sync="none"><small>${t(a.reason === 'practice' ? 'career.practice' : 'career.incomplete')}</small></p>`;
+  const byId = new Map(r.participants.map((x) => [x.id, x]));
+  const rows = a.rows.filter((x) => x.credit).map((x) => {
+    const p = byId.get(x.participant);
+    const where = x.status === 'dq' ? t('res.dq') : x.status === 'dnf' ? t('res.dnf') : `P${x.pos}`;
+    return `<tr class="${x.participant === localId ? 'me' : ''}" data-pts="${x.points}"><td>#${p?.num ?? 0} ${esc(x.participant === localId ? t('hud.you') : p?.name ?? '')}</td><td>${where}</td><td class="mono">+${x.points}</td></tr>`;
+  }).join('');
+  const mine = a.rows.find((x) => x.participant === localId);
+  const guestNote = mine && !mine.credit ? `<p><small>${t(accountsOn() ? 'career.youGuest' : 'career.noAccounts')}</small></p>` : '';
+  const others = a.rows.some((x) => !x.credit) ? `<p><small>${t('career.noCredit')}</small></p>` : '';
+  return `<div class="lbl2">${t('career.racePoints')}</div>
+    ${rows ? `<div class="tscroll"><table><thead><tr><th>${t('res.driver')}</th><th>#</th><th>${t('champ.points')}</th></tr></thead><tbody>${rows}</tbody></table></div>` : ''}
+    ${guestNote}${others}
+    <p class="sync" data-sync="${a.sync}" role="status">${t(`career.sync.${a.sync}`)}</p>`;
+}
+
+const fmtDate = (iso: string): string => { const d = new Date(iso); return Number.isNaN(d.getTime()) ? '' : d.toLocaleDateString(undefined, { day: 'numeric', month: 'short' }); };
+const careerMode = (m: string): string => t(`career.mode.${m}`);
+
+/** The signed-in driver's career from the server, rendered into the profile once it arrives (for that account only). */
+function loadCareer(accountId: string): void {
+  void accounts.stats().then((r) => {
+    const el = overlay.querySelector<HTMLElement>('#a-career');
+    if (screen !== 'account' || !el || accounts.account?.id !== accountId) return;
+    el.removeAttribute('aria-busy');
+    el.innerHTML = r.ok ? careerHtml(r.stats) : `<h3>${t('career.title')}</h3><p><small>${t(`acct.err.${r.error}`)}</small></p>`;
+  });
+}
+function careerHtml(s: CareerStats): string {
+  const c = s.career;
+  const tile = (v: number | string, label: string, id: string): string => `<div class="tile" data-k="${id}"><b class="mono">${v}</b><small>${label}</small></div>`;
+  const bests = s.bests.length ? `<div class="tscroll"><table><thead><tr><th>${t('career.circuit')}</th><th>${t('career.mode')}</th><th>${t('res.best')}</th></tr></thead><tbody>${s.bests.map((b) => `<tr data-mode="${b.mode}"><td>${t(`track.${b.track}.name`)}${b.current ? '' : ` <small>(${t('career.oldLayout')})</small>`}</td><td>${careerMode(b.mode)}</td><td class="mono">${R.fmtMs(b.lapMs)} <small>${t('career.lapN', { n: b.lap })} · ${fmtDate(b.setAt)}</small></td></tr>`).join('')}</tbody></table></div>` : `<p><small>${t('career.noBests')}</small></p>`;
+  const recent = s.recent.length ? `<div class="tscroll"><table><thead><tr><th>${t('career.date')}</th><th>${t('career.mode')}</th><th>${t('career.circuit')}</th><th>#</th><th>${t('champ.points')}</th></tr></thead><tbody>${s.recent.map((x) => `<tr data-race="${esc(x.raceId)}"><td>${fmtDate(x.finishedAt)}</td><td>${careerMode(x.mode)}${x.championship ? ` <small>R${x.championship.round}</small>` : ''}</td><td>${t(`track.${x.track}.name`)}</td><td>${x.status === 'dq' ? t('res.dq') : x.status === 'dnf' ? t('res.dnf') : `P${x.pos}/${x.field}`}</td><td class="mono">${x.points}</td></tr>`).join('')}</tbody></table></div>` : `<p><small>${t('career.noRaces')}</small></p>`;
+  return `<h3>${t('career.title')} · <span class="nm" id="a-career-name"></span></h3>
+    <div class="tiles">${tile(c.points, t('career.points'), 'points')}${tile(c.wins, '🥇', 'wins')}${tile(c.seconds, '🥈', 'seconds')}${tile(c.thirds, '🥉', 'thirds')}${tile(c.races, t('career.races'), 'races')}</div>
+    <p><small>${t('career.policy', { a: s.scoring.podium[0] ?? 0, b: s.scoring.podium[1] ?? 0, c: s.scoring.podium[2] ?? 0 })}</small></p>
+    <h3>${t('career.bests')}</h3>${bests}
+    <h3>${t('career.recent')}</h3>${recent}`.replace('<span class="nm" id="a-career-name"></span>', `<span class="nm">${esc(s.displayName)}</span>`);
 }
 
 function onNetNack(m: Extract<ServerMsg, { t: 'nack' }>): void {
@@ -1304,7 +1402,7 @@ function showLobby(): void {
   const meP = r.participants.find((p) => p.id === net!.me);
   const others = r.participants.filter((p) => p.id !== r.hostId && !p.left);
   const waitingFor = r.participants.length < r.minHumans ? t('net.needMore', { n: r.minHumans }) : r.participants.some((p) => !p.connected) ? t('net.waitConn') : others.some((p) => !p.ready) ? t('net.waitReady') : '';
-  const trackTabs = host ? `<div class="tabs" role="radiogroup">${T.TRACKS.map((d) => `<button class="tab ${d.id === r.settings.track ? 'sel' : ''}" data-ntrack="${d.id}">${t(`track.${d.id}.name`)}</button>`).join('')}</div>` : `<div class="lobby-track">${t(`track.${r.settings.track}.name`)}</div>`;
+  const trackTabs = host && r.mode !== 'championship' ? `<div class="tabs" role="radiogroup">${T.TRACKS.map((d) => `<button class="tab ${d.id === r.settings.track ? 'sel' : ''}" data-ntrack="${d.id}">${t(`track.${d.id}.name`)}</button>`).join('')}</div>` : `<div class="lobby-track">${t(`track.${r.settings.track}.name`)}</div>`;
   const aiRow = r.mode === 'multiplayer' ? (host ? `<label class="chk"><input type="checkbox" id="l-ai" ${r.settings.aiFill ? 'checked' : ''}> ${t('net.aiFill')}</label>` : `<small>${t(r.settings.aiFill ? 'net.aiOn' : 'net.aiOff')}</small>`) : '';
   const aiRows = r.ai.map((a) => `<tr class="ai"><td class="mono">#${a.num}</td><td>${colorDot(a.color)}<span class="nm">${esc(a.name)}</span></td><td><span class="chip dim">${t('net.aiSlot')}</span></td></tr>`).join('');
   const free = r.maxHumans - r.participants.filter((p) => !p.left).length;
@@ -1312,7 +1410,7 @@ function showLobby(): void {
   overlay.innerHTML = `<div class="card results lobby">
     <div class="lbl2">${modeLabel(r.mode)}</div>
     ${r.mode === 'multiplayer' ? `<h2>${t('net.room')} <span class="code mono" id="l-code"></span></h2>
-    <div class="row"><button class="cta alt small" id="l-copy">${t('net.copy')}</button>${typeof navigator.share === 'function' ? `<button class="cta alt small" id="l-share">${t('net.share')}</button>` : ''}</div>` : `<h2>${t('net.modeSolo')}</h2>`}
+    <div class="row"><button class="cta alt small" id="l-copy">${t('net.copy')}</button>${typeof navigator.share === 'function' ? `<button class="cta alt small" id="l-share">${t('net.share')}</button>` : ''}</div>` : `<h2>${r.mode === 'championship' && r.championship ? t('net.champRound', { n: r.championship.round, m: R.CHAMP_TRACKS.length }) : t('net.modeSolo')}</h2>`}
     <div class="lbl2">${t('title.track')}</div>
     ${trackTabs}
     ${aiRow}
@@ -1433,6 +1531,7 @@ function showNetResults(r: ResultView): void {
     <h2>${t('net.finalTitle')}</h2>
     <div class="place">${head}</div>
     ${body}
+    <div class="awards" id="r-awards">${awardsHtml(r, net?.awards ?? null)}</div>
     <p><small>${t('net.resultNote')}</small></p>
     <div class="row">${canRematch ? (host ? `<button class="cta" id="r-rematch">${t('net.rematch')}</button>` : `<span class="net-msg">${t('net.waitRematch')}</span>`) : ''}<button class="cta alt" id="r-leave">${t('net.leave')}</button></div>
   </div>`;

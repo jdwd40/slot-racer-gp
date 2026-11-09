@@ -2,7 +2,7 @@
 // result of each race. No race logic and no DOM: main.ts renders what this reports, and tests drive it with the `ws` package.
 // The private reconnect token is kept in memory and in sessionStorage (this tab only), never in a URL, log or the page.
 import { OnlineClient, type SocketCtor } from './client';
-import type { ClientMsg, ErrorCode, LiveryId, Mode, PublicRoom, RoomSettings, ServerMsg } from './protocol';
+import type { AwardsView, ChampionshipTag, ClientMsg, ErrorCode, LiveryId, Mode, PublicRoom, RoomSettings, ServerMsg } from './protocol';
 import type { ActionType, DriverId, Standing } from '../race';
 
 export type Conn = 'offline' | 'connecting' | 'connected' | 'reconnecting';
@@ -13,7 +13,7 @@ export interface Seat { room: string; participant: string; token: string; code: 
 
 /** The parts of the server's result envelope (server/envelope.ts) the client shows. */
 export interface ResultView {
-  raceId: string; roomId: string; mode: Mode; outcome: 'completed' | 'aborted' | 'ended'; abortReason: string | null;
+  raceId: string; roomId: string; mode: Mode; championship?: ChampionshipTag | null; outcome: 'completed' | 'aborted' | 'ended'; abortReason: string | null;
   track: { id: string }; participants: { id: string; control: 'human' | 'ai'; slot: number; num: number; name: string; livery: string }[];
   classification: Standing[] | null; digest: string;
 }
@@ -24,6 +24,8 @@ export interface NetHooks {
   state?(m: Extract<ServerMsg, { t: 'state' }>, at: number): void;
   /** `fresh` is false for a result this tab has already seen (a resend after a reconnect, or a duplicate message) */
   result?(r: ResultView, fresh: boolean): void;
+  /** the server's career awards for the last result and whether they are stored yet (saving, saved, pending, failed) */
+  awards?(a: AwardsView): void;
   conn?(c: Conn): void;
   end?(why: EndReason, detail?: string): void;
   nack?(m: Extract<ServerMsg, { t: 'nack' }>): void;
@@ -50,6 +52,7 @@ export class NetSession {
   room: PublicRoom | null = null;
   me: DriverId | null = null;
   result: ResultView | null = null;
+  awards: AwardsView | null = null;
   ended: EndReason | null = null;
   readonly client: OnlineClient;
   private seat: Seat | null = null;
@@ -73,8 +76,8 @@ export class NetSession {
 
   /** Create a room (any mode), join one by code, or resume a stored seat. */
   /** `expectAccount`: who the page shows ('' = guest, an account id when signed in); a socket signed in otherwise is refused. */
-  create(name: string, mode: Mode, settings: Partial<RoomSettings>, livery?: LiveryId, expectAccount?: string): Promise<Outcome> {
-    return this.begin({ t: 'create', name, mode, settings, ...(livery ? { livery } : {}), ...(expectAccount !== undefined ? { expectAccount } : {}) });
+  create(name: string, mode: Mode, settings: Partial<RoomSettings>, livery?: LiveryId, expectAccount?: string, championship?: ChampionshipTag): Promise<Outcome> {
+    return this.begin({ t: 'create', name, mode, settings, ...(livery ? { livery } : {}), ...(expectAccount !== undefined ? { expectAccount } : {}), ...(championship ? { championship } : {}) });
   }
   join(code: string, name: string, livery?: LiveryId, expectAccount?: string): Promise<Outcome> {
     return this.begin({ t: 'join', code: code.trim().toUpperCase(), name, ...(livery ? { livery } : {}), ...(expectAccount !== undefined ? { expectAccount } : {}) });
@@ -122,6 +125,12 @@ export class NetSession {
         this.hooks.result?.(r, fresh);
         break;
       }
+      case 'awards':
+        // the latest word wins; an earlier race's awards never replace the current result's
+        if (this.result && m.awards.raceId !== this.result.raceId) break;
+        this.awards = m.awards;
+        this.hooks.awards?.(m.awards);
+        break;
       case 'nack': this.hooks.nack?.(m); break;
       case 'bye': {
         const why: EndReason | null = m.code === 'left' ? 'left' : m.code === 'closed' ? 'closed' : m.code === 'shutdown' ? 'shutdown' : m.code === 'superseded' ? 'superseded' : null;
