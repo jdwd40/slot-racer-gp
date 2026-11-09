@@ -80,8 +80,9 @@ async function openPage(run, url, view = 'laptop', { touch = false, name = view,
   page.on('console', (m) => { if (m.type() === 'error' && !/WebSocket|ERR_CONNECTION|Failed to load resource|net::/.test(m.text())) errors.push(`console: ${m.text()}`); });
   // Several pages share four cores of software rendering. A cap on drawn frames (harness only, before the game loads) leaves
   // each page's main thread free for its socket and input: the online client never simulates, so only drawing slows down.
-  if (fpsCap) await page.addInitScript((ms) => { const raf = window.requestAnimationFrame.bind(window); let last = 0; window.requestAnimationFrame = (cb) => raf(function step(ts) { if (ts - last < ms) { raf(step); return; } last = ts; cb(ts); }); }, Math.round(1000 / fpsCap));
+  // Each callback chain (the game loop, the timing probe) is paced on its own clock, so no loop can starve another.
   await page.addInitScript(instrument, { seed: null });
+  if (fpsCap) await page.addInitScript((ms) => { const raf = window.requestAnimationFrame.bind(window); const last = new Map(); window.requestAnimationFrame = (cb) => raf(function step(ts) { if (ts - (last.get(cb) ?? 0) < ms) { raf(step); return; } last.set(cb, ts); cb(ts); }); }, Math.round(1000 / fpsCap));
   await page.addInitScript(() => {
     // Brake press timing, armed by the check: to the first server state that shows it (network + server), and to the first drawn frame
     const q = (window.__lat = { arm: false, downAt: 0, waitNet: false, waitDraw: false, net: [], drawn: [] });
@@ -146,6 +147,8 @@ async function joinRoom(s, name, code) {
 const PACE = 0.72;
 /** frames per second drawn by each page in the multi-page races (harness cap, see openPage) */
 const CAP = 4;
+/** pace of the scripted drivers in the representative race (real time, so they stay within the finish window of the AI) */
+const SPACE = 0.86;
 async function driveAll(list, until, budgetMs, opts = {}) {
   return Promise.all(list.map((s) => driveUntil(s, until, { budgetMs, opts: { pace: PACE, ...opts } }).catch((e) => ({ error: String(e.message ?? e) }))).concat());
 }
@@ -326,7 +329,7 @@ async function lobby(run, c) {
 
 /** One representative race: queue at the box, automatic stop-and-go, own-bay refuelling with a fresh Throttle, override and Defer, final-lap DQ. */
 async function service(run, c) {
-  const url = run.fastUrl;
+  const url = run.realUrl;   // real time: scripted drivers keep up with the AI and finish inside the window
   const a = await openPage(run, url, 'small', { name: 'keys', fpsCap: CAP });
   const b = await openPage(run, url, 'phoneLandLo', { touch: true, name: 'touch', fpsCap: CAP });
   const code = await createRoom(a, 'Keys', { ai: true });
@@ -340,7 +343,7 @@ async function service(run, c) {
   for (const s of [a, b]) await waitFor(s.page, () => window.__game.screen === 'race' && window.__game.race.phase === 'racing', undefined, 30000);
   // observe phases on both pages
   for (const s of [a, b]) await read(s.page, () => { const seen = (window.__seen = { sg: [], wait: [], modes: [], bayOwn: null, chips: new Set() }); setInterval(() => { const g = window.__game; if (!g.net) return; const p = g.race.car(g.localId); const last = (arr, v) => { if (v && arr[arr.length - 1] !== v) arr.push(v); }; last(seen.sg, p.sgPhase); last(seen.wait, p.pitWait); last(seen.modes, p.mode); if (p.mode === 'service') seen.bayOwn = p.bay === p.bayHome; for (const ch of document.querySelectorAll('#h-chips .chip')) seen.chips.add(ch.textContent); }, 30); });
-  const room = run.fast.room(code);
+  const room = run.real.room(code);
   const [ida, idb] = await Promise.all([a, b].map((s) => read(s.page, () => window.__game.localId)));
   const ai = room.race.cars.find((x) => !x.human);
   const A = room.race.car(ida), B = room.race.car(idb);
@@ -348,38 +351,52 @@ async function service(run, c) {
   await b.fingers.tap('#t-pit');
   await waitFor(b.page, () => { const g = window.__game; return g.race.car(g.localId).pitReq; });
   await b.fingers.tap('#t-lane');
-  await waitFor(b.page, () => { const g = window.__game; return g.race.car(g.localId).laneOverride; }, undefined, 5000).catch(() => null);
+  await waitFor(b.page, () => { const g = window.__game; return g.race.car(g.localId).laneOverride && document.getElementById('t-lane').dataset.cue === 'override'; }, undefined, 8000).catch(() => null);
   const ov = await read(b.page, () => { const g = window.__game, p = g.race.car(g.localId); return { override: p.laneOverride, route: g.race.nextRoute(p), cue: document.getElementById('t-lane').dataset.cue }; });
   c.ok('Touch: Lane while routed to the pits is a manual override (server state and pad cue)', ov.override && ov.cue === 'override', ov);
   // cancel the optional request again so the debt checks below are clean
   await b.fingers.tap('#t-pit');
   // seed three rear-end offences on the keyboard driver and an AI car at once: both owe a stop-and-go now -> the box queues
-  for (let k = 0; k < 3; k++) { room.race.offence(A, B, 'rear'); room.race.offence(ai, B, 'rear'); }
-  // and three on the touch driver, who then defers the first approach
-  for (let k = 0; k < 3; k++) room.race.offence(B, A, 'rear');
+  // when an AI car is just ahead of the keyboard driver, both owe a stop-and-go at once: the second must queue for the box
+  const T = room.race.T;
+  const close = () => room.race.cars.find((x) => !x.human && x.mode === 'race' && T.gapS(T.wrapS(A.u), T.wrapS(x.u)) > 3 && T.gapS(T.wrapS(A.u), T.wrapS(x.u)) < 25 && room.race.apprLap(x) === room.race.apprLap(A));
+  const pair = (async () => {
+    await waitUntil(() => A.mode === 'race' && T.gapS(T.wrapS(A.u), T.PIT_IN0) > 60 && !!close(), 90000).catch(() => null);
+    const q = close() ?? ai;
+    for (let k = 0; k < 3; k++) { room.race.offence(A, B, 'rear'); room.race.offence(q, B, 'rear'); }
+    return q.id;
+  })();
   const both = [a, b];
+  // the touch driver gets its stop-and-go just after passing the pit exit, so the next approach is a lap away, then defers it
   const deferTap = (async () => {
-    await waitFor(b.page, () => { const g = window.__game, p = g.race.car(g.localId); return g.race.deferBlock(p) === null && !document.getElementById('t-defer').hidden; }, undefined, 20000);
+    const T = room.race.T;
+    await waitUntil(() => B.mode === 'race' && B.lapsDone >= 1 && T.gapS(T.PIT_OUT1, T.wrapS(B.u)) > 5 && T.gapS(T.PIT_OUT1, T.wrapS(B.u)) < 40, 120000);
+    for (let k = 0; k < 3; k++) room.race.offence(B, A, 'rear');
+    await waitFor(b.page, () => { const g = window.__game, p = g.race.car(g.localId); return p.sgOwed > 0 && g.race.deferBlock(p) === null && !document.getElementById('t-defer').hidden; }, undefined, 20000);
     await b.fingers.tap('#t-defer');
     await waitFor(b.page, () => { const g = window.__game; return g.race.car(g.localId).sgDeferred; }, undefined, 5000);
     return true;
   })().catch((e) => String(e));
-  // drive both until each has served its stop-and-go and has made a fuel stop
-  const served = (st) => done(st) || (st.sgOwed === 0 && st.pitStops >= 1 && st.lap >= 2);
-  const r1 = await driveAll(both, served, 5 * 60000);
+  // drive both until each has served its stop-and-go and has completed a fuel stop (back on the road)
+  const served = (st) => done(st) || (st.sgOwed === 0 && st.pitStops >= 1 && st.mode === 'race' && st.lap >= 3);
+  const r1 = await driveAll(both, served, 5 * 60000, { pace: SPACE });
+  const queuedWith = await pair;
   const deferred = await deferTap;
   const seenA = await read(a.page, () => ({ ...window.__seen, chips: [...window.__seen.chips] }));
   const seenB = await read(b.page, () => ({ ...window.__seen, chips: [...window.__seen.chips] }));
   c.ok('Touch: Defer moves the stop-and-go to the next approach (server-side deferral)', deferred === true && seenB.sg.includes('deferred'), { deferred, sg: seenB.sg });
-  c.ok('Automatic stop-and-go served for the keyboard driver (entry, serving, leaving) with no key needed', A.sgServed >= 3 || (A.sgOwed === 0 && seenA.sg.includes('serving')), { sg: seenA.sg, served: A.sgServed });
+  c.ok('Automatic stop-and-go served for the keyboard driver (entry, serving, leaving) with no key needed', A.sgOwed === 0 && seenA.sg.includes('serving') && seenA.sg.includes('leaving'), { sg: seenA.sg, owed: A.sgOwed });
   const queued = [...seenA.sg, ...seenA.wait, ...seenB.sg, ...seenB.wait].some((x) => x === 'queued' || x === 'bay' || x === 'bayWait' || x === 'exit');
-  c.ok('Shared pit queue: a driver waited for the box, a bay or the exit (seen in the HUD state)', queued || ai.pitWait !== null, { a: seenA.wait, b: seenB.wait, sgA: seenA.sg, sgB: seenB.sg });
+  c.ok('Shared pit queue: a driver waited for the box, a bay or the exit (seen in the HUD state)', queued, { queuedWith, a: seenA.wait, b: seenB.wait, sgA: seenA.sg, sgB: seenB.sg });
   c.ok('Own-bay refuelling: service in the driver\'s own bay, then a fresh Throttle press releases the car', [seenA, seenB].some((x) => x.bayOwn && (x.sg.includes('ready') || x.sg.includes('release')) && x.modes.includes('bayOut')), { a: [seenA.sg, seenA.modes], b: [seenB.sg, seenB.modes] });
   run.evidence.service = { aSg: seenA.sg, bSg: seenB.sg, aWait: seenA.wait, bWait: seenB.wait, r1 };
   // final-lap DQ: once the keyboard driver is on its last lap past the pit entrance, one more offence makes a stop it can no longer serve
-  const lastLap = await driveUntil(a, (st) => done(st) || (st.lap === LAPS - 1 && st.mode === 'race' && room.race.T.wrapS(A.u) > room.race.T.PIT_OUT1 + 5), { budgetMs: 5 * 60000, opts: { pace: PACE } }).catch((e) => ({ error: String(e) }));
+  const bRest = driveUntil(b, done, { budgetMs: 8 * 60000, opts: { pace: SPACE } }).catch((e) => ({ error: String(e) }));   // both keep racing
+  const lastLap = await driveUntil(a, (st) => done(st) || (st.lap === LAPS - 1 && st.mode === 'race' && A.mode === 'race' && room.race.apprLap(A) > LAPS), { budgetMs: 5 * 60000, opts: { pace: SPACE } }).catch((e) => ({ error: String(e) }));
   room.race.offence(A, B, 'rear'); room.race.offence(A, B, 'rear'); room.race.offence(A, B, 'rear');
-  const rest = await driveAll(both, done, 5 * 60000);
+  const seededAt = { lapsDone: A.lapsDone, appr: room.race.apprLap(A), sgDue: A.sgDue, sgOwed: A.sgOwed };
+  run.evidence.finalLapSeed = seededAt;
+  const rest = [await driveUntil(a, done, { budgetMs: 5 * 60000, opts: { pace: SPACE } }).catch((e) => ({ error: String(e) })), await bRest];
   for (const s of both) await waitFor(s.page, () => window.__game.screen === 'netres', undefined, 150000);
   const res = await Promise.all(both.map((s) => read(s.page, () => ({ r: window.__game.net.result, dq: [...document.querySelectorAll('.netres tbody tr')].filter((x) => x.dataset.status === 'dq').map((x) => x.textContent) }))));
   const rowA = res[0].r.classification.find((x) => x.id === ida);
