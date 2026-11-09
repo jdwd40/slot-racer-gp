@@ -31,7 +31,7 @@ export function harness(over: Partial<Config> = {}, seed = 7) {
     mgr, cfg, log, sink,
     get now() { return now; },
     /** advance wall time in ticks of `tickMs`, pumping every room each tick; `each` runs before every tick */
-    advance(ms: number, tickMs = 50, each?: () => void) { for (let t = 0; t < ms; t += tickMs) { each?.(); now += tickMs; mgr.tick(); } },
+    advance(ms: number, tickMs = 50, each?: () => void, stop?: () => boolean) { for (let t = 0; t < ms; t += tickMs) { if (stop?.()) return; each?.(); now += tickMs; mgr.tick(); } },
     set(ms: number) { now = ms; },
   };
 }
