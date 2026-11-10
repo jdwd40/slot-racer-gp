@@ -99,7 +99,11 @@ export class Room {
   private greenAt: number | null = null;
   private laps: EnvelopeLap[] = [];
   private evBuf: WireEvent[] = [];
-  private snapEvery: number;
+  /** wall ms between ordinary state broadcasts (1000 / SLOTRUSH_SNAPSHOT_HZ) */
+  private snapMs: number;
+  /** wall-clock snapshot slot (see publish) of the last state broadcast, and the step it carried */
+  private snapSlot = 0;
+  private snapTick = -1;
   /** the finalized envelope of the last race (state 'results'); built once per race */
   result: Readonly<ResultEnvelope> | null = null;
   /** the last race's career awards and where their storage stands (sent to every member, replayed on resume) */
@@ -115,7 +119,7 @@ export class Room {
     this.settings = { track: TRACK_IDS[0], aiFill: this.rules.aiFill === 'always' };
     const bad = this.applySettings(settings);
     if (bad) throw new Error(bad);
-    this.snapEvery = Math.max(1, Math.round(1 / STEP / deps.cfg.snapshotHz));
+    this.snapMs = 1000 / deps.cfg.snapshotHz;
   }
 
   private get log(): Logger { return this.deps.log; }
@@ -347,7 +351,7 @@ export class Room {
     for (const p of this.parts) { p.inRace = !p.left; p.held = neutral(); p.ready = false; }
     this.state = 'race';
     this.baseWall = now; this.stepsDone = 0; this.lagSteps = 0; this.startedAt = now; this.greenAt = null;
-    this.laps = []; this.evBuf = []; this.result = null;
+    this.laps = []; this.evBuf = []; this.result = null; this.snapSlot = 0; this.snapTick = -1;
     this.log.info('race.start', { room: this.id, race: this.raceId, track: this.settings.track, mode: this.mode, humans, ai: this.roster.length - humans });
     this.touch(now);
     this.broadcastRoom();
@@ -396,8 +400,10 @@ export class Room {
     const scale = this.cfg.timeScale;
     if (race.humansDoneT >= 0) {
       for (let i = 0; i < RUNON_STEPS && this.state === 'race'; i++) this.stepOnce(now);
+      if (this.state !== 'race') return;
       this.baseWall = now - (this.stepsDone * STEP * 1000) / scale;
       this.lagSteps = 0;
+      this.publish(now);
       return;
     }
     const owed = Math.floor(((now - this.baseWall) * scale) / 1000 / STEP + 1e-9) - this.stepsDone;
@@ -408,7 +414,26 @@ export class Room {
     if (this.lagMs > this.cfg.overloadAbortMs) {
       this.log.warn('race.overload_abort', { room: this.id, race: this.raceId, lagMs: Math.round(this.lagMs) });
       this.finalize('aborted', 'overload', now);
+      return;
     }
+    this.publish(now);
+  }
+
+  /**
+   * Ordinary state broadcasts follow wall time, never simulation progress (#49): the AI run-on (RUNON_STEPS per tick) and a
+   * catch-up (up to maxCatchUpSteps per tick) run many steps per tick, and one snapshot per N steps would multiply the
+   * traffic with them (264/s instead of 20/s during the run-on, enough to close finishers on slow links as 4008 slow).
+   * Wall time since the race started is cut into slots of 1000/snapshotHz ms (in timeScale-scaled time, which is wall time
+   * in production); at most one state goes out per slot, after the tick's steps, carrying the latest state and every
+   * event since the last one (coalesced, in order). So in any wall interval of W ms there are at most floor(W*Hz/1000) + 1
+   * ordinary states, besides the race-start state, the final state flushed with the classification and a resume's state.
+   * A slot with no new step sends nothing (the client would drop a repeated tick as stale).
+   */
+  private publish(now: number): void {
+    const slot = Math.floor(((now - this.startedAt) * this.cfg.timeScale) / this.snapMs + 1e-9);
+    if (slot <= this.snapSlot || this.stepsDone <= this.snapTick) return;
+    this.snapSlot = slot;
+    this.broadcastState(now);
   }
   get lagMs(): number { return (this.lagSteps * STEP * 1000) / this.cfg.timeScale; }
 
@@ -421,11 +446,12 @@ export class Room {
       if (e.type === 'go') this.greenAt = now;
       if (e.type === 'lap') this.laps.push({ driver: e.car, lap: e.lapsDone, time: e.time, valid: e.valid, raceT: round3(race.raceTime) });
     }
-    if (this.evBuf.length > 256) this.evBuf.splice(0, this.evBuf.length - 256);   // bounded even if no snapshot goes out
+    // a hard bound for safety only: a state (which empties it) goes out every snapshot slot, at most a few hundred steps
+    if (this.evBuf.length > 256) this.evBuf.splice(0, this.evBuf.length - 256);
     // practice has no classification: the only way it closes on its own is the race-time limit, and that is still a
     // laps-only session end (never a DNF "timeout" result)
-    if (race.final) { this.broadcastState(now); this.finalize(this.rules.practice ? 'ended' : 'completed', null, now); return; }
-    if (this.stepsDone % this.snapEvery === 0) this.broadcastState(now);
+    // the final state goes out at once, whatever the slot, so the classification never waits on the snapshot rate
+    if (race.final) { this.broadcastState(now); this.finalize(this.rules.practice ? 'ended' : 'completed', null, now); }
   }
 
   /** Build this race's one result envelope, hand it to the sink once, and move the room to results. */
@@ -546,7 +572,7 @@ export class Room {
   private broadcastState(now: number): void {
     if (!this.race) return;
     const msg: ServerMsg = { t: 'state', tick: this.stepsDone, now, lagMs: Math.round(this.lagMs), snap: this.race.snapshot(), ev: this.evBuf };
-    this.evBuf = [];
+    this.evBuf = []; this.snapTick = this.stepsDone;
     this.broadcast(msg);
   }
 

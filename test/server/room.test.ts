@@ -1,8 +1,9 @@
 // Room service rules, on the real RoomManager/Room with a manual clock and in-memory peers (docs/online-server.md).
 import { describe, it, expect } from 'vitest';
 import { PEN, type RaceSnapshot } from '../../src/race';
-import { LIVERIES, type PublicRoom } from '../../src/net/protocol';
-import type { Room } from '../../server/room';
+import { LIVERIES, type PublicRoom, type ServerMsg } from '../../src/net/protocol';
+import type { Config } from '../../server/config';
+import type { Peer, Room } from '../../server/room';
 import { BotClient, FakePeer, harness } from './harness';
 
 type H = ReturnType<typeof harness>;
@@ -461,5 +462,142 @@ describe('races, results and timing', () => {
     expect(a2).toBe(a);
     expect(b2).toBe(b);
     expect(a).not.toBe(b);
+  });
+});
+
+/**
+ * A socket that drains at a modeled link rate: `bufferedAmount` is what is still queued after draining `bps` bytes per second
+ * of the harness wall clock since the last look (as ws reports it for a slow link). Records what a client would receive.
+ */
+class LinkPeer implements Peer {
+  msgs: ServerMsg[] = [];
+  raw: string[] = [];
+  closed: { code: number; reason: string } | null = null;
+  stateAt: number[] = [];
+  peak = 0;
+  private queued = 0;
+  private last: number;
+  constructor(private clock: () => number, private bps: number) { this.last = clock(); }
+  private drain(): void { const n = this.clock(); this.queued = Math.max(0, this.queued - ((n - this.last) * this.bps) / 1000); this.last = n; }
+  get bufferedAmount(): number { this.drain(); return this.queued; }
+  send(d: string): void {
+    if (this.closed) throw new Error('closed');
+    this.drain();
+    this.queued += Buffer.byteLength(d); this.peak = Math.max(this.peak, this.queued);
+    const m = JSON.parse(d) as ServerMsg;
+    this.raw.push(d); this.msgs.push(m);
+    if (m.t === 'state') this.stateAt.push(this.clock());
+  }
+  close(code: number, reason: string): void { if (!this.closed) this.closed = { code, reason }; }
+  of<K extends ServerMsg['t']>(t: K): Extract<ServerMsg, { t: K }>[] { return this.msgs.filter((m): m is Extract<ServerMsg, { t: K }> => m.t === t); }
+  states(): Extract<ServerMsg, { t: 'state' }>[] { return this.of('state'); }
+}
+/** The most state messages a peer received within any `windowMs` of wall time. */
+function maxInWindow(at: number[], windowMs: number): number {
+  let best = 0;
+  for (let i = 0, j = 0; i < at.length; i++) { while (at[i] - at[j] >= windowMs) j++; best = Math.max(best, i - j + 1); }
+  return best;
+}
+
+describe('snapshot traffic follows wall time (#49)', () => {
+  const LINK = 256 * 1024;   // modeled drain capacity, bytes/s (not a WAN measurement)
+  /**
+   * The issue's representative finish sequence: humans + AI on the production 10 ms tick, 8 s of racing, then every human
+   * finishes (Race.finishCar, as the race does at the line) while the AI field still runs, and the accelerated run-on goes to
+   * the classification. Optionally the process stalls first, so the race catches up at maxCatchUpSteps per tick.
+   */
+  function finishSequence(humans: number, over: Partial<Config> = {}, stallMs = 0) {
+    const h = harness(over, 12345);
+    const peers: LinkPeer[] = [];
+    const mk = (): LinkPeer => { const p = new LinkPeer(() => h.now, LINK); peers.push(p); return p; };
+    const c = h.mgr.create(mk(), { name: 'Host', accountId: null, mode: 'multiplayer', settings: { track: 'circuit-1', aiFill: true } });
+    if (!c.ok) throw new Error(c.code);
+    const ids = [c.participant];
+    for (let k = 1; k < humans; k++) {
+      const j = h.mgr.join(mk(), `10.0.0.${k}`, { code: c.room.code, name: `G${k}`, accountId: null });
+      if (!j.ok) throw new Error(j.code);
+      ids.push(j.participant);
+    }
+    const room = c.room;
+    start(h, room, ids);
+    h.advance(8000, 10);
+    let catchUp: { from: number; to: number } | null = null;
+    if (stallMs) {
+      h.set(h.now + stallMs);
+      const from = h.now;
+      h.advance(2000, 10);
+      expect(room.lagMs).toBe(0);
+      catchUp = { from, to: h.now };
+    }
+    const race = room.race!;
+    for (const id of ids) race.finishCar(race.car(id)!, race.raceTime, null);
+    const runOnFrom = h.now;
+    h.advance(600_000, 10, undefined, () => room.state !== 'race');
+    expect(room.state).toBe('results');
+    return { h, room, peers, ids, runOnFrom, runOnTo: h.now, catchUp };
+  }
+
+  /** At most one ordinary state per 1000/Hz ms slot: floor(W*Hz/1000) + 1 in any window W, plus the final state. */
+  const bound = (windowMs: number, hz: number): number => Math.floor((windowMs * hz) / 1000) + 1 + 1;
+
+  it.each([2, 3])('%i human finishers with AI remaining get about 20 states/s through the run-on and are never dropped as slow', (humans) => {
+    const { h, room, peers, runOnFrom, runOnTo } = finishSequence(humans);
+    const hz = h.cfg.snapshotHz;
+    expect(hz).toBe(20);
+    const runOnMs = runOnTo - runOnFrom;
+    expect(runOnMs).toBeGreaterThan(2000);   // a real accelerated run-on: many simulated seconds per wall second
+    for (const p of peers) {
+      expect(p.closed).toBe(null);
+      expect(maxInWindow(p.stateAt, 1000)).toBeLessThanOrEqual(bound(1000, hz));
+      const inRunOn = p.stateAt.filter((t) => t > runOnFrom).length;
+      expect(inRunOn).toBeLessThanOrEqual(bound(runOnMs, hz));
+      expect(inRunOn).toBeGreaterThanOrEqual(Math.floor((runOnMs * hz) / 1000) - 1);   // still a steady stream to draw from
+      // the modeled link drains faster than the stream fills it: the queue never builds towards the slow-client limit
+      expect(p.peak).toBeLessThan(h.cfg.sendBufferMax / 8);
+    }
+    // every client: the same bytes, the final state before one matching result, and nothing pending
+    const env = room.result!;
+    expect(env.outcome).toBe('completed');
+    for (const p of peers) {
+      // from the race start on (lobby joins differ per seat), every member got the same bytes
+      const race = (q: LinkPeer): string[] => q.raw.slice(q.msgs.findIndex((m) => m.t === 'state'));
+      expect(race(p).length).toBe(race(peers[0]).length);
+      expect(race(p).every((x, i) => x === race(peers[0])[i])).toBe(true);
+      expect(p.of('result')).toHaveLength(1);
+      const last = p.states().at(-1)!;
+      expect((last.snap as RaceSnapshot).final!.map((x) => x.id)).toEqual(env.classification!.map((x) => x.id));
+      expect(last.tick).toBe(env.times.ticks);
+      expect(p.msgs.findIndex((m) => m.t === 'result')).toBeGreaterThan(p.msgs.lastIndexOf(last));
+    }
+    expect(room.awards?.raceId).toBe(env.raceId);
+  });
+
+  it.each([
+    ['20 Hz, catching up after a 3 s stall', {}, 3000],
+    ['10 Hz', { snapshotHz: 10 }, 0],
+    ['60 Hz', { snapshotHz: 60 }, 0],
+    ['15 Hz, catching up after a 2 s stall', { snapshotHz: 15 }, 2000],
+  ] as const)('the same cap holds at %s', (_name, over, stall) => {
+    const { h, peers, runOnFrom, runOnTo, catchUp } = finishSequence(3, over, stall);
+    const hz = h.cfg.snapshotHz;
+    for (const p of peers) {
+      expect(p.closed).toBe(null);
+      expect(maxInWindow(p.stateAt, 1000)).toBeLessThanOrEqual(bound(1000, hz));
+      expect(p.stateAt.filter((t) => t > runOnFrom).length).toBeLessThanOrEqual(bound(runOnTo - runOnFrom, hz));
+      if (catchUp) expect(p.stateAt.filter((t) => t >= catchUp.from && t <= catchUp.to).length).toBeLessThanOrEqual(bound(catchUp.to - catchUp.from, hz));
+    }
+  });
+
+  it('coalescing keeps every event once and in order, and the publication rate never changes the race', () => {
+    // 60 Hz (about one state per step) against 5 Hz (up to 160 run-on steps coalesced per state): the same event stream
+    // reaches every client, and the classification, laps and times are identical
+    const fast = finishSequence(2, { snapshotHz: 60 });
+    const slow = finishSequence(2, { snapshotHz: 5 });
+    const evs = (p: LinkPeer): string[] => p.states().flatMap((m) => m.ev.map((e) => JSON.stringify(e)));
+    const norm = (r: typeof fast, s: string): string => r.ids.reduce((x, id, k) => x.split(id).join(`H${k}`), s);
+    for (const r of [fast, slow]) for (const p of r.peers) expect(evs(p)).toEqual(evs(r.peers[0]));
+    expect(norm(slow, JSON.stringify(evs(slow.peers[0])))).toBe(norm(fast, JSON.stringify(evs(fast.peers[0]))));
+    const core = (r: typeof fast): string => norm(r, JSON.stringify({ c: r.room.result!.classification, l: r.room.result!.laps, t: r.room.result!.times }));
+    expect(core(slow)).toBe(core(fast));
   });
 });
