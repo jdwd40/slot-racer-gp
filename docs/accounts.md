@@ -119,7 +119,7 @@ every room entry, so a sign-out, expiry or reset elsewhere also ends a socket's 
 | Bodies | 4 KB, exact fields |
 | Errors | fixed codes (`invalid_credentials`, `username_taken`, `rate`...); unknown users cost the same hash work; internal errors are `500 internal` with no detail |
 | Secrets | passwords, hashes, cookies, session IDs and tokens are never logged (`redact()` plus tests on every log line) and never sent to the bundle or a room |
-| Backend down | the title shows local play only; with the server up but the database down, health is 503 and online is off; guest/local play never waits on it |
+| Backend down | the title shows local play only; with the server up but the database down, health is 503 (`db: down`) and online is off for new sessions, while races already running carry on and their results are spooled ([online-server.md](online-server.md#production-design)); guest/local play never waits on it |
 
 Limits are per process, in memory: a restart resets them (acceptable for one small process).
 
