@@ -155,6 +155,11 @@ export type Mode = 'grid' | 'race' | 'pitlane' | 'bayIn' | 'service' | 'bayOut' 
 export type RetireState = 'coast' | 'parked' | null;
 /** `off.t` given to a parked retired car: past the crash tumble and screech, so it is drawn and heard as standing still */
 const PARKED_OFF_T = 2;
+/**
+ * Longest a retired car rolls before it is parked whatever its speed (simulation seconds). Unpushed it stops well inside this
+ * (under 3 s from VMAX), but a car held against it from behind on full throttle can keep it rolling for ever (#44 review).
+ */
+export const RETIRE_COAST_MAX = 4;
 
 export interface OffState { x: number; y: number; vx: number; vy: number; yaw: number; spin: number; t: number; z: number; vz: number; u0: number; lane: number; }
 
@@ -204,6 +209,8 @@ export interface Car {
    * driving it, then `parked` in its own bay, off the racing line and out of collisions for the rest of the race.
    */
   retire: RetireState;
+  /** simulation seconds the retired car has been coasting (bounded by RETIRE_COAST_MAX) */
+  retireT: number;
   /** terminal result: finished means classified; dq and dnf are never classified */
   status: CarStatus;
   dqReason: DqReason | null;
@@ -474,7 +481,7 @@ export class Race {
         num: D.num, bayHome: g.di,
         u: this.T.FINISH_S + g.prog, v: 0, laneSide: g.side, change: null, laneReq: false, pitReq: false, pitPenaltyOnly: false, laneOverride: false,
         fuelReq: false, fuelDue: 0, sgDue: 0, sgDeferred: false, routeHold: -1, overAppr: -1, hiU: this.T.FINISH_S + g.prog,
-        svcBreach: null, towSvc: false, towPit: false, retire: null, status: 'running', dqReason: null, dnfReason: null,
+        svcBreach: null, towSvc: false, towPit: false, retire: null, retireT: 0, status: 'running', dqReason: null, dnfReason: null,
         mode: 'grid', d: g.side * this.T.LANE_HALF, yawOff: 0, throttle: 0, brake: 0,
         fuel: 1, slip: 0, latRatio: 0, wobble: 0, off: null, recoverT: 0, towT: 0,
         bay: g.di, bayT: 0, serviceT: 0, penalty: 0, fuelAtBay: 0,
@@ -741,7 +748,7 @@ export class Race {
     const c = this.car(id);
     if (!c || c.status !== 'running') return false;
     this.endService(c);
-    c.retire = 'coast';
+    c.retire = 'coast'; c.retireT = 0;
     if (c.svcBreach) {
       c.status = 'dq'; c.dqReason = 'deadline';
       this.emit({ type: 'dq', car: c, reason: 'deadline' });
@@ -847,6 +854,7 @@ export class Race {
     c.defendCooldown = Math.max(0, c.defendCooldown - dt);
     if (c.human) { this.sgUpdate(c); this.reverseControl(c, dt, input); }
     if (c.retire === 'parked') { c.v = 0; c.throttle = 0; c.brake = 0; return; }
+    if (c.retire) c.retireT += dt;
     if (c.retire && this.parkable(c)) { this.park(c); return; }
     if (c.mode === 'off') { this.stepOff(c, dt); return; }
     if (c.mode === 'tow') { this.stepTow(c, dt); return; }
@@ -1427,9 +1435,10 @@ export class Race {
   /**
    * A retired car may leave the track now: at once when it is already standing out of the racing line's way (grid, bay, tow),
    * once it has rolled to rest on the road or in the pit lane, and after a de-slot once it has landed (when the marshal would
-   * otherwise have put it back).
+   * otherwise have put it back). In any case after RETIRE_COAST_MAX: a car pushed from behind may never come to rest by itself.
    */
   parkable(c: Car): boolean {
+    if (c.retireT >= RETIRE_COAST_MAX) return true;
     if (c.mode === 'race' || c.mode === 'pitlane') return Math.abs(c.v) < 0.05;
     if (c.mode === 'off') return !c.off || c.off.t > 1.7;
     return true;

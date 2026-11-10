@@ -2,7 +2,7 @@
 // unmanned obstacle (#44): it coasts to a stop, then leaves the racing line for its own bay and takes no part in collisions,
 // while its classification stays DNF `retired`. See docs/online-server.md (Disconnects, grace and retirement).
 import { describe, it, expect } from 'vitest';
-import { Race, Car, RosterEntry, WireEvent } from '../src/race';
+import { Race, Car, RosterEntry, WireEvent, RETIRE_COAST_MAX } from '../src/race';
 
 const DT = 1 / 60;
 const LAP = 3;
@@ -75,6 +75,33 @@ describe('retired car leaves the track (#44)', () => {
     expect(events.filter((e) => e.type === 'offence')).toEqual([]);
     expect(h.offences).toBe(0);
   });
+
+  // a human that catches the rolling car in its lane and holds Throttle can lock the two together at ~1.5 m/s for ever, so
+  // the car would never come to rest by itself: it is parked after RETIRE_COAST_MAX whatever its speed (#44 review)
+  for (const [gap, va, vh, st] of [[12, 20, 18, 150], [25, 15, 15, 150], [8, 10, 10, 60], [30, 18, 16, 300]] as const) {
+    it(`pushed from behind on full throttle (gap ${gap} m, ${va} vs ${vh} m/s): still parked within ${RETIRE_COAST_MAX} s, and the pusher drives on`, () => {
+      const r = room([{ id: 'a', control: 'human' }, { id: 'h', control: 'human' }]);
+      const a = r.car('a')!, h = r.car('h')!;
+      place(r, a, LAP * r.T.L + st, 1, va); place(r, h, LAP * r.T.L + st - gap, 1, vh);
+      r.retire('a');
+      r.drainEvents();
+      let parkedAt = -1, bumps = 0;
+      const events: WireEvent[] = [];
+      for (let i = 0; i < 60 * 12; i++) {
+        r.update(DT, { h: { up: true, down: false } });
+        const ev = r.drainEvents(); events.push(...ev);
+        bumps += ev.filter((e) => e.type === 'bump').length;
+        if (parkedAt < 0 && a.retire === 'parked') parkedAt = (i + 1) * DT;
+      }
+      expect(parkedAt).toBeGreaterThan(0);
+      expect(parkedAt).toBeLessThanOrEqual(RETIRE_COAST_MAX + DT + 1e-9);
+      expect(a).toMatchObject({ mode: 'off', retire: 'parked', v: 0, status: 'dnf', dnfReason: 'retired' });
+      expect(h.u).toBeGreaterThan(a.u + 20);                  // the pusher went on past where it was parked
+      expect(h.offences).toBe(0);
+      expect(events.filter((e) => e.type === 'offence')).toEqual([]);
+      if (gap <= 12) expect(bumps).toBeGreaterThan(0);        // the close cases really were in contact
+    });
+  }
 
   it('retired while de-slotted: never marshalled back onto the slot, parked once it has landed', () => {
     const r = room([{ id: 'a', control: 'human' }, { id: 'b', control: 'human' }]);
