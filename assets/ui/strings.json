@@ -341,6 +341,7 @@
     { "id": "net.err.forbidden", "text": "Only the room host can do that." },
     { "id": "net.err.other", "text": "The server refused that request." },
     { "id": "net.err.notReady", "text": "Not everyone is ready yet" },
+    { "id": "net.end.disconnected", "text": "You were disconnected from room {code}, and your seat there has expired." },
     { "id": "net.end.expired", "text": "Your seat expired while you were away. Your car was retired from that race." },
     { "id": "net.end.closed", "text": "The room has closed." },
     { "id": "net.end.shutdown", "text": "The game server restarted. A race in progress ended with no result." },

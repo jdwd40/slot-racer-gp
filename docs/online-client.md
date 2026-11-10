@@ -62,7 +62,12 @@ The title screen names them separately:
   - The menu offers **Resume** and **Leave race (retire)**. R (restart) does nothing online.
 - **Connection states.** A banner shows **Connecting**, **Reconnecting… your car is held for up to N s**, **Your car has retired** and **The game server is catching up** (`lagMs` > 500).
   - On an unexpected close, the session resumes the same seat with its private token, with backoff, until the grace period plus 3 s has passed. The car, obligations, laps and results are the server's, so the same car carries on.
-  - After expiry the browser says the seat expired and forgets it. A join with the code is then refused by the server (`started`), so an expired seat can never come back as a new driver.
+  - **Dead sockets without a close (#42).** A socket can die silently (half-open TCP behind a proxy, a sleeping phone, a Wi-Fi change, a NAT timeout): the server terminates it after a missed keepalive pong, but no close reaches the browser. So the client keeps its own keepalive while any socket is open, in the lobby, race and results:
+    - An app-level `{t:'ping', id}` goes out every 5 s; the server answers `pong` (protocol v1, no change). The 250 ms `ctl` heartbeat still runs only while racing.
+    - Every received message counts as traffic. After **4 s** of silence in a race (snapshots come at 20 Hz) or **12 s** otherwise, the client closes the socket and takes the same path as a close: **Reconnecting…** and the resume loop above. The dead socket's late close, if it ever comes, is ignored, so only one reconnect loop runs.
+    - While reconnecting, the lobby shows this seat as Reconnecting and Not ready, and Ready / Start wait for the resume.
+    - The page's own suspension is not counted against the socket. A keepalive tick that runs more than 3 s late (a backgrounded tab's throttled timers, a frozen iOS page, a stalled machine), or the page becoming visible again, restarts the silence window and sends a ping at once. A socket that is really dead is then caught one window later and resumed as usual.
+  - After expiry the browser says the seat expired and forgets it. A resume refused after a dropped link (`expired`, `not_found`) shows *You were disconnected from room CODE* on the online menu. A join with the code is then refused by the server (`started`), so an expired seat can never come back as a new driver.
   - **Reload.** The seat (room, participant, token, code) is kept in `sessionStorage` for this tab only, so after a reload the title offers **Rejoin room CODE** within the grace period. The token never goes into a URL, log or the page.
 - **Results.**
   - When this driver is done and others are still racing, a **Classification pending** card lists each car as finished (time), still racing (lap) or DQ / DNF. It gives no positions and no estimated times. **Watch the race** returns to the live view.
@@ -80,10 +85,11 @@ The title screen names them separately:
 | --- | --- |
 | `src/net/session.ts` | `NetSession`: create, join, resume, reconnection, seat storage, result de-duplication, commands |
 | `src/net/mirror.ts` | `mirrorRace`, `applySnapshot`, `localEvent`, `SnapBuffer` |
-| `src/net/client.ts` | Protocol client. It now ignores a replaced socket's late close or messages, which could otherwise reject a reconnect's request |
+| `src/net/client.ts` | Protocol client. It ignores a replaced socket's late close or messages, which could otherwise reject a reconnect's request, and runs the keepalive ping and receive watchdog |
 | `src/main.ts` | Online menu, lobby, race wiring, race menu, pending and final standings, banner |
 | `src/input.ts` | `DrivingInput.onChange`, so online pedals are sent without waiting for a frame |
 | `test/server/netsession.test.ts` | Mirror equivalence, interpolation, a 4-browser-module race over real WebSockets, fifth refused, reconnect, reload, expiry, duplicate result, rematch, connected solo, release |
+| `test/watchdog.test.ts` | Keepalive and watchdog with fake timers and a socket that goes silent without closing: lobby and race thresholds, resume, expiry, timers cleared, own suspension |
 | `scripts/online-check.mjs`, `scripts/qa-server.ts` | Browser checks with independent contexts against the real server code (test tooling only) |
 
 ## Server capacity and configuration
