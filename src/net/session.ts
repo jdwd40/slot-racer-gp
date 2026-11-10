@@ -156,6 +156,12 @@ export class NetSession {
   private async reconnect(): Promise<void> {
     const seat = this.seat!;
     this.setConn('reconnecting');
+    // the server may already have dropped this seat (or will when its grace runs out): until a resume is answered the lobby
+    // shows it as reconnecting and not ready, never as a confirmed Ready seat
+    if (this.room) {
+      this.room = { ...this.room, participants: this.room.participants.map((p) => p.id === this.me ? { ...p, connected: false, ready: false } : p) };
+      this.hooks.room?.(this.room);
+    }
     const graceMs = (this.room?.graceS ?? 20) * 1000;
     const deadline = this.now() + graceMs + 3000;
     let wait = 500;
@@ -205,11 +211,13 @@ export class NetSession {
     if (this.conn === 'connected' && this.inRace) this.client.setHeld(false, false);
   }
   action(type: ActionType): void { if (this.conn === 'connected' && this.inRace) this.client.action(type); }
-  ready(on: boolean): void { this.client.send({ t: 'ready', ready: on }); }
-  settings(s: Partial<RoomSettings>): void { this.client.send({ t: 'settings', settings: s }); }
-  livery(l: LiveryId): void { this.client.send({ t: 'livery', livery: l }); }
-  start(): void { this.client.send({ t: 'start' }); }
-  rematch(): void { this.client.send({ t: 'rematch' }); }
+  // lobby commands go only over a resumed seat: a reconnect attempt's socket is not in the room yet
+  private command(m: ClientMsg): void { if (this.conn === 'connected') this.client.send(m); }
+  ready(on: boolean): void { this.command({ t: 'ready', ready: on }); }
+  settings(s: Partial<RoomSettings>): void { this.command({ t: 'settings', settings: s }); }
+  livery(l: LiveryId): void { this.command({ t: 'livery', livery: l }); }
+  start(): void { this.command({ t: 'start' }); }
+  rematch(): void { this.command({ t: 'rematch' }); }
   /** Give the seat up on purpose (the car retires if racing); no reconnection follows. */
   leave(): void {
     if (this.conn === 'connected') this.client.send({ t: 'leave' });

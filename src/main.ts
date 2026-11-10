@@ -625,7 +625,9 @@ window.addEventListener('keyup', (e) => input.release(`key:${e.code}`));
 function suspend(): void { releaseDriving(); if (screen === 'race') showPause(); }
 window.addEventListener('blur', suspend);
 // the results screen keeps simulating when unfocused, so the rebase matters there too: time spent hidden is never replayed
-document.addEventListener('visibilitychange', () => { if (document.hidden) suspend(); stepper.rebase(); });
+// back from hidden: the online keepalive gives the socket a fresh silence window (src/net/client.ts) instead of counting time
+// this page was frozen or throttled against it; a socket that really died is then caught by the watchdog and resumed
+document.addEventListener('visibilitychange', () => { if (document.hidden) suspend(); else net?.client.wake(); stepper.rebase(); });
 renderer.domElement.addEventListener('wheel', (e) => { e.preventDefault(); zoomBy(e.deltaY > 0 ? 1.12 : 0.89); }, { passive: false });
 
 /**
@@ -1375,12 +1377,14 @@ function onNetNack(m: Extract<ServerMsg, { t: 'nack' }>): void {
 function onNetEnd(why: EndReason, detail?: string): void {
   void detail;
   if (why === 'expired' && accounts.account) void accounts.restore();
+  // a resume refused after a dropped link names the room, so a driver who never saw the banner knows what happened
+  const code = why === 'expired' && net?.room?.mode === 'multiplayer' ? net.room.code : undefined;
   net = null;
   leaveNetRace();
   localId = SOLO_ID;
   mode = 'race';
   setRace(newRace());
-  netNotice = why === 'left' ? '' : t(`net.end.${why}`);
+  netNotice = why === 'left' ? '' : code ? t('net.end.disconnected', { code }) : t(`net.end.${why}`);
   if (why === 'left' || online.state !== 'available') showTitle(); else showOnline();
 }
 
@@ -1403,6 +1407,8 @@ function showLobby(): void {
   enter('lobby');
   overlay.className = 'overlay show';
   const host = net.host;
+  // while reconnecting the seat may be gone on the server: Start and Ready wait for the resume
+  const live = net.conn === 'connected' ? '' : 'disabled';
   const meP = r.participants.find((p) => p.id === net!.me);
   const others = r.participants.filter((p) => p.id !== r.hostId && !p.left);
   const waitingFor = r.participants.length < r.minHumans ? t('net.needMore', { n: r.minHumans }) : r.participants.some((p) => !p.connected) ? t('net.waitConn') : others.some((p) => !p.ready) ? t('net.waitReady') : '';
@@ -1423,7 +1429,7 @@ function showLobby(): void {
     <div class="lbl2">${t('net.yourColour')}</div><div class="cars">${livs}</div>
     <p id="l-msg" class="net-msg" role="status" aria-live="polite">${esc(host ? waitingFor : t('net.hostStarts'))}</p>
     <div class="row">
-      ${host ? `<button class="cta" id="l-start" ${waitingFor && r.mode === 'multiplayer' ? 'aria-disabled="true"' : ''}>${t('net.start')}</button>` : `<button class="cta" id="l-ready">${t(meP?.ready ? 'net.unready' : 'net.readyBtn')}</button>`}
+      ${host ? `<button class="cta" id="l-start" ${live} ${waitingFor && r.mode === 'multiplayer' ? 'aria-disabled="true"' : ''}>${t('net.start')}</button>` : `<button class="cta" id="l-ready" ${live}>${t(meP?.ready ? 'net.unready' : 'net.readyBtn')}</button>`}
       <button class="cta alt" id="l-leave">${t('net.leave')}</button>
     </div>
   </div>`;

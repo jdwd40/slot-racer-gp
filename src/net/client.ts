@@ -1,7 +1,8 @@
 // A protocol client for the room server: the browser uses the global WebSocket, headless clients (tests, the smoke check)
 // pass the `ws` package's class. It keeps the private reconnect token in memory only (never in a URL or log), numbers held
 // controls and actions, and resends held controls as a heartbeat so the server's input timeout never fires while a pedal
-// is really held.
+// is really held. An app-level ping and a receive watchdog notice a socket that died without a close event (half-open TCP
+// behind a proxy, a sleeping phone, a NAT timeout): the server has hung up, but nothing tells the browser.
 import { PROTOCOL_NAME, PROTOCOL_VERSION, type ClientMsg, type PublicRoom, type ServerMsg } from './protocol';
 import type { ActionType } from '../race';
 
@@ -18,6 +19,14 @@ export type SocketCtor = new (url: string, protocols?: string | string[], opts?:
 
 export const HEARTBEAT_MS = 250;
 export const CONNECT_TIMEOUT_MS = 8000;
+/** An app-level ping this often while any socket is open, so an idle lobby or results screen still hears from the server. */
+export const PING_MS = 5000;
+/** Silence that means the socket is dead: snapshots come at 20 Hz in a race; elsewhere a pong is due every PING_MS. */
+export const WATCHDOG_RACE_MS = 4000;
+export const WATCHDOG_IDLE_MS = 12000;
+/** How often the keepalive looks at the clock; a tick this much later than due means this page itself was suspended. */
+export const KEEPALIVE_TICK_MS = 1000;
+export const SUSPEND_GAP_MS = 3000;
 
 export class OnlineClient {
   ws: SocketLike | null = null;
@@ -31,11 +40,17 @@ export class OnlineClient {
   closed: { code: number; reason: string } | null = null;
   private waiters: { pred: (m: ServerMsg) => boolean; res: (m: ServerMsg) => void; rej: (e: Error) => void; timer: ReturnType<typeof setTimeout> }[] = [];
   private hb: ReturnType<typeof setInterval> | null = null;
+  private ka: ReturnType<typeof setInterval> | null = null;
+  private pingId = 0;
+  /** when the current socket last delivered a message, when the last ping went out and when the keepalive last ran */
+  lastRxAt = 0;
+  private lastPingAt = 0;
+  private lastTickAt = 0;
   onMessage: ((m: ServerMsg) => void) | null = null;
   /** the open socket closed (after a completed connect) */
   onClose: ((e: { code: number; reason: string }) => void) | null = null;
 
-  constructor(private url: string, private Ctor: SocketCtor, private opts?: unknown) {}
+  constructor(private url: string, private Ctor: SocketCtor, private opts?: unknown, private now = () => Date.now()) {}
 
   /** Open the socket and complete the versioned hello. Rejects on a protocol mismatch. */
   async connect(version = PROTOCOL_VERSION): Promise<void> {
@@ -53,19 +68,59 @@ export class OnlineClient {
     });
     // a replaced socket (a reconnect) is ignored from here on: its late close or messages never touch the new connection
     ws.onmessage = (ev) => { if (this.ws === ws) this.receive(String(ev.data)); };
-    ws.onclose = (e) => {
-      if (this.ws !== ws) return;
-      this.closed = { code: e.code, reason: e.reason };
-      this.stopHeartbeat();
-      for (const w of this.waiters.splice(0)) { clearTimeout(w.timer); w.rej(new Error(`closed ${e.code}`)); }
-      this.onClose?.(e);
-    };
+    ws.onclose = (e) => this.lost(ws, e);
     ws.onerror = () => undefined;
     this.send({ t: 'hello', v: version, proto: PROTOCOL_NAME });
     let m: ServerMsg;
     try { m = await this.wait((x) => x.t === 'welcome' || (x.t === 'nack' && x.ref === 'hello')); } catch (e) { this.drop(); throw e; }
     // a refused hello is closed by the server, with a code the caller reads from `closed`
     if (m.t !== 'welcome') throw new Error(`hello refused: ${(m as { code: string }).code}`);
+    if (this.ws === ws) this.startKeepalive(ws);
+  }
+
+  /** The open socket `ws` is gone (closed, or declared dead by the watchdog): reported once through onClose. */
+  private lost(ws: SocketLike, e: { code: number; reason: string }): void {
+    // a replaced or already-lost socket's late close never reports a second time, so only one reconnect loop ever runs
+    if (this.ws !== ws) return;
+    this.ws = null;
+    this.closed = { code: e.code, reason: e.reason };
+    this.stopHeartbeat();
+    this.stopKeepalive();
+    for (const w of this.waiters.splice(0)) { clearTimeout(w.timer); w.rej(new Error(`closed ${e.code}`)); }
+    this.onClose?.(e);
+  }
+
+  private startKeepalive(ws: SocketLike): void {
+    this.stopKeepalive();
+    const t = this.now();
+    this.lastRxAt = t; this.lastPingAt = t; this.lastTickAt = t;
+    this.ka = setInterval(() => {
+      if (this.ws !== ws) return;
+      const now = this.now();
+      // A tick far later than due means this page was not running (a background tab's throttled timers, a frozen iOS page,
+      // a stalled machine), not that the server went quiet: messages sent meanwhile may still be waiting to be delivered.
+      // So the silence is not held against the socket. It gets a fresh window and a ping to prove itself; if it really
+      // died, the next window runs out and the normal resume follows, once.
+      if (now - this.lastTickAt > SUSPEND_GAP_MS) { this.wake(); return; }
+      this.lastTickAt = now;
+      if (now - this.lastRxAt > (this.room?.state === 'race' ? WATCHDOG_RACE_MS : WATCHDOG_IDLE_MS)) {
+        // closing a half-open socket may take minutes to report, and its late close is ignored (lost() runs once per socket)
+        try { ws.close(4000, 'no traffic'); } catch { /* not open */ }
+        this.lost(ws, { code: 4000, reason: 'no traffic' });
+        return;
+      }
+      if (now - this.lastPingAt >= PING_MS) this.ping();
+    }, KEEPALIVE_TICK_MS);
+  }
+  private stopKeepalive(): void { if (this.ka) { clearInterval(this.ka); this.ka = null; } }
+  private ping(): void { this.lastPingAt = this.now(); this.send({ t: 'ping', id: ++this.pingId }); }
+
+  /** This page is running again after being suspended (or shown again): restart the silence window and ping at once. */
+  wake(): void {
+    if (!this.ka) return;
+    const t = this.now();
+    this.lastRxAt = t; this.lastTickAt = t;
+    this.ping();
   }
 
   /** Close the current socket, if any, without reporting it through onClose: the caller has already given up on it. */
@@ -74,12 +129,14 @@ export class OnlineClient {
     if (!ws) return;
     this.ws = null;
     this.stopHeartbeat();
+    this.stopKeepalive();
     for (const w of this.waiters.splice(0)) { clearTimeout(w.timer); w.rej(new Error('dropped')); }
     try { ws.close(1000, 'bye'); } catch { /* not open yet */ }
   }
 
   private receive(s: string): void {
     let m: ServerMsg;
+    this.lastRxAt = this.now();
     try { m = JSON.parse(s) as ServerMsg; } catch { return; }
     this.received.push(m);
     if (this.received.length > 20000) this.received.splice(0, 5000);
@@ -123,5 +180,5 @@ export class OnlineClient {
   }
   stopHeartbeat(): void { if (this.hb) { clearInterval(this.hb); this.hb = null; } }
 
-  close(): void { this.stopHeartbeat(); this.ws?.close(1000, 'bye'); }
+  close(): void { this.stopHeartbeat(); this.stopKeepalive(); this.ws?.close(1000, 'bye'); }
 }
