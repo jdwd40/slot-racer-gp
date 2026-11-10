@@ -1,6 +1,8 @@
 // Resource measurement for a running room server: fills `rooms` rooms with `humans` WebSocket clients each, races them for
 // `seconds`, and samples the server's RSS (from /api/health) and, with --pid, its CPU use from /proc. Diagnostics only.
 //   node scripts/load-check.mjs http://127.0.0.1:8787 --rooms 6 --humans 4 --seconds 60 --origin https://slotrush.jdwd40.com --pid 1234
+// All its clients share one address, so the server it measures needs SLOTRUSH_MAX_CONNECTIONS_PER_IP >= rooms x humans and
+// SLOTRUSH_ROOMS_PER_IP >= rooms for that run (the stock 8 and 3 protect the public service from exactly this, #52).
 import { readFileSync } from 'node:fs';
 import WebSocket from 'ws';
 
@@ -36,7 +38,7 @@ for (let r = 0; r < ROOMS; r++) {
   send(host, { t: 'hello', v: 1, proto: 'slotrush' }); await wait(host, (m) => m.t === 'welcome');
   send(host, { t: 'create', name: `Load${r}`, mode: 'multiplayer', settings: { track: `circuit-${(r % 5) + 1}` } });
   const j = await wait(host, (m) => m.t === 'joined' || m.t === 'nack');
-  if (j.t !== 'joined') { console.error('create refused', j); process.exit(1); }
+  if (j.t !== 'joined') { console.error('create refused', j, j.code === 'unavailable' || j.code === 'rate' ? '(one-address load: start the server with SLOTRUSH_ROOMS_PER_IP >= --rooms, see the header)' : ''); process.exit(1); }
   const cs = [host];
   for (let k = 1; k < HUMANS; k++) {
     const c = await client(); all.push(c); cs.push(c);

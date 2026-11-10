@@ -7,6 +7,7 @@ import type { Config } from './config';
 import type { Logger } from './log';
 import type { Scoring } from './career';
 import type { ResultSink } from './results';
+import { CreateQuota } from './quota';
 import { Room, type Fail, type JoinOk, type Peer } from './room';
 
 export interface ManagerDeps { cfg: Config; log: Logger; sink: ResultSink; scoring?: Scoring; now?: () => number; seed?: () => number; }
@@ -25,8 +26,14 @@ export class RoomManager {
   /** worst tick duration over the last health window (ms): how busy the loop is */
   tickMaxMs = 0;
   readonly now: () => number;
+  /** per-address and per-account room creation allowance (server/quota.ts) */
+  readonly quota: CreateQuota;
 
-  constructor(private deps: ManagerDeps) { this.now = deps.now ?? (() => Date.now()); }
+  constructor(private deps: ManagerDeps) {
+    this.now = deps.now ?? (() => Date.now());
+    const c = deps.cfg;
+    this.quota = new CreateQuota({ perIp: c.roomsPerIp, perAccount: c.roomsPerAccount, creates: c.roomCreates, windowMs: c.roomCreateWindowS * 1000 }, this.now);
+  }
 
   get size(): number { return this.rooms.size; }
   /** the tick timer is active (only while started and at least one room exists: no idle wakeups) */
@@ -56,9 +63,17 @@ export class RoomManager {
     else f.n++;
   }
 
-  create(peer: Peer, o: { name: string; livery?: LiveryId; accountId: string | null; mode: Mode; settings: Partial<RoomSettings>; championship?: ChampionshipTag }): (JoinOk & { room: Room }) | Fail {
+  /**
+   * Create a room and seat its creator. `ip` is the creator's client address as the WebSocket layer established it; with it
+   * the room counts against that address's (and the account's) creation allowance until it closes. In-process tests that
+   * leave it out are not limited.
+   */
+  create(peer: Peer, o: { name: string; livery?: LiveryId; accountId: string | null; mode: Mode; settings: Partial<RoomSettings>; championship?: ChampionshipTag; ip?: string }): (JoinOk & { room: Room }) | Fail {
     if (this.rooms.size >= this.deps.cfg.roomCap) return { ok: false, code: 'unavailable', detail: 'room limit reached, try again later' };
     if (this.tickMaxMs > 50) return { ok: false, code: 'overloaded', detail: 'server busy, try again later' };
+    const keys = o.ip === undefined ? null : CreateQuota.keys(o.ip, o.accountId);
+    const refused = keys && this.quota.check(keys);
+    if (refused) { this.deps.log.info('room.create_refused', { code: refused.code, guest: !o.accountId }); return refused; }
     let room: Room;
     try {
       room = new Room(this.newCode(), o.mode, o.settings, o.championship ?? null, { cfg: this.deps.cfg, log: this.deps.log, sink: this.deps.sink, scoring: this.deps.scoring, seed: this.deps.seed, onClose: (r) => this.forget(r) }, this.now());
@@ -70,6 +85,9 @@ export class RoomManager {
     this.deps.log.info('room.create', { room: room.id, mode: o.mode, rooms: this.rooms.size });
     const r = room.join(peer, o, this.now(), true);
     if (!r.ok) { room.close('empty'); return r; }
+    // charged only once the room exists with its creator in it: a create that fails anywhere above costs no allowance. The
+    // join is synchronous, so the room cannot have closed in between; its close (any reason) releases the charge in forget
+    if (keys) this.quota.charge(room.id, keys);
     return { ...r, room };
   }
 
@@ -97,6 +115,7 @@ export class RoomManager {
   }
 
   private forget(r: Room): void {
+    this.quota.release(r.id);
     this.rooms.delete(r.id);
     if (this.codes.get(r.code) === r) this.codes.delete(r.code);
     this.deps.log.info('room.forget', { room: r.id, rooms: this.rooms.size });

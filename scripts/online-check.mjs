@@ -922,7 +922,7 @@ async function main() {
   await build({ entryPoints: [path.join(ROOT, 'scripts/qa-server.ts')], outfile: qaFile, bundle: true, platform: 'node', target: 'node22', format: 'esm', packages: 'external', logLevel: 'warning' });
   const { startQaServer } = await import(pathToFileURL(qaFile).href);
   const origins = ['http://localhost:4181', 'http://localhost:4182', 'http://localhost:4183', 'http://localhost:4184'];
-  const common = { allowedOrigins: origins, maxConnections: 100, maxConnectionsPerIp: 60, msgRate: 120, msgBurst: 200, graceS: 8, roomCap: 20 };
+  const common = { allowedOrigins: origins, maxConnections: 100, maxConnectionsPerIp: 60, msgRate: 120, msgBurst: 200, graceS: 8, roomCap: 20, roomsPerIp: 50, roomCreates: 1000 };   // every browser is one local address (#52)
   const fast = await startQaServer({ ...common, timeScale: 2, maxCatchUpSteps: 12 });
   // 40 s grace here (production default 20): a SwiftShader page reload alone can take longer than 20 s on this host
   const real = await startQaServer({ ...common, graceS: 40 });

@@ -14,6 +14,14 @@ export interface Config {
   roomCap: number;
   maxConnections: number;
   maxConnectionsPerIp: number;
+  /**
+   * room creation allowance (#52): rooms one client address, and one account, may have open at once, and rooms created per
+   * address or account in any `roomCreateWindowS` seconds. Joining is never limited by these. Policy: docs/online-server.md
+   */
+  roomsPerIp: number;
+  roomsPerAccount: number;
+  roomCreates: number;
+  roomCreateWindowS: number;
   /** seconds a disconnected participant's seat is held for reconnection */
   graceS: number;
   inputTimeoutMs: number;
@@ -90,6 +98,13 @@ export function loadConfig(env: Env = process.env): Config {
     roomCap: int(env, 'SLOTRUSH_ROOM_CAP', 6, 1, 50),
     maxConnections: int(env, 'SLOTRUSH_MAX_CONNECTIONS', 48, 1, 1000),
     maxConnectionsPerIp: int(env, 'SLOTRUSH_MAX_CONNECTIONS_PER_IP', 8, 1, 100),
+    // half the default room cap: one address can never hold every room, and a household behind one address can still run a
+    // multiplayer room (its members join it, which is not limited) next to a couple of solo or practice sessions
+    roomsPerIp: int(env, 'SLOTRUSH_ROOMS_PER_IP', 3, 1, 50),
+    // an account is one person: one room plus a spare, so leaving one room for another never waits on the old one closing
+    roomsPerAccount: int(env, 'SLOTRUSH_ROOMS_PER_ACCOUNT', 2, 1, 50),
+    roomCreates: int(env, 'SLOTRUSH_ROOM_CREATES', 20, 1, 1000),
+    roomCreateWindowS: int(env, 'SLOTRUSH_ROOM_CREATE_WINDOW_S', 600, 10, 86400),
     graceS: int(env, 'SLOTRUSH_RECONNECT_GRACE_S', 20, 5, 120),
     inputTimeoutMs: int(env, 'SLOTRUSH_INPUT_TIMEOUT_MS', LIMITS.inputTimeoutMs, 250, 5000),
     snapshotHz: int(env, 'SLOTRUSH_SNAPSHOT_HZ', 20, 5, 60),

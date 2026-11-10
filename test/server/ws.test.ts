@@ -15,7 +15,9 @@ import { drive } from './bot';
 
 const SCALE = 12;
 const ORIGIN = 'http://localhost:5173';
-const cfg = testConfig({ port: 0, timeScale: SCALE, maxCatchUpSteps: 6 * SCALE, snapshotHz: 10, graceS: 5, msgRate: 200, msgBurst: 300, maxConnectionsPerIp: 40 });
+const cfg = testConfig({ port: 0, timeScale: SCALE, maxCatchUpSteps: 6 * SCALE, snapshotHz: 10, graceS: 5, msgRate: 200, msgBurst: 300, maxConnectionsPerIp: 40,
+  // every client here is one test host, so the per-address room allowance (#52, tested in roomquota.test.ts) is lifted
+  roomsPerIp: 50, roomCreates: 1000 });
 const log = memoryLogger();
 const sink = new MemoryResultSink();
 const mgr = new RoomManager({ cfg, log, sink });

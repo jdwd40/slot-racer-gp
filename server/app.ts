@@ -511,7 +511,7 @@ export function createApp({ cfg, log, manager, pool = null, sessionCheckMs = SES
     function enter(m: Extract<ClientMsg, { t: 'create' | 'join' | 'resume' }>, accountId: string | null, accountName?: string): void {
       const name = m.t === 'resume' ? '' : accountName ?? m.name;
       const r = m.t === 'create'
-        ? manager.create(peer, { name, livery: m.livery, accountId, mode: m.mode, settings: m.settings, championship: m.championship })
+        ? manager.create(peer, { name, livery: m.livery, accountId, mode: m.mode, settings: m.settings, championship: m.championship, ip })
         : m.t === 'join'
           ? manager.join(peer, ip, { code: m.code, name, livery: m.livery, accountId })
           : manager.resume(peer, ip, m.room, m.participant, m.token, accountId);
