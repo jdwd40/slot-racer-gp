@@ -29,8 +29,35 @@ No third-party identity provider, mail service or paid service is used or needed
 | Restore | `GET /api/auth/me` | `{ account, profile, session: 'active' }`, or `{ account: null, session: 'none' \| 'expired' }`. `expired` means the browser sent a session cookie the server no longer accepts (expired, signed out elsewhere, owner reset); the reply also clears that cookie |
 | Profile | `GET /api/profile`, `POST /api/profile` `{ displayName, expectAccount? }` | The session's own profile only. `401 signed_out` / `session_expired`; `409 identity_changed` when `expectAccount` (the account the form was opened for) is not the session's |
 | Sign out | `POST /api/auth/logout` | Deletes the session row and clears the cookie; sockets opened with it are signed out at once (`bye expired`, close 4003). If the store cannot delete the row: `503 unavailable`, cookie kept |
+| Store cannot take the new session | `POST /api/auth/login`, `/register` | See [Sign-in when the session store fails](#sign-in-when-the-session-store-fails): `503 unavailable` (registration: `detail: 'account_created'`), never a success without a stored session |
 | Store unreadable | any of the above, a WebSocket upgrade | When the session store cannot be read (database down or timing out), every request that carries a session cookie gets `503 unavailable` (a socket upgrade: HTTP 503), and the cookie is kept. Nobody knows the session ended, so it is never reported as `expired` and the browser does not clear its sign-in |
 | Recover | admin `reset-password` (above) | No email. The owner verifies the player out of band, then gives them the new password privately |
+
+### Sign-in when the session store fails
+
+A sign-in (or the sign-in that follows a registration) has two writes: **regeneration** deletes the browser's previous
+session row (so a session ID is never reused across sign-ins: no fixation), then **save** inserts the new one. The browser is
+told it is signed in only after both succeeded (#51; before, a failed write still answered `200 session: 'active'` with a
+cookie that named nothing, and the next `/me` said `expired`). Each failure answers `503 { error: 'unavailable' }` with no
+database detail, and the session that failed to store is dropped from the request, so no cookie is ever sent for it and the
+write is not retried when the response ends:
+
+| Step that fails | Previous session | Reply |
+| --- | --- | --- |
+| Regeneration (delete of the old row) | Unknown whether it went, so it is left as it was: its cookie is kept and its sockets stay signed in (the 10 s check ends them if the row did go) | `503`, no `Set-Cookie` |
+| Save (insert of the new row) | Already deleted: its sockets are signed out (`bye expired`) and its cookie, if one was sent, is cleared | `503`, a clearing `Set-Cookie` at most |
+| Neither (profile read fails afterwards) | Replaced as normal | `200`/`201` with `profile: null`: the sign-in did happen, so it is reported (the page falls back to the username) |
+
+- **Registration partial success.** The account and its profile are committed before the session is written, and they are
+  kept: the reply is `503 { error: 'unavailable', detail: 'account_created' }`. Registering again would only say
+  `username_taken`, so the page switches to the sign-in tab with the username filled in and says the account was created;
+  signing in with the same details works as soon as the store does.
+- **Recovery** needs no restart: the next attempt after the database is back signs in normally (tested with a one-off
+  failure and with a PostgreSQL trigger that refuses the write, then is dropped).
+- The browser treats the `503` like any failed sign-in: it stays a guest, keeps its account-scoped state, and a socket opened
+  afterwards is a guest seat. A wrong password is still `401 invalid_credentials` and never reaches the store.
+- The log line is `auth.session_failed` with the step (`regenerate`/`save`), the flow, the account ID and the database error
+  (credentials masked); never the password, cookie or session ID.
 
 **Session lifetime:** 30 days absolute from sign-in (`rolling: false`); there is no "remember me" variant. Expired rows are
 pruned every 15 minutes and by `admin prune-sessions`. Every signed-in WebSocket re-checks its session every 10 s and on

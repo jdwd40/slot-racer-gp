@@ -52,7 +52,7 @@ else if (cmd === 'stop') { if (existsSync(DATA)) run('pg_ctl', ['-D', DATA, '-m'
 else if (cmd === 'env') console.log(URL);
 else if (cmd === 'test') {
   start();
-  const r = spawnSync('npx', ['vitest', 'run', 'test/server/db.test.ts', 'test/server/profiles.db.test.ts', 'test/server/career.db.test.ts', 'test/server/dbrestart.db.test.ts'], { stdio: 'inherit', env: { ...process.env, SLOTRUSH_TEST_DATABASE_URL: URL } });
+  const r = spawnSync('npx', ['vitest', 'run', 'test/server/db.test.ts', 'test/server/profiles.db.test.ts', 'test/server/career.db.test.ts', 'test/server/dbrestart.db.test.ts', 'test/server/authstore.db.test.ts'], { stdio: 'inherit', env: { ...process.env, SLOTRUSH_TEST_DATABASE_URL: URL } });
   process.exit(r.status ?? 1);
 } else if (cmd === 'backup-check') {
   // The owner's backup/restore drill, locally: a database with accounts, profiles and sessions is dumped with pg_dump -Fc as
