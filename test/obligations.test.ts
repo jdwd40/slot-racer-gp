@@ -363,6 +363,16 @@ describe('the final crossing', () => {
     expect(P.status).toBe('finished');
   });
 
+  it('a breach latched before the final lap stays the DQ reason even with a stop-and-go still owed at the flag (#53)', () => {
+    const { r, P } = solo(LAPS);
+    P.svcBreach = 'stopGo';                     // missed an earlier deadline...
+    P.sgOwed = PEN.stopSeconds;                 // ...and the stop is still unserved when the flag falls
+    const ev = crossLine(r, P, LAPS);
+    expect(P.status).toBe('dq');
+    expect(P.dqReason).toBe('deadline');
+    expect(ev.filter((e) => e.type === 'dq')).toEqual([expect.objectContaining({ reason: 'deadline' })]);
+  });
+
   it('practice never disqualifies', () => {
     const r = fresh('circuit-1', { practice: true });
     const P = me(r); P.human = true;

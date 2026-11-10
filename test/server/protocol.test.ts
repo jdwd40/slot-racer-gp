@@ -35,6 +35,13 @@ describe('protocol parser', () => {
     expect(LIMITS.maxMessageBytes).toBe(512);
   });
 
+  it('a string field at exactly the 64-character limit is accepted; one character more is malformed (#53)', () => {
+    const STRING_MAX = 64;   // parseClientMessage: "any string over 64 characters" is malformed
+    const join = (length: number) => JSON.stringify({ t: 'join', code: 'ABCDEF', name: 'x'.repeat(length) });
+    expect(parseClientMessage(join(STRING_MAX))).toMatchObject({ ok: true });
+    expect(parseClientMessage(join(STRING_MAX + 1))).toMatchObject({ ok: false, code: 'malformed' });
+  });
+
   it('display names are cleaned and bounded, never empty', () => {
     expect(cleanName('  Ann\u0000  ‮B  ')).toBe('Ann B');
     expect(cleanName('​​')).toBe(null);

@@ -1,7 +1,7 @@
 // Room service rules, on the real RoomManager/Room with a manual clock and in-memory peers (docs/online-server.md).
 import { describe, it, expect } from 'vitest';
 import { PEN, type RaceSnapshot } from '../../src/race';
-import { LIVERIES, type PublicRoom, type ServerMsg } from '../../src/net/protocol';
+import { LIMITS, LIVERIES, type PublicRoom, type ServerMsg } from '../../src/net/protocol';
 import type { Config } from '../../server/config';
 import type { Peer, Room } from '../../server/room';
 import { BotClient, FakePeer, harness } from './harness';
@@ -327,6 +327,47 @@ describe('controls, actions and reconnection', () => {
     h.advance(10_100);
     expect(carOf(room, ids[1])).toMatchObject({ status: 'dnf', dnfReason: 'retired' });
     expect(h.mgr.resume(new FakePeer(), '1', room.id, ids[1], tokens[1], null)).toMatchObject({ ok: false, code: 'expired' });
+  });
+
+  /** One practice seat, alone in its room (#53 boundary checks). */
+  const practice = (h: H) => {
+    const peer = new FakePeer();
+    const c = h.mgr.create(peer, { name: 'Edge', accountId: null, mode: 'practice', settings: {} });
+    if (!c.ok) throw new Error(c.code);
+    return { room: c.room, id: c.participant, peer };
+  };
+
+  it('a control may jump exactly LIMITS.maxSeqJump ahead; one more is malformed and leaves the held controls alone (#53)', () => {
+    const h = harness();
+    const { room, id } = practice(h);
+    expect(room.participant(id)!.ctlSeq).toBe(0);
+    expect(room.handle(id, { t: 'ctl', seq: LIMITS.maxSeqJump, up: true, down: false }, h.now)).toBeNull();
+    expect(room.handle(id, { t: 'ctl', seq: 2 * LIMITS.maxSeqJump + 1, up: false, down: true }, h.now)).toMatchObject({ code: 'malformed', seq: 2 * LIMITS.maxSeqJump + 1 });
+    expect(room.participant(id)).toMatchObject({ ctlSeq: LIMITS.maxSeqJump, held: { up: true, down: false } });
+  });
+
+  it('an action may jump exactly LIMITS.maxSeqJump ahead; one more is malformed and is not queued (#53)', () => {
+    const h = harness();
+    const { room, id } = practice(h);
+    expect(room.handle(id, { t: 'start' }, h.now)).toBeNull();
+    expect(room.handle(id, { t: 'act', seq: LIMITS.maxSeqJump, type: 'lane' }, h.now)).toEqual({ t: 'ack', seq: LIMITS.maxSeqJump, result: 'queued' });
+    expect(room.handle(id, { t: 'act', seq: 2 * LIMITS.maxSeqJump + 1, type: 'pit' }, h.now)).toMatchObject({ code: 'malformed', seq: 2 * LIMITS.maxSeqJump + 1 });
+    expect(room.participant(id)!.actSeq).toBe(LIMITS.maxSeqJump);
+    h.advance(100);
+    expect(room.race!.lastSeq[id]).toBe(LIMITS.maxSeqJump);   // the refused action never reached the race
+  });
+
+  it('the reconnect grace boundary: a seat is kept at exactly graceS after the drop and released 1 ms later (#53)', () => {
+    const h = harness();
+    const { room, id, peer } = practice(h);
+    const droppedAt = h.now;
+    room.disconnect(id, peer, droppedAt);
+    h.set(droppedAt + h.cfg.graceS * 1000);
+    h.mgr.tick();
+    expect(room.participant(id)).toMatchObject({ peer: null, left: false });
+    h.set(droppedAt + h.cfg.graceS * 1000 + 1);
+    h.mgr.tick();
+    expect(room.participant(id)).toBeUndefined();
   });
 
   it('a slow client is dropped instead of buffering without bound, and keeps its seat for the grace period', () => {
