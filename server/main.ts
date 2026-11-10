@@ -15,7 +15,8 @@ async function main(): Promise<void> {
   const cfg = loadConfig();
   if (cfg.version === 'dev' && typeof __SLOTRUSH_BUILD__ === 'string') cfg.version = __SLOTRUSH_BUILD__;
   const log = createLogger(cfg.logLevel);
-  const pool = cfg.databaseUrl ? createPool(cfg) : null;
+  // the pool logs (and survives) connections lost while the database restarts or fails over: see server/db.ts
+  const pool = cfg.databaseUrl ? createPool(cfg, log) : null;
   if (pool) {
     // rollout compatibility: never serve against a schema this build does not match (run `admin migrate` first)
     const s = await schemaStatus(pool);
