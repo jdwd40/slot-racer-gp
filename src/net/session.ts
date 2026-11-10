@@ -224,6 +224,12 @@ export class NetSession {
     this.finish('left');
     setTimeout(() => this.client.close(), 200);
   }
+  /**
+   * The page has heard nothing it expected for too long (#43): treat the socket as dead and resume, through the same
+   * drop path as a close or the watchdog. Does nothing unless connected, so a reconnect already under way (the watchdog
+   * may have got there first) is never doubled.
+   */
+  reconnectNow(): void { if (this.conn === 'connected' && !this.closing && !this.ended) this.client.abandon('no news'); }
   /** Stop without leaving (page teardown): the seat waits out its grace on the server. */
   close(): void { this.closing = true; this.client.close(); this.setConn('offline'); }
 }

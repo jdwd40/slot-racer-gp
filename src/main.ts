@@ -19,6 +19,7 @@ import { SnapBuffer, applySnapshot, localEvent, mirrorRace } from './net/mirror'
 import { LIVERIES as NET_LIVERIES, LIMITS, type AwardsView, type CareerStats, type ChampionshipTag, type LiveryId, type PublicRoom, type ServerMsg } from './net/protocol';
 import type { RaceSnapshot, WireEvent } from './race';
 import type { SocketCtor } from './net/client';
+import { NetWaitGuard, type NetWaitView } from './net/netwait';
 import { COARSE_QUERY, ControlsAnchor, DrivingInput, KEY_HOLDS, KEY_TAPS, PadButton, TOUCH_MODES, TouchMode, TouchPad, savedTouchMode, saveTouchMode, touchActive } from './input';
 
 const TRACK_KEY = 'srgp.track';
@@ -175,8 +176,21 @@ type Screen = 'title' | 'race' | 'pause' | 'results' | 'boards' | 'champ' | 'onl
 let screen: Screen = 'title';
 let lbTrack = T.DEF.id;
 let lbKind: R.BoardKind = 'practice';
+/**
+ * The pending card's safety net (src/net/netwait.ts): 30 s with no state or result asks the session to resume through
+ * the watchdog's drop path, and a refused resume replaces the card with a plain explanation. Declared before enter(),
+ * which stops it; its callbacks only run once a pending card is up.
+ */
+const netGuard = new NetWaitGuard({
+  conn: () => net?.conn ?? 'offline',
+  reconnect: () => net?.reconnectNow(),
+  render: (v) => renderNetWaitView(v),
+  now: () => performance.now(),
+});
 /** Every change of screen ends the current hold, including restarting into the same one: what is still down needs pressing again. */
 function enter(s: Screen): void {
+  // the pending card's lost-contact timer lives only while that card shows: any other screen ends it (#43)
+  if (s !== 'netwait') netGuard.stop();
   screen = s;
   releaseDriving();
   hud.setMore(false);
@@ -627,7 +641,7 @@ window.addEventListener('blur', suspend);
 // the results screen keeps simulating when unfocused, so the rebase matters there too: time spent hidden is never replayed
 // back from hidden: the online keepalive gives the socket a fresh silence window (src/net/client.ts) instead of counting time
 // this page was frozen or throttled against it; a socket that really died is then caught by the watchdog and resumed
-document.addEventListener('visibilitychange', () => { if (document.hidden) suspend(); else net?.client.wake(); stepper.rebase(); });
+document.addEventListener('visibilitychange', () => { if (document.hidden) suspend(); else { net?.client.wake(); netGuard.wake(); } stepper.rebase(); });
 renderer.domElement.addEventListener('wheel', (e) => { e.preventDefault(); zoomBy(e.deltaY > 0 ? 1.12 : 0.89); }, { passive: false });
 
 /**
@@ -1197,7 +1211,7 @@ async function netBegin(req: (s: NetSession) => Promise<{ ok: true } | { ok: fal
     end: own((why, detail) => onNetEnd(why, detail)),
     nack: own((m) => onNetNack(m)),
     // a dropped link lets go of everything here as well as on the server: after a reconnect a key or finger must press again
-    conn: own((c) => { if (c === 'reconnecting') { pad.reset(); input.clear(); } syncBanner(); }),
+    conn: own((c) => { if (c === 'reconnecting') { pad.reset(); input.clear(); } netGuard.conn(c); syncBanner(); }),
   }, seatStore(), undefined, () => performance.now());
   net = s;
   mode = 'online';
@@ -1262,6 +1276,7 @@ function onNetState(m: Extract<ServerMsg, { t: 'state' }>, at: number): void {
     netTick = m.tick;
   }
   netLag = m.lagMs;
+  netGuard.news();
   for (const w of m.ev as WireEvent[]) { const e = localEvent(race, w); if (e) handle(e); }
   const p = me();
   if (p.status !== 'running' && !netWatch && screen === 'race') showNetWait();
@@ -1379,12 +1394,16 @@ function onNetEnd(why: EndReason, detail?: string): void {
   if (why === 'expired' && accounts.account) void accounts.restore();
   // a resume refused after a dropped link names the room, so a driver who never saw the banner knows what happened
   const code = why === 'expired' && net?.room?.mode === 'multiplayer' ? net.room.code : undefined;
+  // a car still out on track when its seat expired was retired by the server: the driver is told that too, as before #42
+  const retired = !!netRaceId && net?.room?.state === 'race' && me().status === 'running';
   net = null;
   leaveNetRace();
   localId = SOLO_ID;
   mode = 'race';
   setRace(newRace());
-  netNotice = why === 'left' ? '' : code ? t('net.end.disconnected', { code }) : t(`net.end.${why}`);
+  // on the pending card a refused resume means no result is coming: that card says so itself, with its way back (#43)
+  if (netGuard.ended(why)) { netNotice = ''; return; }
+  netNotice = why === 'left' ? '' : code ? t(retired ? 'net.end.disconnectedRace' : 'net.end.disconnected', { code }) : t(`net.end.${why}`);
   if (why === 'left' || online.state !== 'available') showTitle(); else showOnline();
 }
 
@@ -1492,12 +1511,32 @@ function showNetWait(): void {
     <h2>${t('net.pendingTitle')}</h2>
     <div class="place" id="w-head"></div>
     <p><small>${t('net.pendingNote')}</small></p>
+    <p id="w-lost" class="net-msg" role="status" aria-live="polite"></p>
     <div class="tscroll"><table>${STAND_HEAD()}<tbody id="w-rows"></tbody></table></div>
     <div class="row"><button class="cta" id="w-watch">${t('net.watch')}</button><button class="cta alt" id="w-leave">${t('net.leave')}</button></div>
   </div>`;
   overlay.querySelector('#w-watch')!.addEventListener('click', closeNetWait);
   overlay.querySelector('#w-leave')!.addEventListener('click', () => net?.leave());
   renderNetWait();
+  netGuard.start();
+}
+function renderNetWaitView(v: NetWaitView): void {
+  if (v === 'closed') { showNetClosed(); return; }
+  const el = overlay.querySelector('#w-lost');
+  if (el) el.textContent = v === 'lost' ? t('net.lostContact') : '';
+}
+/** The room closed (the resume was refused) before the server sent results: nothing more will come. */
+function showNetClosed(): void {
+  enter('netres');
+  overlay.className = 'overlay show';
+  overlay.innerHTML = `<div class="card results netclosed">
+    <h2>${t('net.pendingTitle')}</h2>
+    <p role="status">${t('net.closedNoResult')}</p>
+    <div class="row"><button class="cta" id="w-menu">${t('net.backMenu')}</button></div>
+  </div>`;
+  const back = overlay.querySelector<HTMLButtonElement>('#w-menu')!;
+  back.addEventListener('click', () => { if (online.state === 'available') showOnline(); else showTitle(); });
+  back.focus({ preventScroll: true });
 }
 function closeNetWait(): void { netWatch = true; resume(); }
 function renderNetWait(): void {

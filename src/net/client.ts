@@ -46,6 +46,8 @@ export class OnlineClient {
   lastRxAt = 0;
   private lastPingAt = 0;
   private lastTickAt = 0;
+  /** the current socket's create/join/resume has been answered: until then `room` is still the last connection's room */
+  private answered = false;
   onMessage: ((m: ServerMsg) => void) | null = null;
   /** the open socket closed (after a completed connect) */
   onClose: ((e: { code: number; reason: string }) => void) | null = null;
@@ -75,7 +77,7 @@ export class OnlineClient {
     try { m = await this.wait((x) => x.t === 'welcome' || (x.t === 'nack' && x.ref === 'hello')); } catch (e) { this.drop(); throw e; }
     // a refused hello is closed by the server, with a code the caller reads from `closed`
     if (m.t !== 'welcome') throw new Error(`hello refused: ${(m as { code: string }).code}`);
-    if (this.ws === ws) this.startKeepalive(ws);
+    if (this.ws === ws) { this.answered = false; this.startKeepalive(ws); }
   }
 
   /** The open socket `ws` is gone (closed, or declared dead by the watchdog): reported once through onClose. */
@@ -103,17 +105,28 @@ export class OnlineClient {
       // died, the next window runs out and the normal resume follows, once.
       if (now - this.lastTickAt > SUSPEND_GAP_MS) { this.wake(); return; }
       this.lastTickAt = now;
-      if (now - this.lastRxAt > (this.room?.state === 'race' ? WATCHDOG_RACE_MS : WATCHDOG_IDLE_MS)) {
-        // closing a half-open socket may take minutes to report, and its late close is ignored (lost() runs once per socket)
-        try { ws.close(4000, 'no traffic'); } catch { /* not open */ }
-        this.lost(ws, { code: 4000, reason: 'no traffic' });
-        return;
-      }
+      // A reconnect attempt still holds the old room, seen racing. Snapshots only flow once the server has answered the
+      // resume, and a signed-in resume waits on a database check that can take longer than the race window, so until the
+      // handshake is answered the idle window applies (pongs still come every PING_MS) or every attempt would be cut off.
+      const racing = this.answered && this.room?.state === 'race';
+      if (now - this.lastRxAt > (racing ? WATCHDOG_RACE_MS : WATCHDOG_IDLE_MS)) { this.abandon('no traffic'); return; }
       if (now - this.lastPingAt >= PING_MS) this.ping();
     }, KEEPALIVE_TICK_MS);
   }
   private stopKeepalive(): void { if (this.ka) { clearInterval(this.ka); this.ka = null; } }
   private ping(): void { this.lastPingAt = this.now(); this.send({ t: 'ping', id: ++this.pingId }); }
+
+  /**
+   * Give up on the open socket as dead and report it through onClose exactly as a close would (the session then resumes
+   * once). Used by the watchdog and by a screen that has heard nothing it expected for too long (#43). Closing a half-open
+   * socket may take minutes to report; its late close is ignored, since lost() runs once per socket.
+   */
+  abandon(reason: string): void {
+    const ws = this.ws;
+    if (!ws) return;
+    try { ws.close(4000, reason); } catch { /* not open */ }
+    this.lost(ws, { code: 4000, reason });
+  }
 
   /** This page is running again after being suspended (or shown again): restart the silence window and ping at once. */
   wake(): void {
@@ -142,6 +155,7 @@ export class OnlineClient {
     if (this.received.length > 20000) this.received.splice(0, 5000);
     if (m.t === 'joined') { this.room = m.room; this.me = m.you; this.token = m.token; this.ctlSeq = Math.max(this.ctlSeq, m.ctlSeq); this.actSeq = Math.max(this.actSeq, m.actSeq); }
     if (m.t === 'room') this.room = m.room;
+    if (m.t === 'joined' || (m.t === 'nack' && (m.ref === 'resume' || m.ref === 'join' || m.ref === 'create'))) this.answered = true;
     this.onMessage?.(m);
     for (const w of [...this.waiters]) if (w.pred(m)) { clearTimeout(w.timer); this.waiters.splice(this.waiters.indexOf(w), 1); w.res(m); }
   }
