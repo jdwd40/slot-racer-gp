@@ -106,6 +106,13 @@ The protocol is JSON text over WebSocket at `/ws`. The first client message must
   - `not_in_room`: a command before joining.
   - `bad_state`: wrong room state, for example an action outside a race.
 - **Rates.** Each socket has a token bucket (`SLOTRUSH_MSG_RATE` 40/s, burst `SLOTRUSH_MSG_BURST` 60). Excess messages get `nack rate`. After more than 3 one-second strikes the socket is closed with 1008. Failed joins and resumes are limited to 20 per minute per client address, and so are failed sign-ins, so room codes cannot be guessed by brute force.
+- **Room creation allowance (#52).** The room cap is small and an idle lobby lives for 30 minutes, so without a limit one client address could take every room with a few `create` messages. Only **creating** is limited; joining and resuming are not (beyond the failed-join limit above).
+  - A room is charged, when it is created, to its creator's **client address** and, if signed in, **account**. It stays charged to them until it **closes** (left empty, idle, lifetime, fault or shutdown), whoever hosts it by then. Host transfer, the creator leaving it to others, disconnecting, resuming, new sockets, and signing in, out or as another account change nothing, so none of them frees or resets the allowance. A create that fails (cap, `overloaded`, bad settings, a bad name) is not charged.
+  - **Open rooms:** at most `SLOTRUSH_ROOMS_PER_IP` (3) per address and `SLOTRUSH_ROOMS_PER_ACCOUNT` (2) per account. Refused with `nack` `unavailable` (the room-cap code: the browser says there is no room free right now and to try again in a minute) and a `detail` naming the limit.
+  - **New rooms:** at most `SLOTRUSH_ROOM_CREATES` (20) per address and per account in any `SLOTRUSH_ROOM_CREATE_WINDOW_S` (600 s) sliding window, so a fast burst and slow create/leave churn are both bounded. Refused with `nack` `rate` (the browser says too many attempts, wait and try again) and a `detail` with the wait in seconds.
+  - **Why per address and per account.** Guests have no identity of their own (every new socket is a new guest), so the address is what bounds them. The account limit bounds a signed-in player who also has other addresses. 3 of 6 rooms per address means one address never holds the whole service, while a household behind one NAT address still runs a multiplayer room that everyone joins plus two solo or practice sessions. If the owner raises `SLOTRUSH_ROOM_CAP`, keep `SLOTRUSH_ROOMS_PER_IP` below it.
+  - Diagnostics from one address: `server:smoke` creates one solo room per run, and its race finishes about 20 s after it leaves, so at most 3 runs in that time succeed. `scripts/load-check.mjs` needs `SLOTRUSH_ROOMS_PER_IP` at least `--rooms` (and `SLOTRUSH_MAX_CONNECTIONS_PER_IP` at least rooms × humans) for that run.
+  - The address is the one the connection limit uses (next item): a forwarded header from anything but the local Nginx is ignored, so rotating it does not escape the limit. Bookkeeping is per open room plus at most 10,000 recent-create windows, which expire. No protocol change: both codes already exist and the client is unchanged. Tests: `test/server/roomquota.test.ts`.
 - **Origin and connections.** The `Origin` header must exactly match `SLOTRUSH_ALLOWED_ORIGINS` for WebSocket upgrades (otherwise 403 before the upgrade) and for `/api` POSTs. The path must be `/ws` (otherwise 404). Connections are capped in total and per client address (otherwise 503). The client address is `X-Real-IP` only when the TCP peer is loopback (Nginx).
 - **Ordering.** Server ticks and server timestamps order everything. Over one connection (TCP), messages arrive in order. Across reconnects, the per-seat sequence numbers reject anything stale. All members of a room receive the same serialized bytes for every broadcast, so every client sees identical decisions (tested).
 
@@ -180,6 +187,8 @@ Settings come from environment variables: the systemd `EnvironmentFile`, never t
 | `SLOTRUSH_ALLOWED_ORIGINS` | Local Vite ports in development | **Required in production**. Exact origins |
 | `SLOTRUSH_ROOM_CAP` | 6 | 1–50 |
 | `SLOTRUSH_MAX_CONNECTIONS`, `…_PER_IP` | 48, 8 | |
+| `SLOTRUSH_ROOMS_PER_IP`, `SLOTRUSH_ROOMS_PER_ACCOUNT` | 3, 2 | 1–50. Open rooms one address / one account may have created (#52) |
+| `SLOTRUSH_ROOM_CREATES`, `SLOTRUSH_ROOM_CREATE_WINDOW_S` | 20, 600 | 1–1000, 10–86400. Rooms created per address and per account in any window |
 | `SLOTRUSH_RECONNECT_GRACE_S` | 20 | 5–120 |
 | `SLOTRUSH_INPUT_TIMEOUT_MS` | 1000 | 250–5000 |
 | `SLOTRUSH_SNAPSHOT_HZ` | 20 | 5–60 |
@@ -203,7 +212,7 @@ npm run build:server && npm run server      # room server on 127.0.0.1:8787 (no 
 npm run dev                                 # game on :5173; /api and /ws are proxied to :8787 (vite.config.ts)
 VITE_ONLINE=1 npm run dev                   # the same with the online gate enabled (it probes /api/health)
 npm run server:smoke -- http://127.0.0.1:8787                  # health, protocol, origin, hello, solo race, leave
-node scripts/load-check.mjs http://127.0.0.1:8787 --rooms 6 --humans 4 --seconds 60 --pid <pid>   # resource sample (raise SLOTRUSH_MAX_CONNECTIONS_PER_IP for one-address load)
+node scripts/load-check.mjs http://127.0.0.1:8787 --rooms 6 --humans 4 --seconds 60 --pid <pid>   # resource sample (one address: raise SLOTRUSH_MAX_CONNECTIONS_PER_IP to 24 and SLOTRUSH_ROOMS_PER_IP to 6 for that run)
 npm test                                    # includes room, protocol and WebSocket tests; DB tests skip without a database
 npm run test:db                             # starts a private PostgreSQL under .local-pg/ (port 55471) and runs the DB tests
 node scripts/local-pg.mjs start|stop|env    # that local cluster on its own
