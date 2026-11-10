@@ -1169,6 +1169,16 @@ function showAccount(tab: 'login' | 'register' = 'login'): void {
       void go.then((r) => {
         if (screen !== 'account') return;
         if (r.ok) { onIdentityChanged(); acctNotice = t(reg ? 'acct.created' : 'acct.welcome', { name: r.account.displayName }); showAccount(); return; }
+        // the account was created but the server could not sign it in: send the driver to sign in (registering again would
+        // only say the name is taken), with the username filled in
+        if (reg && r.error === 'unavailable' && r.detail === 'account_created') {
+          const name = user.value.trim();
+          acctNotice = t('acct.err.createdNotSignedIn');
+          showAccount('login');
+          const u = overlay.querySelector<HTMLInputElement>('#a-user-in');
+          if (u) u.value = name;
+          return;
+        }
         setBusy(false, '');
         pass.value = '';
         invalid(r.error === 'invalid_name' ? nameEl : r.error === 'username_taken' || r.error === 'invalid_username' ? user : pass, acctErrorText(r.error, r.detail));

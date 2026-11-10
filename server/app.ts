@@ -8,6 +8,7 @@ import type { Pool } from 'pg';
 import { LIMITS, PROTOCOL_NAME, PROTOCOL_VERSION, RULES_VERSION, checkDisplayName, parseClientMessage, type ClientMsg, type ServerMsg } from '../src/net/protocol';
 import { Accounts, Busy, checkPassword, checkUsername } from './accounts';
 import type { Config } from './config';
+import { dbErrorFields } from './db';
 import type { Logger } from './log';
 import { schemaStatus, SCHEMA_VERSION } from './migrations';
 import type { Peer, Room } from './room';
@@ -157,7 +158,8 @@ export function createApp({ cfg, log, manager, pool = null, sessionCheckMs = SES
   }
 
   /** The session cookie came with the request but names no live session: it expired, was revoked or was signed out. */
-  const staleCookie = (req: Req): boolean => !req.session?.account && new RegExp(`(?:^|;\\s*)${COOKIE}=`).test(String(req.headers.cookie ?? ''));
+  const sentCookie = (req: Req): boolean => new RegExp(`(?:^|;\\s*)${COOKIE}=`).test(String(req.headers.cookie ?? ''));
+  const staleCookie = (req: Req): boolean => !req.session?.account && sentCookie(req);
   const clearCookie = (res: ServerResponse): void => {
     res.setHeader('set-cookie', `${COOKIE}=; Path=/; Max-Age=0; HttpOnly; SameSite=Strict${cfg.cookieSecure ? '; Secure' : ''}`);
   };
@@ -240,14 +242,34 @@ export function createApp({ cfg, log, manager, pool = null, sessionCheckMs = SES
       return;
     }
     if (what === 'login') userFails.clear(ukey);
-    // a fresh session ID on every sign-in (no session fixation); the replaced session, and its sockets' sign-in, end
+    // a fresh session ID on every sign-in (no session fixation); the replaced session, and its sockets' sign-in, end.
+    // The browser is told it is signed in only once the new session is stored: a reply that claimed it without the row
+    // would hand out a cookie that names nothing, and the next /me would already say "expired" (#51).
     const oldSid = req.sessionID;
-    await new Promise<void>((r) => s.regenerate(() => r()));
+    const failed = (step: 'regenerate' | 'save', err: unknown, oldEnded: boolean): void => {
+      log.error('auth.session_failed', { step, flow: what, account: acct.id, ...dbErrorFields(err, cfg.databaseUrl) });
+      // drop the unsaved session from this request, so express-session neither retries the write when the response ends
+      // nor sets a cookie for it
+      req.session = undefined;
+      // once the old row was deleted, the browser's cookie (if it sent one) names nothing: clear it, not leave it stale
+      if (oldEnded && sentCookie(req)) clearCookie(res);
+      // the account itself exists (a registration was committed): say so, so the player signs in rather than registers again
+      json(res, 503, what === 'register' ? { error: 'unavailable', detail: 'account_created' } : { error: 'unavailable' });
+    };
+    // regeneration deletes the old session row first. If that fails nobody knows whether it went, so the old session is
+    // left as it was (its cookie kept, its sockets signed in: the periodic check ends them if the row did go)
+    const regenErr = await new Promise<unknown>((r) => s.regenerate((e) => r(e)));
+    if (regenErr) { failed('regenerate', regenErr, false); return; }
     endSession(oldSid);
     req.session!.account = { id: acct.id, username: acct.username };
-    await new Promise<void>((r) => req.session!.save(() => r()));
-    const p = await accounts.profile(acct.id);
+    // a failed save leaves no usable session (the old one is already gone). An INSERT that did commit despite the error
+    // left a row whose ID was never sent to anyone; it expires and is pruned like any other.
+    const saveErr = await new Promise<unknown>((r) => req.session!.save((e) => r(e)));
+    if (saveErr) { failed('save', saveErr, true); return; }
     log.info(what === 'register' ? 'account.register' : 'account.login', { account: acct.id });
+    // the session is stored, so this sign-in did happen: a profile that cannot be read now must not turn it into an error
+    // (a 500 that still sets the live cookie); the browser falls back to the username and reads the profile again later
+    const p = await accounts.profile(acct.id).catch((e: unknown) => { log.warn('auth.profile_read_failed', { account: acct.id, ...dbErrorFields(e, cfg.databaseUrl) }); return null; });
     json(res, what === 'register' ? 201 : 200, { account: { id: acct.id, username: acct.username }, profile: p ? publicProfile(p) : null, session: 'active' });
   }
 

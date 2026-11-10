@@ -137,6 +137,29 @@ describe('AccountClient', () => {
     expect(await c.login('bob_1', 'bob password 1')).toEqual({ ok: false, error: 'unreachable' });
   });
 
+  it('a sign-in or registration the server could not store a session for (503) leaves the browser a guest (#51)', async () => {
+    const { srv, c, local } = setup();
+    await c.restore();
+    await c.register('fay_1', 'fay password 1');
+    await c.logout();
+    const owner = local.getItem(OWNER_KEY);
+    srv.override('/api/auth/login', () => ({ status: 503, body: { error: 'unavailable' } }));
+    expect(await c.login('fay_1', 'fay password 1')).toEqual({ ok: false, error: 'unavailable' });
+    expect(c.auth).toEqual({ state: 'guest', expired: false });
+    expect(c.account).toBe(null);
+    expect(c.expected).toBe('');   // a socket opened now asks to be a guest
+    expect(local.getItem(OWNER_KEY)).toBe(owner);
+    // registration: the account exists but is not signed in; the detail tells the page to send the driver to sign in
+    srv.override('/api/auth/register', (b) => { srv.users.set(String(b!.username), { id: '9', pw: String(b!.password), name: 'Gus' }); return { status: 503, body: { error: 'unavailable', detail: 'account_created' } }; });
+    expect(await c.register('gus_1', 'gus password 1')).toEqual({ ok: false, error: 'unavailable', detail: 'account_created' });
+    expect(c.auth).toEqual({ state: 'guest', expired: false });
+    // the store is back: signing in with the same details works
+    srv.override('/api/auth/login', null);
+    srv.override('/api/auth/register', null);
+    expect(await c.login('gus_1', 'gus password 1')).toMatchObject({ ok: true, account: { id: '9', username: 'gus_1' } });
+    expect(c.auth.state).toBe('signed-in');
+  });
+
   it('rename keeps the account id; an expired session on rename turns the browser into a guest and clears account state', async () => {
     const { srv, c, local, session, keepsSaves } = setup();
     const r = await c.register('dee_1', 'dee password 1', 'Dee');

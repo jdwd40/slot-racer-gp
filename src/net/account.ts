@@ -153,7 +153,8 @@ export class AccountClient {
     if (status === 401) return { error: e === 'session_expired' ? 'session_expired' : e === 'signed_out' ? 'signed_out' : 'invalid_credentials' };
     if (status === 409) return { error: e === 'identity_changed' ? 'identity_changed' : 'username_taken' };
     if (status === 429) return { error: 'rate' };
-    if (status === 503) return { error: e === 'busy' ? 'busy' : 'unavailable' };
+    // `detail: 'account_created'`: a registration whose account was made but whose session could not be stored (#51)
+    if (status === 503) return e === 'busy' ? { error: 'busy' } : { error: 'unavailable', ...(detail ? { detail } : {}) };
     return { error: 'other' };
   }
 

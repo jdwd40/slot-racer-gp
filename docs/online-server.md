@@ -158,7 +158,7 @@ No account awards are computed.
 - **Hashing.** The `argon2` package, Argon2id with m=19 MiB, t=2, p=1 (the OWASP minimum profile). Hashes run one at a time, with at most 16 queued (beyond that the reply is 503 `busy`), so a login flood cannot exhaust memory or stall races. Unknown users cost the same hash work as known ones.
 - **Sessions.** `express-session` with a PostgreSQL store (`server/sessionStore.ts`, table `sessions`, expired rows pruned every 15 minutes).
   - Cookie: `srsid`, HttpOnly, `SameSite=Strict`, `Secure` in production, 30 days.
-  - A new session ID is issued on every sign-in.
+  - A new session ID is issued on every sign-in. A sign-in whose old session cannot be removed or whose new session cannot be stored answers `503 unavailable` and sets no cookie for it ([accounts.md](accounts.md#sign-in-when-the-session-store-fails), #51).
   - POSTs need an allowed `Origin` and `application/json`, with a body of at most 4 KB.
   - The WebSocket upgrade reads the same session, so a signed-in seat records its `accountId`.
   - A signed-in socket stays bound to that session ID and is signed in only while the session lives. Logout, a new sign-in (which replaces the session ID), expiry and the owner's password reset all end it. The server then sends `bye` `expired` (detail `session`) and closes the socket with 4003.
