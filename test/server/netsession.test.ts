@@ -126,6 +126,21 @@ describe('snapshot mirror', () => {
     expect(b.stats.reanchors).toBe(1);
     expect(b.stats.maxGapMs).toBeGreaterThan(1900);
   });
+
+  it('at the run-on cadence (20 states/s, 40 steps apart) cars are drawn at the newest state: never starved, held or re-anchored (#49)', () => {
+    const r = new Race({ track: 'circuit-1', seed: 1 });
+    const snapAt = (x: number): RaceSnapshot => { const s = r.snapshot(); s.cars[0].x = x; return s; };
+    const b = new SnapBuffer(100, 24);
+    // the server steps 8x wall time but publishes on wall time: each state is 667 ms of race (about 16 track units at 0.4
+    // per step, beyond the 2-unit snap distance) after the last, 50 ms of local time later
+    for (let k = 0; k < 40; k++) {
+      const at = k * 50 + 30;
+      b.push(k * 40, at, snapAt(k * 40 * 0.4));
+      for (const d of [0, 16, 33, 49]) expect(b.sample(at + d)!.get('solo')!.x).toBeCloseTo(k * 40 * 0.4, 5);
+    }
+    expect(b.stats).toMatchObject({ received: 40, stale: 0, starved: 0, reanchors: 0 });
+    expect(b.stats.maxGapMs).toBe(50);
+  });
 });
 
 describe('NetSession against the real server', () => {

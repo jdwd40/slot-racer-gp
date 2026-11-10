@@ -67,7 +67,7 @@ An authoritative server for private rooms of up to four human drivers, plus serv
   - In its bay, on the grid (retired during the countdown) or under tow it is parked at once. De-slotted, it is parked when it lands instead of being put back on the slot.
   - The classification is unchanged: DNF `retired` (or DQ `deadline`), ordered among the DNFs by the distance it had covered (`u` is kept).
   - Snapshots show it as such (`mode: 'off'`, `v: 0`, `off` in the bay). The browser mirror draws it parked in the bay; the wire format is unchanged.
-- **Slow sockets.** A socket with more than `SLOTRUSH_SEND_BUFFER_MAX` (256 KB) queued is closed (4008) and goes into its grace period. A slow client never buffers without limit.
+- **Slow sockets.** A socket with more than `SLOTRUSH_SEND_BUFFER_MAX` (256 KB) queued is closed (4008) and goes into its grace period. A slow client never buffers without limit. The state stream is held to the wall-clock snapshot rate in every phase (see *Snapshot rate*), so a link that keeps up with ordinary racing also keeps up with the AI run-on and a catch-up (#49).
 
 ## Protocol v1
 
@@ -88,7 +88,7 @@ The protocol is JSON text over WebSocket at `/ws`. The first client message must
 | `welcome` | Server build, rules version and server time |
 | `joined` | Public room, `you`, the **private reconnect token** (only here, only to that socket), current `ctlSeq`/`actSeq` |
 | `room` | Public room snapshot on every change (`rev` increases). It never contains a token |
-| `state` | `tick` (server simulation steps), `now` (server ms), `lagMs`, the race snapshot and the events since the last state. It is sent `SLOTRUSH_SNAPSHOT_HZ` times a second, and at once on a resume |
+| `state` | `tick` (server simulation steps), `now` (server ms), `lagMs`, the race snapshot and the events since the last state. It is sent `SLOTRUSH_SNAPSHOT_HZ` times a second of wall time (see *Snapshot rate*), and at once on a resume |
 | `result` | The race's result envelope, broadcast once when the race closes. A resume into `results` gets the same envelope again, after `joined` and `state`, so a driver whose link dropped at the finish still receives it |
 | `ack` / `nack` | `nack` carries `ref` (message type), `code` and optional `seq`/`detail` |
 | `bye` | `left`, `closed`, `shutdown`, `superseded` and so on, then the socket closes |
@@ -118,6 +118,16 @@ Bump `PROTOCOL_VERSION` on any incompatible change. The browser enables online p
 - If the backlog exceeds `SLOTRUSH_OVERLOAD_ABORT_MS` (5 s), the race is **aborted**. Its envelope has `outcome: "aborted"`, `abortReason: "overload"` and `classification: null`. No race time is skipped and no result is invented. Room lifetime expiry, server shutdown (SIGTERM) and room faults use the same aborted envelope.
 - New rooms are refused (`overloaded`) while the worst recent tick exceeds 50 ms, and (`unavailable`) at the room cap.
 - Once every human is terminal, the AI run-on goes at 8 steps per tick. Nobody is waiting on it in real time.
+
+### Snapshot rate
+
+Ordinary `state` broadcasts follow **wall time, not simulation progress** (#49). Before, one went out every `60 / SLOTRUSH_SNAPSHOT_HZ` steps, so the 8-steps-per-tick run-on sent 264 a second per client (about 1.2 MB/s) instead of 20, and a catch-up multiplied the rate the same way. On a modeled 256 KiB/s link that closed every finisher with 4008 slow while they waited for the classification.
+
+- Wall time since the race started (scaled by `SLOTRUSH_TIME_SCALE`, which is 1 in production) is cut into slots of `1000 / SLOTRUSH_SNAPSHOT_HZ` ms. At most one state goes out per slot, after the tick's steps, with the latest snapshot. The events of every step since the last state travel with it, in order, so coalescing loses or repeats none. A slot in which the race did not advance sends nothing.
+- **Bound:** in any wall interval of W ms a socket gets at most `floor(W × Hz / 1000) + 1` ordinary states, during racing, catch-up and run-on alike, at every supported rate (5–60). On top of that come, once each: the state at the race start, the final state flushed in the same tick as the classification (so the `result` never waits for a slot), and the state sent to a resuming socket alone.
+- The race never depends on publication, so results, envelopes and the event stream are unchanged; `RULES_VERSION` stays. The browser draws run-on cars at the newest state 20 times a second; each is about 0.67 s of race (8× speed), beyond the interpolation's 2-unit snap distance, so they step rather than slide, which they did not do before at 264 a second.
+- Measured on the issue's fixture (production `RoomManager`, 10 ms ticks, Node 26 on the build host, 256 KiB/s modeled drain; 2 or 3 humans finished by `Race.finishCar`, AI racing on), before → after: run-on states per client in any 1 s 267 → 21, run-on traffic 1,210–1,215 → 92 KiB/s per client, peak queued 257–260 KiB (closed 4008 slow) → 9.5 KiB (no close), every client received the result 0 → 1 time; mean tick cost in the run-on 0.31–0.52 → 0.20–0.36 ms. A 3 s stall's catch-up: 80 → 21 states in the next second. The final classification and the full event stream were identical before and after.
+- At 60 Hz the ordinary stream alone is about 245 KiB/s per client (276 KiB/s in the run-on, whose snapshots are slightly larger), so a 256 KiB/s link is marginal at that setting whatever the phase; it stayed connected over the measured run-on with up to 161 KiB queued.
 - The finish window is 90 s with two or more humans and 120 s for solo. The race time limit is 1200 s. Both bound every race.
 
 ## Result envelope
