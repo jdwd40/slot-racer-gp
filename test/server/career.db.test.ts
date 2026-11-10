@@ -90,7 +90,8 @@ describe.skipIf(!URL)('PostgreSQL: career points, award ledger, personal bests',
     return ((await r.json()) as { stats: CareerStats }).stats;
   };
   const socket = async (cookie: string): Promise<OnlineClient> => {
-    const c = new OnlineClient(base.replace('http', 'ws') + '/ws', WebSocket as unknown as SocketCtor, { headers: { origin: ORIGIN, ...(cookie ? { cookie } : {}) } });
+    // the race checks read every message a client got, so history is opted in (#50: the browser records none)
+    const c = new OnlineClient(base.replace('http', 'ws') + '/ws', WebSocket as unknown as SocketCtor, { headers: { origin: ORIGIN, ...(cookie ? { cookie } : {}) } }).recordHistory();
     await c.connect();
     return c;
   };
@@ -265,6 +266,8 @@ describe.skipIf(!URL)('PostgreSQL: career points, award ledger, personal bests',
     const awardsOf = (c: OnlineClient) => c.received.filter((m): m is Extract<ServerMsg, { t: 'awards' }> => m.t === 'awards').map((m) => m.awards);
     await Promise.all(cs.map((c) => c.wait((m) => m.t === 'awards' && m.awards.sync === 'saved', 120_000)));
     cs.forEach((c) => { c.onMessage = null; c.stopHeartbeat(); });
+    // the history checks below need every message: the opt-in cap (#50) dropped none
+    for (const c of cs) expect(c.rx.dropped).toBe(0);
     expect(contention && !!dqId).toBe(true);
     const env = rm.result!;
     expect(env.classification!.find((s) => s.id === dqId)).toMatchObject({ status: 'dq', dqReason: 'stopGo', pos: null });
