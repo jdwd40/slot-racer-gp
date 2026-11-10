@@ -254,6 +254,15 @@ The production unit runs Node with `--max-old-space-size=96`, `MemoryMax=256M` (
 
 - **Idle:** RSS 75–84 MB, heap about 13 MB.
 - **At the cap, 6 rooms × 4 humans racing for 60 s** (24 sockets, 20 state messages a second each): RSS peak 98.7 MB, heap 16 MB, **9.1% of one core**, worst tick 2.1 ms, about 84 KB/s per client (about 2 MB/s, or 16 Mbit/s, in total).
+- **Tick percentiles (#54).** Same setup, rebuilt at `bda6285` (Node 26.7.0, PostgreSQL 18, 4-vCPU shared build host, production mode, `--max-old-space-size=96`). `ticks` are the tick work, `lag` the tick timer's lateness. The polled decayed `tickMaxMs` (the old `worstTickMs`) is shown for comparison.
+
+  | Workload | Duration | Ticks | p50 / p95 / p99 / max (ms) | Lag p99 / max (ms) | CPU | RSS peak | Old `worstTickMs` |
+  | --- | --- | --- | --- | --- | --- | --- | --- |
+  | 6 × 4 humans, throttle rhythm, 24 clients | 60 s | 5,853 | 0.66 / 1.22 / 1.72 / 4.7 | 1.4 / 24.2 | 9.5% | 99 MB | 2.6 |
+  | 6 × 4 humans, bot drivers to the finish, 24 clients (6 completed results stored) | 237 s | 23,119 | 0.66 / 1.12 / 1.45 / 9.9 | 1.4 / 14.8 | 9.7% | 119 MB | 4.8 |
+  | 6 × (2 humans + 2 AI): first human finishes, the other retires, the finisher watches the AI run-on and classification (6 results) | 204 s | 19,856 | 0.61 / 1.12 / 1.58 / 5.2 | 1.4 / 12.3 | 8.5% | 127 MB | 5.2 |
+
+  Commands: `scripts/load-check.mjs` with `--rooms 6 --humans 4 --seconds 60`, then `--drive --until-results`, then `--humans 2 --ai-fill --drive --pace 1.15 --retire-on-finish --until-results` (`--pid`, server with `SLOTRUSH_ROOMS_PER_IP=6`, `SLOTRUSH_MAX_CONNECTIONS_PER_IP=24`, `SLOTRUSH_ROOM_CREATES=1000`). Percentiles are bucket upper bounds (at most ~9% high). The maxima are exact but may include up to 60 s before each run (setup, or the previous run's departures). RSS start was 86, 101 and 112 MB: the three ran in one process. The bot drives a little slower than the AI, so the third run uses `--pace 1.15` so that a human finishes first. **These are diagnostics from a shared build host, not a certification of the production VPS or of browser hardware** (that is #4).
 - **What this supports:** the cap of 6 rooms and 24 humans fits under the 150 MB RSS target and the 256 MB limit with headroom. Even if the shared vCPU is three times slower than the build host, 6 racing rooms need about 30% of a core against a 60% quota. Bandwidth is the first constraint to watch. Lower `SLOTRUSH_SNAPSHOT_HZ` to 15 or 10 to cut it proportionally, or raise the cap only after measuring on the host.
 - **Hashing:** each Argon2id hash uses 19 MiB. Hashes run one at a time, with `UV_THREADPOOL_SIZE=2`.
 
