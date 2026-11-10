@@ -16,7 +16,7 @@ An authoritative server for private rooms of up to four human drivers, plus serv
   - Three existing tests had been pushing lane switches into the shared circuit-1 context. That change leaked into every later race in the same test file. They now use a private copy (`addSwitch` in `test/helpers.ts`).
 - **The race core gained two things.** These are additive, and the browser game's behaviour is unchanged:
   - `RaceOpts.runOn: 'live'`: once every human is terminal, the AI field keeps stepping normally. There is no 240 s synchronous run-out (which measured 330 ms of blocked event loop). The server runs this run-on at 8 steps per tick.
-  - `Race.retire(id)`: DNF `retired`, or DQ `deadline` if a service breach is latched, so leaving never escapes a DQ.
+  - `Race.retire(id)`: DNF `retired`, or DQ `deadline` if a service breach is latched, so leaving never escapes a DQ. Since rules `race-core-2026.11.2` (#44) the retired car also leaves the track; see *Disconnects, grace and retirement*.
 - **Shared protocol and client.** `src/net/protocol.ts` holds the message types, limits and validator. `src/net/client.ts` is a client that takes either the browser `WebSocket` or the `ws` package. The headless test clients, the smoke check and the browser's online session (`src/net/session.ts`) use it.
 
 ## Rooms, seats and races
@@ -60,7 +60,13 @@ An authoritative server for private rooms of up to four human drivers, plus serv
   - Lap progress, service debts, penalties and eligibility are race state, so a resume never resets them.
   - Control and action numbering continues: a replayed sequence number is refused.
   - A newer connection supersedes the old one, which is closed with code 4001.
-- **Expiry.** In a race, the car is retired (DNF `retired`, or DQ `deadline` with a latched breach) and the seat can no longer be resumed (`expired`). Outside a race, the seat is freed.
+- **Expiry.** In a race, the car is retired (DNF `retired`, or DQ `deadline` with a latched breach) and the seat can no longer be resumed (`expired`). Outside a race, the seat is freed. Leaving a race on purpose retires the car the same way.
+- **A retired car leaves the track** (rules `race-core-2026.11.2`, #44). Before, nobody drove it but the AI that drives a finished car's cool-down lap took it over, so it kept circulating at about 10 m/s for the rest of the race.
+  - Nobody drives it: both pedals are released and it coasts to a stop in its lane (under 3 s from top speed). It is still a car on the slot while it rolls, so contact with it is real, but it is never judged as an offence.
+  - Once it is at rest it is parked in its own bay: mode `off` (as for a de-slot) with `off` placing it in the bay, `v` 0. Collisions, the AI's following, pit traffic, lane-change and merge clearance and the squeeze queue all ignore an `off` car, so the cars behind drive through the spot where it stopped. It stays parked through the run-on and the end of the race.
+  - In its bay, on the grid (retired during the countdown) or under tow it is parked at once. De-slotted, it is parked when it lands instead of being put back on the slot.
+  - The classification is unchanged: DNF `retired` (or DQ `deadline`), ordered among the DNFs by the distance it had covered (`u` is kept).
+  - Snapshots show it as such (`mode: 'off'`, `v: 0`, `off` in the bay). The browser mirror draws it parked in the bay; the wire format is unchanged.
 - **Slow sockets.** A socket with more than `SLOTRUSH_SEND_BUFFER_MAX` (256 KB) queued is closed (4008) and goes into its grace period. A slow client never buffers without limit.
 
 ## Protocol v1
@@ -103,7 +109,7 @@ The protocol is JSON text over WebSocket at `/ws`. The first client message must
 - **Origin and connections.** The `Origin` header must exactly match `SLOTRUSH_ALLOWED_ORIGINS` for WebSocket upgrades (otherwise 403 before the upgrade) and for `/api` POSTs. The path must be `/ws` (otherwise 404). Connections are capped in total and per client address (otherwise 503). The client address is `X-Real-IP` only when the TCP peer is loopback (Nginx).
 - **Ordering.** Server ticks and server timestamps order everything. Over one connection (TCP), messages arrive in order. Across reconnects, the per-seat sequence numbers reject anything stale. All members of a room receive the same serialized bytes for every broadcast, so every client sees identical decisions (tested).
 
-Bump `PROTOCOL_VERSION` on any incompatible change. The browser enables online play only when `/api/health` reports exactly its protocol version. The rollout smoke check compares the server's protocol and rules with the build's `server-dist/protocol.json`. `RULES_VERSION` (`race-core-2026.11.1`) is recorded in every envelope. Bump it whenever a simulation change could change a result.
+Bump `PROTOCOL_VERSION` on any incompatible change. The browser enables online play only when `/api/health` reports exactly its protocol version. The rollout smoke check compares the server's protocol and rules with the build's `server-dist/protocol.json`. `RULES_VERSION` (`race-core-2026.11.2`) is recorded in every envelope. Bump it whenever a simulation change could change a result. History: `race-core-2026.11.1` first online rules; `race-core-2026.11.2` retired cars leave the track (#44).
 
 ## Timing and overload policy
 
