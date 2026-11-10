@@ -16,6 +16,7 @@ import type { RoomManager } from './rooms';
 import { PgSessionStore, type SessionAccount } from './sessionStore';
 import { makeScoring, type Scoring } from './career';
 import { careerStats } from './stats';
+import type { DurationStats } from './tickstats';
 
 export interface AppDeps {
   cfg: Config; log: Logger; manager: RoomManager; pool?: Pool | null;
@@ -123,12 +124,18 @@ export function createApp({ cfg, log, manager, pool = null, sessionCheckMs = SES
     req.on('error', reject);
   });
 
+  /** One tick statistic for health: the rolling window and process totals, plus the totals' buckets (for interval diffs). */
+  const durationReport = (d: DurationStats) => ({
+    unit: 'ms', windowS: d.windowMs / 1000, recent: d.recent().summary(), total: d.total.summary(), totalBuckets: d.total.buckets(),
+  });
+
   async function health(): Promise<{ status: number; body: Record<string, unknown> }> {
     let db: 'disabled' | 'ok' | 'down' | 'outdated' = 'disabled';
     if (pool) {
       try { db = (await schemaStatus(pool)).current ? 'ok' : 'outdated'; } catch { db = 'down'; }
     }
     const mem = process.memoryUsage();
+    const cpu = process.cpuUsage();
     const st = manager.stats();
     const ok = db === 'disabled' || db === 'ok';
     return {
@@ -137,7 +144,12 @@ export function createApp({ cfg, log, manager, pool = null, sessionCheckMs = SES
         ok, service: 'slotrush-server', version: cfg.version, protocol: PROTOCOL_VERSION, rules: RULES_VERSION, schema: SCHEMA_VERSION,
         accounts: !!accounts, profiles: !!accounts, career: !!accounts, db, scoring: scoring.version, pendingResults: pendingResults(), unsavedResults: unsavedResults(), uptimeS: Math.round((Date.now() - started) / 1000),
         rooms: st.rooms, roomCap: cfg.roomCap, racing: st.racing, humans: st.humans, connections: conns, maxConnections: cfg.maxConnections,
-        tickMaxMs: Math.round(manager.tickMaxMs * 10) / 10, rssMb: Math.round(mem.rss / 1048576), heapMb: Math.round(mem.heapUsed / 1048576),
+        // tickMaxMs keeps its historical name and meaning: the decayed recent-load signal admission uses (also tickLoadMs).
+        // It is not a peak; true peaks and percentiles are in `ticks` and `tickLag` (#54, docs/online-server.md)
+        tickMaxMs: Math.round(manager.tickLoadMs * 10) / 10, tickLoadMs: Math.round(manager.tickLoadMs * 1000) / 1000,
+        rssMb: Math.round(mem.rss / 1048576), heapMb: Math.round(mem.heapUsed / 1048576),
+        cpuUserMs: Math.round(cpu.user / 1000), cpuSystemMs: Math.round(cpu.system / 1000),
+        ticks: durationReport(manager.ticks), tickLag: durationReport(manager.tickLag),
       },
     };
   }

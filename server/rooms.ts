@@ -8,9 +8,15 @@ import type { Logger } from './log';
 import type { Scoring } from './career';
 import type { ResultSink } from './results';
 import { CreateQuota } from './quota';
+import { DurationStats } from './tickstats';
 import { Room, type Fail, type JoinOk, type Peer } from './room';
 
-export interface ManagerDeps { cfg: Config; log: Logger; sink: ResultSink; scoring?: Scoring; now?: () => number; seed?: () => number; }
+/**
+ * `now`: wall clock (ms) for rooms, races and the tick statistics' rolling window. `clock`: monotonic clock (ms) that times
+ * each tick's work and the tick timer's lateness; performance.now unless a test injects one (deterministic, no wall-time
+ * assertions).
+ */
+export interface ManagerDeps { cfg: Config; log: Logger; sink: ResultSink; scoring?: Scoring; now?: () => number; clock?: () => number; seed?: () => number; }
 
 /** Join/resume failures allowed per client address per minute (room codes are short; guessing must stay expensive). */
 const JOIN_FAILS_PER_MIN = 20;
@@ -23,14 +29,31 @@ export class RoomManager {
   private timer: NodeJS.Timeout | null = null;
   /** start() was called and shutdown() not since: the tick timer runs while this is set and at least one room exists */
   private enabled = false;
-  /** worst tick duration over the last health window (ms): how busy the loop is */
-  tickMaxMs = 0;
+  /**
+   * Recent-load signal (ms) for admission only: the largest tick, decayed by 2% per tick (a spike fades to under 2% of its
+   * size in 2 s of ticks). It is not a maximum over any interval, so reports use `ticks` (#54); /api/health still publishes
+   * it as `tickMaxMs` (its historical name) and `tickLoadMs`.
+   */
+  tickLoadMs = 0;
+  /**
+   * Tick work duration (ms): the time tick() spends pumping every room, measured with `clock`. Exact maxima and bounded
+   * histograms over the process lifetime and a rolling 50-60 s window (server/tickstats.ts, docs/online-server.md).
+   */
+  readonly ticks: DurationStats;
+  /** Tick timer lateness (ms): how much later than TICK_MS after the previous timer tick this one started (event-loop delay). */
+  readonly tickLag: DurationStats;
+  /** `clock` reading at the previous timer tick; null while the timer is stopped, so an idle gap is never counted as lag */
+  private lastTimerAt: number | null = null;
   readonly now: () => number;
+  private readonly clock: () => number;
   /** per-address and per-account room creation allowance (server/quota.ts) */
   readonly quota: CreateQuota;
 
   constructor(private deps: ManagerDeps) {
     this.now = deps.now ?? (() => Date.now());
+    this.clock = deps.clock ?? (() => performance.now());
+    this.ticks = new DurationStats(this.now);
+    this.tickLag = new DurationStats(this.now);
     const c = deps.cfg;
     this.quota = new CreateQuota({ perIp: c.roomsPerIp, perAccount: c.roomsPerAccount, creates: c.roomCreates, windowMs: c.roomCreateWindowS * 1000 }, this.now);
   }
@@ -70,7 +93,7 @@ export class RoomManager {
    */
   create(peer: Peer, o: { name: string; livery?: LiveryId; accountId: string | null; mode: Mode; settings: Partial<RoomSettings>; championship?: ChampionshipTag; ip?: string }): (JoinOk & { room: Room }) | Fail {
     if (this.rooms.size >= this.deps.cfg.roomCap) return { ok: false, code: 'unavailable', detail: 'room limit reached, try again later' };
-    if (this.tickMaxMs > 50) return { ok: false, code: 'overloaded', detail: 'server busy, try again later' };
+    if (this.tickLoadMs > 50) return { ok: false, code: 'overloaded', detail: 'server busy, try again later' };
     const keys = o.ip === undefined ? null : CreateQuota.keys(o.ip, o.accountId);
     const refused = keys && this.quota.check(keys);
     if (refused) { this.deps.log.info('room.create_refused', { code: refused.code, guest: !o.accountId }); return refused; }
@@ -125,21 +148,31 @@ export class RoomManager {
   /**
    * Run the tick timer only while it has rooms to pump. Restarting it needs no clock reset: rooms and races are timed from
    * their own wall timestamps (createdAt, baseWall), never from the interval between ticks, so an idle period is never
-   * caught up. Stopping it resets tickMaxMs, which can no longer decay without ticks, so it never blocks the next room.
+   * caught up. Stopping it resets tickLoadMs, which can no longer decay without ticks, so it never blocks the next room. The
+   * tick statistics are not reset: their totals span the process and their recent window ages out by wall time.
    */
   private syncTimer(): void {
     if (this.enabled && this.rooms.size > 0) {
-      if (!this.timer) this.timer = setInterval(() => this.tick(), TICK_MS);
+      if (!this.timer) this.timer = setInterval(() => this.onTimer(), TICK_MS);
     } else if (this.timer) {
       clearInterval(this.timer); this.timer = null;
-      this.tickMaxMs = 0;
+      this.tickLoadMs = 0;
+      this.lastTimerAt = null;
     }
+  }
+
+  private onTimer(): void {
+    const at = this.clock();
+    if (this.lastTimerAt !== null) this.tickLag.record(Math.max(0, at - this.lastTimerAt - TICK_MS));
+    this.lastTimerAt = at;
+    this.tick();
   }
 
   /** Pump every room once. */
   tick(): void {
-    const t0 = performance.now();
+    const t0 = this.clock();
     const now = this.now();
+    const pumped = this.rooms.size;
     for (const r of [...this.rooms.values()]) {
       try { r.pump(now); } catch (e) {
         // a fault in one room never stops the others: that room's race is aborted without a result and the room closed
@@ -147,8 +180,10 @@ export class RoomManager {
         try { r.abortAndClose('fault', now); } catch { this.forget(r); }
       }
     }
-    const dt = performance.now() - t0;
-    this.tickMaxMs = this.rooms.size ? Math.max(this.tickMaxMs * 0.98, dt) : 0;
+    const dt = this.clock() - t0;
+    // every tick that pumped rooms is recorded, including the one in which the last room closed
+    if (pumped) this.ticks.record(dt);
+    this.tickLoadMs = this.rooms.size ? Math.max(this.tickLoadMs * 0.98, dt) : 0;
   }
 
   /** Enable the tick loop; the timer itself starts with the first room and stops with the last. */

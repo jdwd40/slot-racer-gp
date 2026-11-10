@@ -123,8 +123,20 @@ Bump `PROTOCOL_VERSION` on any incompatible change. The browser enables online p
 - Race time advances in fixed `STEP` (1/60 s) steps owed by elapsed wall time. A tick runs at most `SLOTRUSH_MAX_CATCHUP_STEPS` (6) steps.
 - Time not yet simulated is a **backlog, never dropped**. Later ticks catch it up, up to 6× real time, and every car is stepped alike, so a stall delays the race for everyone equally and stays fair. `lagMs` is reported in every `state`.
 - If the backlog exceeds `SLOTRUSH_OVERLOAD_ABORT_MS` (5 s), the race is **aborted**. Its envelope has `outcome: "aborted"`, `abortReason: "overload"` and `classification: null`. No race time is skipped and no result is invented. Room lifetime expiry, server shutdown (SIGTERM) and room faults use the same aborted envelope.
-- New rooms are refused (`overloaded`) while the worst recent tick exceeds 50 ms, and (`unavailable`) at the room cap.
+- New rooms are refused (`overloaded`) while the decayed recent-load signal (`tickLoadMs`, see *Tick statistics*) exceeds 50 ms, and (`unavailable`) at the room cap.
 - Once every human is terminal, the AI run-on goes at 8 steps per tick. Nobody is waiting on it in real time.
+
+### Tick statistics
+
+`/api/health` reports what the tick loop costs (#54). Every figure is in milliseconds.
+
+- **What is timed.** `ticks` is the work of one tick: `RoomManager.tick()` pumping every room once (simulation steps, snapshots, broadcasts, finishes and result hand-off), measured with the monotonic clock. `tickLag` is the tick timer's lateness: how much later than 10 ms after the previous timer tick this one started. That is event-loop delay as the tick loop sees it, including about 1 ms of timer granularity. It is not counted across a stopped timer (no rooms), so an idle period is never lag.
+- **Windows.** Each has `recent` and `total`. `recent` is a rolling window of six 10 s slots of wall time: a sample stays in it for at least 50 s and at most 60 s (`windowS: 60`). `total` covers every sample since the process started and is never reset, so one reader (monitoring, a load check) cannot reset another's view. Neither is reset when the last room closes. `recent` empties on its own once 60 s pass with no ticks.
+- **Fields.** `count`, `maxMs` (the exact largest sample, never decayed or sampled), `p50Ms`, `p95Ms`, `p99Ms`, `meanMs` and `sumMs`. `totalBuckets` lists the non-empty histogram buckets of `total` as `[upperMs, count]`.
+- **Precision and cost.** Each window is a fixed histogram of 256 log buckets (8 per doubling, 1 µs to about 71 minutes). A percentile is reported as its bucket's upper bound, capped at the exact max. So it is never below the true value and at most about 9% above it. Memory is fixed at about 14 KiB per statistic, whatever the uptime. Recording a tick costs one `Math.log2` and a few array writes. Building the report costs a few thousand additions per health request.
+- **Interval reports.** Subtract two readings' `totalBuckets`, `count` and `sumMs` to get an interval's exact sample count, mean and percentiles (`scripts/tick-report.mjs`). Its max is the largest `recent.maxMs` read during the interval. With readings less than 50 s apart, those windows cover every tick in between, so a spike between two polls is in the next report. They can also cover up to 60 s before the first reading.
+- **`tickMaxMs` is not a peak.** It keeps its historical name and meaning: the largest tick, decayed by 2% a tick (a 20 ms tick reads 0.36 ms after 2 s of normal ticks). Admission uses it (above), and `tickLoadMs` reports the same value. Use `ticks.recent.maxMs` for the worst tick.
+- `cpuUserMs` and `cpuSystemMs` are the process's cumulative CPU time (`process.cpuUsage()`). Two readings give its CPU share over the interval.
 
 ### Snapshot rate
 
@@ -213,6 +225,7 @@ npm run dev                                 # game on :5173; /api and /ws are pr
 VITE_ONLINE=1 npm run dev                   # the same with the online gate enabled (it probes /api/health)
 npm run server:smoke -- http://127.0.0.1:8787                  # health, protocol, origin, hello, solo race, leave
 node scripts/load-check.mjs http://127.0.0.1:8787 --rooms 6 --humans 4 --seconds 60 --pid <pid>   # resource sample (one address: raise SLOTRUSH_MAX_CONNECTIONS_PER_IP to 24 and SLOTRUSH_ROOMS_PER_IP to 6 for that run)
+node scripts/load-check.mjs http://127.0.0.1:8787 --rooms 6 --humans 2 --ai-fill --drive --until-results --seconds 300 --pid <pid>   # the same through a whole race: human finishes, AI run-on, classification
 npm test                                    # includes room, protocol and WebSocket tests; DB tests skip without a database
 npm run test:db                             # starts a private PostgreSQL under .local-pg/ (port 55471) and runs the DB tests
 node scripts/local-pg.mjs start|stop|env    # that local cluster on its own
