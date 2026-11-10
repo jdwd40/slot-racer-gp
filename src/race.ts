@@ -151,6 +151,16 @@ export const PERSONAS: Record<PersonaId, Persona> = {
 
 export type Mode = 'grid' | 'race' | 'pitlane' | 'bayIn' | 'service' | 'bayOut' | 'off' | 'tow';
 
+/** A retired car's way off the track: rolling to a stop, then parked (see Race.retire()). null for every other car. */
+export type RetireState = 'coast' | 'parked' | null;
+/** `off.t` given to a parked retired car: past the crash tumble and screech, so it is drawn and heard as standing still */
+const PARKED_OFF_T = 2;
+/**
+ * Longest a retired car rolls before it is parked whatever its speed (simulation seconds). Unpushed it stops well inside this
+ * (under 3 s from VMAX), but a car held against it from behind on full throttle can keep it rolling for ever (#44 review).
+ */
+export const RETIRE_COAST_MAX = 4;
+
 export interface OffState { x: number; y: number; vx: number; vy: number; yaw: number; spin: number; t: number; z: number; vz: number; u0: number; lane: number; }
 
 export interface Car {
@@ -194,6 +204,13 @@ export interface Car {
   towSvc: boolean;
   /** the tow in progress started in the pit lane: the car is moved to the nearest free bay, never round a lap */
   towPit: boolean;
+  /**
+   * The car was retired (its driver left or never came back, see `retire()`): `coast` while it rolls to a stop with no one
+   * driving it, then `parked` in its own bay, off the racing line and out of collisions for the rest of the race.
+   */
+  retire: RetireState;
+  /** simulation seconds the retired car has been coasting (bounded by RETIRE_COAST_MAX) */
+  retireT: number;
   /** terminal result: finished means classified; dq and dnf are never classified */
   status: CarStatus;
   dqReason: DqReason | null;
@@ -464,7 +481,7 @@ export class Race {
         num: D.num, bayHome: g.di,
         u: this.T.FINISH_S + g.prog, v: 0, laneSide: g.side, change: null, laneReq: false, pitReq: false, pitPenaltyOnly: false, laneOverride: false,
         fuelReq: false, fuelDue: 0, sgDue: 0, sgDeferred: false, routeHold: -1, overAppr: -1, hiU: this.T.FINISH_S + g.prog,
-        svcBreach: null, towSvc: false, towPit: false, status: 'running', dqReason: null, dnfReason: null,
+        svcBreach: null, towSvc: false, towPit: false, retire: null, retireT: 0, status: 'running', dqReason: null, dnfReason: null,
         mode: 'grid', d: g.side * this.T.LANE_HALF, yawOff: 0, throttle: 0, brake: 0,
         fuel: 1, slip: 0, latRatio: 0, wobble: 0, off: null, recoverT: 0, towT: 0,
         bay: g.di, bayT: 0, serviceT: 0, penalty: 0, fuelAtBay: 0,
@@ -723,12 +740,15 @@ export class Race {
   /**
    * Retire one car now: its driver left the race or did not come back within the reconnect grace. Like the finish window, a
    * latched service breach is still a DQ (leaving never escapes one); anything else is DNF `retired`. The car is then a
-   * terminal car like any other. Returns false (and changes nothing) for an unknown or already terminal car.
+   * terminal car, and nobody drives it any more (not even the AI that drives a finished car's cool-down lap): it coasts to a
+   * stop and is then parked in its own bay, off the racing line and out of collisions (`stepCar`, `park`), so an abandoned car
+   * never circulates as an obstacle. Returns false (and changes nothing) for an unknown or already terminal car.
    */
   retire(id: DriverId): boolean {
     const c = this.car(id);
     if (!c || c.status !== 'running') return false;
     this.endService(c);
+    c.retire = 'coast'; c.retireT = 0;
     if (c.svcBreach) {
       c.status = 'dq'; c.dqReason = 'deadline';
       this.emit({ type: 'dq', car: c, reason: 'deadline' });
@@ -801,7 +821,8 @@ export class Race {
       if (n !== this.lights && this.t < this.goT) { this.lights = n; this.emit({ type: 'light', n }); }
       if (this.t >= this.goT) {
         this.lights = 0; this.phase = 'racing'; this.emit({ type: 'go' });
-        for (const c of this.cars) { c.mode = 'race'; c.graceT = PEN.grace; }
+        // a car retired on the grid is already parked in its bay and stays there
+        for (const c of this.cars) if (!c.retire) { c.mode = 'race'; c.graceT = PEN.grace; }
       }
     } else {
       this.raceTime += dt;
@@ -832,6 +853,9 @@ export class Race {
     c.graceT = Math.max(0, c.graceT - dt); c.pushedT = Math.max(0, c.pushedT - dt); c.cutT = Math.max(0, c.cutT - dt);
     c.defendCooldown = Math.max(0, c.defendCooldown - dt);
     if (c.human) { this.sgUpdate(c); this.reverseControl(c, dt, input); }
+    if (c.retire === 'parked') { c.v = 0; c.throttle = 0; c.brake = 0; return; }
+    if (c.retire) c.retireT += dt;
+    if (c.retire && this.parkable(c)) { this.park(c); return; }
     if (c.mode === 'off') { this.stepOff(c, dt); return; }
     if (c.mode === 'tow') { this.stepTow(c, dt); return; }
     if (c.mode === 'bayIn' || c.mode === 'service' || c.mode === 'bayOut') { this.stepBay(c, dt, input); return; }
@@ -849,7 +873,8 @@ export class Race {
         else if (err < -0.05) brkIn = 1;
         else thrIn = (COAST + DRAG * c.v * c.v) / (ACC * Math.max(0.05, 1 - c.v / VMAX) + COAST);
       } else if (c.human && !c.finished) { brkIn = input.down ? 1 : 0; thrIn = input.up && !input.down ? 1 : 0; }
-      else if (c.mode !== 'grid') { const a = this.ai(c, dt); thrIn = a.t; brkIn = a.b; }
+      // a retired car has no driver: both pedals stay released and it coasts to a stop (COAST + drag, under 3 s from VMAX)
+      else if (c.mode !== 'grid' && !c.retire) { const a = this.ai(c, dt); thrIn = a.t; brkIn = a.b; }
     }
     const rise = c.human ? 4.5 : c.persona.rise, fall = 9;
     c.throttle += Math.max(-fall * dt, Math.min(rise * dt, thrIn - c.throttle));
@@ -1019,7 +1044,8 @@ export class Race {
 
     // out of fuel: towed to a bay from the road, or from anywhere in the pit lane except standing in the box to serve the stop
     const dryPit = c.mode === 'pitlane' && !(c.sgOwed > 0 && this.pit.box === c.idx && Math.abs(this.T.gapS(s, this.T.PEN_S)) < this.T.PEN_HALF);
-    if (c.fuel <= 0 && (c.mode === 'race' || dryPit) && Math.abs(c.v) < 0.4) {
+    // (a retired car is never towed: it is parked instead once it stops)
+    if (c.fuel <= 0 && !c.retire && (c.mode === 'race' || dryPit) && Math.abs(c.v) < 0.4) {
       c.towPit = c.mode === 'pitlane'; c.sgLeave = false; c.sgServing = false;
       c.mode = 'tow'; c.towT = 0; c.lapValid = false; this.leaveSqueeze(c); c.laneReq = false; this.clearPitIntent(c);
       this.pit.releaseAll(c, 'terminal');
@@ -1392,7 +1418,8 @@ export class Race {
     if (o.z < 0) { o.z = 0; o.vz = Math.abs(o.vz) > 1.5 ? -o.vz * 0.35 : 0; }
     o.yaw += o.spin * dt; o.spin *= Math.exp(-2.2 * dt);
     c.v = 0;
-    if (o.t > 1.7) {
+    // a retired car is not put back: once it has landed it is parked instead (stepCar)
+    if (o.t > 1.7 && !c.retire) {
       // marshal returns the car to the slot just behind where it left
       const u = o.u0 - 1.6;
       const s = this.T.wrapS(u);
@@ -1403,6 +1430,32 @@ export class Race {
         if (c.human) this.pmsg(c, 'msg.backOn', 'info');
       }
     }
+  }
+
+  /**
+   * A retired car may leave the track now: at once when it is already standing out of the racing line's way (grid, bay, tow),
+   * once it has rolled to rest on the road or in the pit lane, and after a de-slot once it has landed (when the marshal would
+   * otherwise have put it back). In any case after RETIRE_COAST_MAX: a car pushed from behind may never come to rest by itself.
+   */
+  parkable(c: Car): boolean {
+    if (c.retireT >= RETIRE_COAST_MAX) return true;
+    if (c.mode === 'race' || c.mode === 'pitlane') return Math.abs(c.v) < 0.05;
+    if (c.mode === 'off') return !c.off || c.off.t > 1.7;
+    return true;
+  }
+
+  /**
+   * Take a retired car off the track for good, the way a de-slotted car leaves the slot (mode `off`, placed by `c.off`) but
+   * placed at rest in its own bay, which no other team ever uses. Every rule that looks at traffic (collisions, the AI's
+   * following, pit traffic, lane-change and merge clearance, the squeeze queue) already ignores an `off` car, so the cars
+   * behind drive through the spot where it stopped. `u` is kept: it is the distance the DNF classification orders by.
+   */
+  park(c: Car): void {
+    const p = this.T.point3(this.T.BAYS[c.bayHome], this.T.BAY_D);
+    c.off = { x: p.x, y: p.y, z: p.z, vx: 0, vy: 0, vz: 0, yaw: p.h, spin: 0, t: PARKED_OFF_T, u0: c.u, lane: -1 };
+    c.mode = 'off'; c.retire = 'parked'; c.v = 0; c.throttle = 0; c.brake = 0; c.change = null; c.slip = 0; c.wobble = 0; c.yawOff = 0;
+    c.bumpT = 0; c.recoverT = 0; c.towT = 0; c.latRatio = 0; c.squeezeHold = false; c.yielding = false; c.pitHold = false; c.exitHold = false;
+    this.leaveSqueeze(c); this.pit.releaseAll(c, 'terminal');
   }
 
   stepTow(c: Car, dt: number): void {
@@ -1665,6 +1718,7 @@ export class Race {
   /** Judge a fresh rear-end impact (rear closing on front at rel m/s) and attribute it. */
   judge(rear: Car, front: Car, rel: number): void {
     if (rear.mode !== 'race' || front.mode !== 'race') return;          // pit-lane shuffles don't count
+    if (rear.retire || front.retire) return;                               // nobody is driving a retired car, so no one is to blame
     if (Math.abs(rear.z - front.z) > 1) return;                            // different bridge levels (cannot touch anyway)
     if (rear.v < PEN.minSpeed) return;                                     // crawling / grid contact
     if (rear.graceT > 0 || front.graceT > 0 || rear.recoverT > 0 || front.recoverT > 0) return; // respawn / pit exit / start overlaps
