@@ -89,6 +89,12 @@ describe('FixedStepper', () => {
     expect(MAX_STEPS).toBeGreaterThan(Math.ceil(0.1 / STEP));
   });
 
+  it('runs a step when exactly one step of time has accumulated (#53)', () => {
+    const st = new FixedStepper();
+    st.frame(0, on, noop);
+    expect(st.frame(STEP * 1000, on, noop)).toBe(1);
+  });
+
   it('the first callback only sets the baseline', () => {
     expect(new FixedStepper().frame(123456, on, noop)).toBe(0);
   });

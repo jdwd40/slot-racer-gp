@@ -150,4 +150,18 @@ describe('client message history (#50)', () => {
     expect(c.received).toHaveLength(0);
     c.close();
   });
+
+  it('the opt-in cap boundary: exactly `cap` messages drops nothing, the next drops exactly the oldest (#53)', () => {
+    const { Ctor } = fakeSocket();
+    const c = new OnlineClient('ws://x', Ctor).recordHistory(HISTORY_DEFAULT_CAP);
+    const feed = c as unknown as { receive(raw: string): void };   // the socket path's decoder, without timers
+    for (let id = 0; id < HISTORY_DEFAULT_CAP; id++) feed.receive(JSON.stringify({ t: 'pong', id, now: 0 }));
+    expect(c.received).toHaveLength(HISTORY_DEFAULT_CAP);
+    expect(c.rx.dropped).toBe(0);
+    feed.receive(JSON.stringify({ t: 'pong', id: HISTORY_DEFAULT_CAP, now: 0 }));
+    expect(c.received).toHaveLength(HISTORY_DEFAULT_CAP);
+    expect(c.rx.dropped).toBe(1);
+    expect(c.received[0]).toMatchObject({ id: 1 });
+    expect(c.received.at(-1)).toMatchObject({ id: HISTORY_DEFAULT_CAP });
+  });
 });
