@@ -140,7 +140,8 @@ describe.skipIf(!URL)('PostgreSQL: migrations, accounts, sessions, admin reset a
 
   it('a WebSocket signs out with its session: logout and a new sign-in end it at once, a reset is caught on entry and while seated', async () => {
     const ws = async (cookie: string) => {
-      const c = new OnlineClient(base.replace('http', 'ws') + '/ws', WebSocket as unknown as SocketCtor, { headers: { origin: ORIGIN, cookie } });
+      // the goodbye is read back from the message history, which is opt-in (#50)
+      const c = new OnlineClient(base.replace('http', 'ws') + '/ws', WebSocket as unknown as SocketCtor, { headers: { origin: ORIGIN, cookie } }).recordHistory();
       await c.connect();
       return c;
     };

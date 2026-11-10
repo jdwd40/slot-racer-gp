@@ -28,6 +28,28 @@ export const WATCHDOG_IDLE_MS = 12000;
 export const KEEPALIVE_TICK_MS = 1000;
 export const SUSPEND_GAP_MS = 3000;
 
+/**
+ * Message history policy (#50). Keeping every decoded message (once capped at 20,000) cost ~4 KB of heap per four-car
+ * snapshot: 60-80 MB after ~15 min of racing, held across rematches, for nothing the page ever read. So:
+ * - By default (the browser, NetSession) no message is kept. `rx` counts what arrived and `latest` holds the newest message
+ *   of each type, so retention is one message per type however long the session runs.
+ * - A test or diagnostic opts in with `recordHistory()`. `received` then keeps the newest messages, never more than
+ *   HISTORY_MAX (oldest dropped first and counted in `rx.dropped`, so a consumer that needs a complete record can check it
+ *   lost nothing). It is never cleared by a reconnect or a rematch; `clearHistory()` empties it.
+ * Budget: default mode retains O(1), ~0 MB measured after 20,001 snapshots and rematches. HISTORY_DEFAULT_CAP covers the
+ * longest test race over real sockets (~2,250 messages) with margin, about 3.3 min of 20 Hz snapshots and ~17 MB of Node
+ * heap at four cars. HISTORY_MAX is the hard ceiling for any opt-in, ~35 MB.
+ */
+export const HISTORY_OFF = 0;
+export const HISTORY_DEFAULT_CAP = 4000;
+export const HISTORY_MAX = 8000;
+
+/** The protocol's server message types: per-type counters and `latest` only ever key on these, so they cannot grow. */
+const SERVER_TYPES: Record<ServerMsg['t'], true> = { welcome: true, joined: true, room: true, state: true, ack: true, nack: true, result: true, awards: true, pong: true, bye: true };
+
+/** Receive counters: kept in every mode, constant size. */
+export interface RxStats { total: number; byType: Partial<Record<ServerMsg['t'], number>>; dropped: number; }
+
 export class OnlineClient {
   ws: SocketLike | null = null;
   room: PublicRoom | null = null;
@@ -36,7 +58,13 @@ export class OnlineClient {
   private token: string | null = null;
   ctlSeq = 0; actSeq = 0;
   held = { up: false, down: false };
+  /** Decoded messages, oldest first: empty unless recordHistory() opted in (see the policy above). */
   readonly received: ServerMsg[] = [];
+  /** How many messages `received` may hold: HISTORY_OFF until recordHistory(). */
+  historyCap = HISTORY_OFF;
+  readonly rx: RxStats = { total: 0, byType: {}, dropped: 0 };
+  /** The newest message of each type (bounded by the number of message types). */
+  readonly latest: Partial<Record<ServerMsg['t'], ServerMsg>> = {};
   closed: { code: number; reason: string } | null = null;
   private waiters: { pred: (m: ServerMsg) => boolean; res: (m: ServerMsg) => void; rej: (e: Error) => void; timer: ReturnType<typeof setTimeout> }[] = [];
   private hb: ReturnType<typeof setInterval> | null = null;
@@ -53,6 +81,22 @@ export class OnlineClient {
   onClose: ((e: { code: number; reason: string }) => void) | null = null;
 
   constructor(private url: string, private Ctor: SocketCtor, private opts?: unknown, private now = () => Date.now()) {}
+
+  /**
+   * Opt in to keeping decoded messages in `received` (tests and diagnostics only; the browser never calls this). The cap is
+   * clamped to 0..HISTORY_MAX, and lowering it trims the oldest at once. Returns the client, for `new OnlineClient(...).recordHistory()`.
+   */
+  recordHistory(cap = HISTORY_DEFAULT_CAP): this {
+    this.historyCap = Math.max(HISTORY_OFF, Math.min(HISTORY_MAX, Math.floor(cap)));
+    this.trimHistory();
+    return this;
+  }
+  /** Empty the recorded history (counters and `latest` are kept). */
+  clearHistory(): void { this.received.length = 0; }
+  private trimHistory(): void {
+    const over = this.received.length - this.historyCap;
+    if (over > 0) { this.received.splice(0, over); this.rx.dropped += over; }
+  }
 
   /** Open the socket and complete the versioned hello. Rejects on a protocol mismatch. */
   async connect(version = PROTOCOL_VERSION): Promise<void> {
@@ -151,8 +195,9 @@ export class OnlineClient {
     let m: ServerMsg;
     this.lastRxAt = this.now();
     try { m = JSON.parse(s) as ServerMsg; } catch { return; }
-    this.received.push(m);
-    if (this.received.length > 20000) this.received.splice(0, 5000);
+    this.rx.total++;
+    if (Object.hasOwn(SERVER_TYPES, m?.t)) { this.rx.byType[m.t] = (this.rx.byType[m.t] ?? 0) + 1; this.latest[m.t] = m; }
+    if (this.historyCap > 0) { this.received.push(m); if (this.received.length > this.historyCap) { this.received.shift(); this.rx.dropped++; } }
     if (m.t === 'joined') { this.room = m.room; this.me = m.you; this.token = m.token; this.ctlSeq = Math.max(this.ctlSeq, m.ctlSeq); this.actSeq = Math.max(this.actSeq, m.actSeq); }
     if (m.t === 'room') this.room = m.room;
     if (m.t === 'joined' || (m.t === 'nack' && (m.ref === 'resume' || m.ref === 'join' || m.ref === 'create'))) this.answered = true;

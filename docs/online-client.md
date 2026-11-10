@@ -50,6 +50,11 @@ The title screen names them separately:
   - When the buffer runs dry, cars hold their last placement and never extrapolate.
   - The clock offset follows the fastest recent arrival. After a stall over 600 ms it re-anchors instead of drawing seconds behind.
   - No client prediction was added. The measured press-to-confirmation time on the protocol path is about 31 ms on loopback and 185 ms with 60 ms added each way plus jitter (see the evidence). That leaves the server simply authoritative.
+- **Message history (#50).** The client keeps no history of decoded server messages by default. Before #50 it kept up to 20,000 complete messages for tests only: about 60–80 MB of Node heap at four cars after ~15 minutes, still held after a rematch.
+  - Every mode keeps `rx` (total and per-type counts, plus `dropped`) and `latest`, the newest message of each protocol type. That is one message per type, however long the session runs.
+  - Tests and diagnostics opt in with `new OnlineClient(...).recordHistory(cap?)`. The browser (`NetSession`) never does. `received` then keeps the newest `cap` messages and drops the oldest one at a time, counting each in `rx.dropped`. The default cap is `HISTORY_DEFAULT_CAP` = 4,000, about 3.3 min of 20 Hz snapshots and ~17 MB of heap. Any request is clamped to `HISTORY_MAX` = 8,000 (~35 MB). The longest test race over real sockets uses about 2,250. Tests that read the whole history assert `rx.dropped === 0`.
+  - Lifecycle: the recorded history is never cleared by a reconnect or a rematch. `clearHistory()` empties it, and `recordHistory(HISTORY_OFF)` stops recording and clears it.
+  - Measured with forced GC on Node 26 (an in-process benchmark with the issue's reproduction: a seeded four-human race, 20,001 state messages through the socket path, then three rematch cycles of 2,000 snapshots each). Before: +25.5 MiB at 6,000 snapshots, +50.4 MiB at 12,000, +62.8 MiB at 20,001, and +66.9 to +79.3 MiB across the rematches. After, default mode: +0.7 MiB at every point, the same as with the array cleared. After, opt-in at the default cap: +17.3 MiB flat from 6,000 snapshots on. These are Node heap figures, not browser or phone measurements.
 - **Input.** The shared keyboard and touch layer (`DrivingInput`, `TouchPad`) is unchanged: multi-touch holds, pointer cancellation and fresh presses after a release.
   - Online, a change of held Throttle or Brake is sent at once, with a 250 ms heartbeat while racing. Taps (Lane, Pit, Defer) are numbered actions for this seat only.
   - Brake priority, deliberate reverse, automatic stop-and-go and bay service, and fresh Throttle after service are all applied by the server's race core, the same code that runs offline.
@@ -93,6 +98,7 @@ The title screen names them separately:
 | `test/server/netsession.test.ts` | Mirror equivalence, interpolation, a 4-browser-module race over real WebSockets, fifth refused, reconnect, reload, expiry, duplicate result, rematch, connected solo, release |
 | `src/net/netwait.ts` | `NetWaitGuard`: the pending card's 30 s no-news timeout, lost-contact and room-closed views (no DOM) |
 | `test/watchdog.test.ts` | Keepalive and watchdog with fake timers and a socket that goes silent without closing: lobby and race thresholds, resume, slow resume from a race, expiry, timers cleared, own suspension, the pending card's timeout over a real session |
+| `test/history.test.ts` | Message history policy (#50): nothing recorded by default or by `NetSession`, opt-in cap, overflow, clamp and reset, over 20,001 four-car snapshots and three rematches |
 | `test/netwait.test.ts` | `NetWaitGuard` with a fake session and clock: timeout, resume, refusal, result in time, no doubled reconnect, suspension |
 | `scripts/online-check.mjs`, `scripts/qa-server.ts` | Browser checks with independent contexts against the real server code (test tooling only) |
 

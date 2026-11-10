@@ -115,7 +115,8 @@ describe.skipIf(!URL_)('PostgreSQL interruption during an active race (server pr
     const accountId = ((await reg.json()) as { account: { id: string } }).account.id;
     expect(await health()).toMatchObject({ status: 200, ok: true, db: 'ok', pendingResults: 0 });
 
-    const c = new OnlineClient(base.replace('http', 'ws') + '/ws', WebSocket as unknown as SocketCtor, { headers: { origin: ORIGIN, cookie } });
+    // read back below from the message history, which is opt-in (#50)
+    const c = new OnlineClient(base.replace('http', 'ws') + '/ws', WebSocket as unknown as SocketCtor, { headers: { origin: ORIGIN, cookie } }).recordHistory();
     await c.connect();
     const j = await c.request({ t: 'create', name: 'x', mode: 'solo', settings: { track: 'circuit-1' }, expectAccount: accountId });
     if (j.t !== 'joined') throw new Error(JSON.stringify(j));

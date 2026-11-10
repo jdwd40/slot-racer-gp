@@ -32,11 +32,14 @@ afterAll(async () => { mgr.shutdown(); await app.close(); });
 
 const Ctor = WebSocket as unknown as SocketCtor;
 async function client(origin = ORIGIN): Promise<OnlineClient> {
-  const c = new OnlineClient(base.replace('http', 'ws') + '/ws', Ctor, { headers: { origin } });
+  // these checks read every message a client got, so history is opted in (#50: the browser records none)
+  const c = new OnlineClient(base.replace('http', 'ws') + '/ws', Ctor, { headers: { origin } }).recordHistory();
   await c.connect();
   return c;
 }
-const states = (c: OnlineClient) => c.received.filter((m): m is Extract<ServerMsg, { t: 'state' }> => m.t === 'state');
+/** The complete message history: fails if the opt-in cap ever dropped anything an assertion would read. */
+const history = (c: OnlineClient) => { expect(c.rx.dropped).toBe(0); return c.received; };
+const states = (c: OnlineClient) => history(c).filter((m): m is Extract<ServerMsg, { t: 'state' }> => m.t === 'state');
 const lastSnap = (c: OnlineClient): RaceSnapshot | null => (states(c).at(-1)?.snap as RaceSnapshot) ?? null;
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -71,7 +74,7 @@ async function startRace(cs: OnlineClient[]): Promise<void> {
   cs[0].send({ t: 'start' });
   await Promise.all(cs.map((c) => c.wait((m) => m.t === 'room' && m.room.state === 'race')));
 }
-const results = (c: OnlineClient) => c.received.filter((m): m is Extract<ServerMsg, { t: 'result' }> => m.t === 'result');
+const results = (c: OnlineClient) => history(c).filter((m): m is Extract<ServerMsg, { t: 'result' }> => m.t === 'result');
 const decisive = (c: OnlineClient) => states(c).flatMap((s) => s.ev as { type: string }[]).filter((e) => ['finish', 'dq', 'dnf', 'final', 'served', 'offence', 'breach', 'lap'].includes(e.type));
 
 describe('headless clients race over WebSockets', () => {
@@ -236,19 +239,19 @@ describe('protocol and access checks', () => {
     expect(await c.request({ t: 'resume', room: '00000000-0000-0000-0000-000000000000', participant: 'p_x', token: 'nope' })).toMatchObject({ code: 'expired' });
     // flood: well past the burst, for long enough to collect several strikes
     for (let i = 0; i < 6; i++) { for (let k = 0; k < 400; k++) c.send({ t: 'ping', id: k }); await sleep(1050); if (c.closed) break; }
-    expect(c.received.some((m) => m.t === 'nack' && m.code === 'rate')).toBe(true);
+    expect(history(c).some((m) => m.t === 'nack' && m.code === 'rate')).toBe(true);
     expect(c.closed?.code).toBe(1008);
   }, 20_000);
 
   it('the reconnect token goes only to its owner: never in room broadcasts, race state or logs; forged resumes are refused', async () => {
     const { cs, id } = await room(2);
     const cred = cs[1].credential()!;
-    const joined = cs[1].received.find((m) => m.t === 'joined')!;
+    const joined = history(cs[1]).find((m) => m.t === 'joined')!;
     expect(JSON.stringify(joined)).toContain(cred.token);
     await startRace(cs);
     await sleep(300);
-    for (const c of cs) for (const m of c.received) if (m.t !== 'joined') expect(JSON.stringify(m)).not.toContain(cred.token);
-    expect(JSON.stringify(cs[0].received)).not.toContain(cred.token);
+    for (const c of cs) for (const m of history(c)) if (m.t !== 'joined') expect(JSON.stringify(m)).not.toContain(cred.token);
+    expect(JSON.stringify(history(cs[0]))).not.toContain(cred.token);
     for (const l of log.lines) { expect(l).not.toContain(cred.token); expect(l).not.toContain(cs[0].credential()!.token); }
     const thief = await client();
     expect(await thief.request({ t: 'resume', room: id, participant: cred.participant, token: cs[0].credential()!.token })).toMatchObject({ code: 'forbidden' });
@@ -278,7 +281,7 @@ describe('protocol and access checks', () => {
     const r = await back.request({ t: 'resume', ...cred });
     expect(r).toMatchObject({ t: 'joined', resumed: true, you: me });
     expect((r as { ctlSeq: number }).ctlSeq).toBe(seq);
-    expect(back.received.some((m) => m.t === 'state')).toBe(true);   // current at once
+    expect(history(back).some((m) => m.t === 'state')).toBe(true);   // current at once
     back.send({ t: 'ctl', seq, up: true, down: false });              // the old numbering continues: a replay is refused
     expect(await back.wait((m) => m.t === 'nack' && m.ref === 'ctl')).toMatchObject({ code: 'duplicate' });
     back.setHeld(true, false);
@@ -309,7 +312,7 @@ describe('protocol and access checks', () => {
     // joined, state and result go out back to back, so the result may be in before a wait could be set up
     const replay = (results(back)[0] ?? await back.wait((m) => m.t === 'result', 2000)) as Extract<ServerMsg, { t: 'result' }>;
     expect(replay.envelope).toEqual(missed.envelope);
-    const order = back.received.map((m) => m.t).filter((t) => t === 'joined' || t === 'state' || t === 'result');
+    const order = history(back).map((m) => m.t).filter((t) => t === 'joined' || t === 'state' || t === 'result');
     expect(order).toEqual(['joined', 'state', 'result']);
     back.close(); cs.forEach((c) => c.close());
   }, 120_000);
