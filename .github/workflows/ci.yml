@@ -66,8 +66,9 @@ jobs:
           overwrite: false
 
   # The online room server: built, tested on PostgreSQL 17, smoke-checked and packaged as a checked artifact. It needs no
-  # secrets (the database is a throwaway service container) and the static deploy below does not depend on it. Nothing
-  # here deploys the server: production activation is the owner's manual runbook (docs/online-server.md).
+  # secrets (the database is a throwaway service container). The static deploy below waits for it (#55): an online-enabled
+  # client never ships for a commit whose server/database/package/smoke checks did not pass. Nothing here deploys the
+  # server: server rollout is the owner's manual runbook (docs/online-server.md).
   server:
     name: Room server build, PostgreSQL 17 tests, smoke check and package
     runs-on: ubuntu-latest
@@ -148,8 +149,11 @@ jobs:
 
   deploy:
     name: Deploy checked static artifact
-    needs: check
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    # Both validation jobs must succeed for this exact commit (#55). success() is false when any needed job failed, was
+    # cancelled or was skipped, and the explicit result checks keep that true if this condition is ever edited. Never add
+    # always(), failure(), cancelled() or continue-on-error to this gate (test/ciworkflow.test.ts checks it). PRs never deploy.
+    needs: [check, server]
+    if: success() && needs.check.result == 'success' && needs.server.result == 'success' && github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:

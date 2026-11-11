@@ -153,8 +153,17 @@ are outside this site's scope and must not be silently cleaned up.
 4. Package `dist/` plus a SHA256 file manifest and source commit.
 5. Upload the immutable artifact for 30 days; fail if missing.
 
-Only a **push to main** with a successful prerequisite check job can deploy. PRs
-never get deployment secrets. The deploy job downloads the exact artifact ID
+Only a **push to main** can deploy, and only when **both** prerequisite jobs
+succeeded for that exact commit: `check` (client) and `server` (room server build,
+PostgreSQL 17 tests, packaging and the packaged smoke check). The deploy job has
+`needs: [check, server]` and `if: success() && needs.check.result == 'success' &&
+needs.server.result == 'success' && github.event_name == 'push' && github.ref ==
+'refs/heads/main'` (#55). A failed, cancelled or skipped prerequisite makes
+`success()` false, so the deploy job is skipped and production is untouched; no job
+or step uses `continue-on-error`, `failure()` or `cancelled()`, and the only
+`always()` is the deploy job's final SSH-key cleanup. `test/ciworkflow.test.ts`
+(in `npm test`) checks all of this and evaluates the condition for every
+success/failure/cancelled/skipped combination. PRs never get deployment secrets. The deploy job downloads the exact artifact ID
 output by that check job, not a latest artifact or another run. It checks source
 commit/archive SHA256, fails before switching if public HTTPS is unavailable,
 streams the tarball to the forced command, then checks public REVISION, artifact

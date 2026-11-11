@@ -2,7 +2,7 @@
 
 An authoritative server for private rooms of up to four human drivers, plus server-hosted solo, championship-round and practice sessions. The server owns one race simulation per room. Clients send held controls and numbered actions and receive the race state. The browser lobby and online race screens are described in [online-client.md](online-client.md). Accounts exist (username and password, no email). Awards and cloud statistics are not implemented.
 
-**Status.** Everything is built and verified locally ([evidence](online-evidence.md)). Production multiplayer is **not active**. Nothing was installed on any host. The deployed static client keeps online play off. The owner activates it with the [runbook](#production-activation-runbook-owner) below. It stays unavailable until the real endpoint passes the health and connection checks.
+**Status.** Production multiplayer is **active** on `https://slotrush.jdwd40.com`: the owner ran the [activation runbook](#production-activation-runbook-owner) below, and the deployed static client is built with `VITE_ONLINE=1`. Local verification is in the [evidence](online-evidence.md). The static client is deployed automatically by CI; the room server is upgraded by hand with the [release procedure](#release-procedure-owner). Green CI is not four-player browser or accelerated-hardware validation; that is #4.
 
 ## Architecture
 
@@ -287,8 +287,8 @@ The production unit runs Node with `--max-old-space-size=96`, `MemoryMax=256M` (
   - starts the packed release in production mode against a migrated database and runs the smoke check
   - uploads `slotrush-server-<sha>` (tarball and SHA-256) for 30 days
 
-  The existing static `check` and `deploy` jobs are unchanged and do not depend on it. **No CI job deploys the server.**
-- **Client gate:** the deployed static build has no `VITE_ONLINE`, so online play is off and the page never requests `/api` or `/ws` (tested in the browser). An online-enabled build (`VITE_ONLINE=1`) still enables nothing until `/api/health` answers `ok` with the client's exact protocol version. The bundle contains no secret: the endpoint is the page's own origin.
+  The static `deploy` job needs both `check` and `server` (#55): if this job fails, is cancelled or is skipped, the static client for that commit is not deployed ([deployment.md](deployment.md#ci-artifact-chain)). **No CI job deploys the server.**
+- **Client gate:** the deployed static build sets `VITE_ONLINE=1`. It still enables nothing until `/api/health` answers `ok` with the client's exact protocol version. A build without `VITE_ONLINE` keeps online play off and never requests `/api` or `/ws` (tested in the browser); that is the client rollback. The bundle contains no secret: the endpoint is the page's own origin.
 
 ### Production activation runbook (owner)
 
@@ -370,6 +370,41 @@ These steps run as an administrator on the site host (`ssh app-vps`). None of th
 - A restart aborts races in progress. They get aborted envelopes, never results. Restart when `/api/health` shows `racing: 0` if possible.
 - Re-run steps 8 and 10.
 - If the protocol version changed, deploy the matching static client in the same window. Until then, the health check keeps an older client's online play off.
+
+### Release procedure (owner)
+
+A release is one commit on `main`. Two boundaries:
+
+- **Automatic (CI):** the static client. A push to `main` deploys the checked static artifact only after both the `check` and `server` jobs succeeded for that commit. The deploy job verifies the public `REVISION` and every built file and rolls itself back if verification fails ([deployment.md](deployment.md#ci-artifact-chain)).
+- **Manual (owner):** the room server and its database. CI only builds, tests, smoke-checks and packages `slotrush-server-<sha>`. Nothing installs it, migrates the database or restarts the service except the owner, with *Upgrades* above.
+
+Before declaring a release ready:
+
+1. **CI for the exact commit.** `gh run list -R jdwd40/slot-racer-gp --branch main --commit <sha>` then `gh run view <run id> -R jdwd40/slot-racer-gp`. All three jobs (`check`, `server`, `deploy`) must be green; a skipped `deploy` means the static client was not released.
+2. **Compatibility of client, server and database.** The client and server of one commit are built from the same `src/net/protocol.ts` (`PROTOCOL_VERSION`, `RULES_VERSION`) and `server/migrations.ts` (`SCHEMA_VERSION`, the last migration id). Against the server version that is live (`version` from `/api/version`), check what changed:
+
+   ```bash
+   git diff <live server version> <sha> -- src/net/protocol.ts server/migrations.ts server/
+   ```
+
+   - Nothing under `server/`, `src/net/` or the shared race core changed: the live server may stay. Its `protocol`, `rules` and `schema` must still equal this commit's.
+   - Server code changed: upgrade it from this commit's `slotrush-server-<sha>` artifact (*Upgrades*). Its `server-dist/VERSION` must be `<sha>`, and `server-dist/protocol.json` must hold this commit's protocol and rules.
+   - `PROTOCOL_VERSION` changed: the new static client offers local play only until the server is upgraded, and older open pages lose online play after it; upgrade the server in the same window.
+   - `RULES_VERSION` changed: results and personal bests start a new rules set ([career.md](career.md)); upgrade the server so online races use the new rules.
+   - A new migration: back up the database and run `migrate` before restarting. A server refuses to start on a schema it does not match (exit 78).
+3. **Public verification** (read-only, from any machine with the release checked out):
+
+   ```bash
+   curl -fsS https://slotrush.jdwd40.com/REVISION        # must be the full <sha>
+   curl -fsS https://slotrush.jdwd40.com/api/version     # server version, protocol, rules, schema
+   curl -fsS https://slotrush.jdwd40.com/api/health      # "ok":true, "db":"ok", pendingResults 0, unsavedResults 0
+   node scripts/server-smoke.mjs https://slotrush.jdwd40.com --origin https://slotrush.jdwd40.com --expect server-dist/protocol.json
+   ```
+
+   Run the smoke check after `npm run build:server` at `<sha>`, so `--expect` is this commit's protocol and rules. Every line must be `PASS`. `/api/version` `schema` must be this commit's `SCHEMA_VERSION`, and `protocol` the value in `<sha>`'s `src/net/protocol.ts`. Then open the site on a desktop browser: **Online** must appear under the title buttons.
+4. **Record** in the PR, issue or release note: the static `REVISION`; the CI run id; the server `version`, `protocol`, `rules` and `schema`; `db`, `pendingResults` and `unsavedResults`; the commands, their UTC time and results; and what was not checked. For example, a read-only check on 11 November 2026 found `REVISION` and server `version` both `1297f72fc9b1fcb0e9701598f1e012f1e38f1e07`, protocol 1, rules `race-core-2026.11.2`, schema `003_career_awards_bests`, `db` ok, no pending or unsaved results.
+
+**What green CI does not prove.** CI runs type checks, unit and headless tests, PostgreSQL 17 tests, the builds and a smoke check of the packaged server against a throwaway database. It does not run a four-player game in real browsers, phones or tablets, and it does not measure frame time on accelerated hardware. Those are the final integrated validation in #4 ([validation.md](validation.md#remaining-hardware-validation)). Declaring or tagging 1.0 also requires the hardening fixes #48–#55 to be merged and released, and #4 to be completed. If no suitable browser or device is available, the hardware and frame-time items stay explicitly outstanding and 1.0 is not declared on CI alone.
 
 ### Rollback
 
