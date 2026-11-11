@@ -197,6 +197,8 @@ export class Hud {
     const live = !practice && !p.finished;
     const held = live && p.routeHold >= 0 && p.routeHold === race.apprLap(p);
     if (live && p.svcBreach) chips.push(`<span class="chip red blink">✕ ${t('hud.breach')}</span>`);
+    // last chance (#65): missing this lap's entrance means a DQ. Put first, so on a crowded phone HUD it is never the one wrapped last
+    if (live && race.lastChance(p)) chips.unshift(`<span class="chip red blink last-chance">⚠ ${t('hud.lastChance')}</span>`);
     const dueChip = (lap: number): string => { const d = race.dueState(p, lap); return d === 'none' ? '' : ` · ${t(`hud.dueChip.${d}`)}`; };
     const dueText = (lap: number): string => { const d = race.dueState(p, lap); return d === 'none' ? '' : t(`hud.due.${d}`); };
     if (p.sgOwed > 0 && !p.finished) chips.push(`<span class="chip red ${p.svcBreach ? '' : 'blink'}">■ ${t('hud.sgChip')}${dueChip(p.sgDue)}</span>`);

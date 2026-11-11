@@ -34,6 +34,30 @@ A **breach** (`svcBreach`) is latched at once, announced immediately (`msg.breac
 
 Service can be completed at any time up to the deadline crossing, including after reversing back to the entrance before the line. Serving early is always allowed.
 
+## Last-chance warning
+
+A compulsory stop is on its **last chance** (`Race.lastChance()`) when it is due on the lap being raced and missing that lap's entrance would latch the breach: a committed fuel stop due this lap, or a stop-and-go due this lap whose deferral is used or that is due on the final lap. It is off in practice, after the flag, for a car that is no longer running (retired or disqualified) and once a breach is latched. It is read-only and uses only fields every online snapshot carries, so the mirror's HUD shows the same thing online as offline. The rules, deadlines and results did not change (`RULES_VERSION` is unchanged). Only messages were added.
+
+While it holds, the HUD shows a red blinking `⚠ PIT THIS LAP — or DQ` chip (its blink never fades below 80 % opacity, unlike other blinking chips, so it stays readable on phones), first in the chip row, on the keyboard and touch HUDs alike. It goes as soon as the stop is served, and is replaced by `DEADLINE MISSED · DQ AT FLAG` if the breach is latched.
+
+Every path to a missed-deadline DQ gets a warning that names the DQ on the due lap, at the timing line, before the entrance that decides it. That is the length of the lap minus 20 m, about 13 s at race pace on Clubman Park:
+
+| Path | Before the due lap | At the line starting the due lap | Space on the due lap | At the line ending it, if missed |
+| --- | --- | --- | --- | --- |
+| Stop-and-go missed on its first lap (automatic deferral) | Offence toast with its deadline | `msg.sgLastLap`, or `msg.sgLastLapFinal` on the final lap | `msg.routeInsideDq` | `msg.breachSg` |
+| Stop-and-go deferred with N | `msg.deferred` ("you MUST pit next lap or be disqualified") | `msg.pitThisLap` | `msg.routeInsideDq` | `msg.breachSg` |
+| Fuel request driven past on the override (a committed fuel stop) | `msg.fuelOverride` at that entrance | `msg.pitThisLap` | `msg.routeInsideDq` | `msg.breachFuel` |
+| Fuel request deferred with N | `msg.deferred` | `msg.pitThisLap` | `msg.routeInsideDq` | `msg.breachFuel` |
+| Due on the final lap | As above | `msg.finalLap`, then `msg.pitThisLap` or `msg.sgLastLapFinal`, so the DQ warning is the toast left on screen. A stop-and-go awarded during the final lap gets its offence toast ("before the flag — final lap, no deferral") at once instead | `msg.routeInsideDq` | None: `msg.dq.fuel` or `msg.dq.stopGo` at the flag |
+| Stop-and-go awarded after the last usable entrance | None | Not applicable: `msg.sgLate` and the `NO ENTRY LEFT · DQ AT FLAG` chip, at once | Not applicable | `msg.dq.stopGo` at the flag |
+
+- The HUD keeps one toast, so at a crossing that posts several messages the player sees the last one. The order is: `msg.finalLap` ("Final lap!"), then the deadline judgement (`msg.sgLastLap*`, or `msg.breachSg` / `msg.breachFuel`), then `msg.pitThisLap`. So a DQ-worded message always ends up on screen. Before the review of #65, `msg.finalLap` came after the deadline judgement and hid `msg.sgLastLapFinal` when a stop-and-go was automatically deferred onto the final lap. The tests assert that each warning is the last message of its simulation step.
+- `msg.sgLastLap` is "Stop-and-go not served — last chance: serve it this lap or be disqualified". The words "or be disqualified" were added in #65. `msg.sgLastLapFinal` and `msg.deferred` already named the DQ.
+- `msg.pitThisLap` is "Compulsory stop due this lap — pit at this lap's entrance or be disqualified". It is posted once, at the crossing that starts the due lap, unless that crossing has just posted `msg.sgLastLap*` for an automatic deferral.
+- `msg.routeInsideDq` replaces `msg.routeInside` when the one-switch override is armed during a last chance: "Inside lane: skipping this lap's compulsory stop means disqualification". The override still works as before.
+- Before #65, a fuel stop committed by an override was announced only at the entrance it was committed at (`msg.fuelOverride`, "compulsory next lap", with no mention of a DQ). On the due lap there was only the orange `FUEL STOP · DUE THIS LAP` chip, and `msg.routeInside` on Space. Repeated overrides, as from the test bot in #65 that pressed Space every 8 s, then led to `msg.breachFuel` and a deadline DQ with no DQ wording before the deciding entrance.
+- Online, both new messages are ordinary race-core `msg` events. The room server forwards every event in `state.ev`, and each client shows only those addressed to its own driver. No protocol change was needed (`PROTOCOL_VERSION` is unchanged). A client older than the server would show the new message IDs as raw text.
+
 ## Deferring
 
 **Defer to next lap** is the N key, or the touch **Defer** button, which appears above Pit only while deferral is available. `Race.deferBlock()` decides this, and the HUD, the touch pad and `requestDefer()` all use it.
@@ -97,6 +121,7 @@ Championship saves stay at `v: 1`. `dq` is an optional field: older saves have n
 | Deferral available | Keyboard: `N DEFER TO NEXT LAP` chip. Touch: the Defer button |
 | Serving | "SERVING STOP-AND-GO · n s — stay still", or "stay n s for the fuel stop to count" in the bay |
 | Fulfilled | "Penalty served" or "Fuel stop done — obligation cleared" message, and "fuel stop done ✓" in the bay |
+| Last chance (see above) | Red blinking `⚠ PIT THIS LAP — or DQ` chip, first in the row, and `msg.pitThisLap` at the line. Space shows `msg.routeInsideDq` |
 | Breach | Red blinking `DEADLINE MISSED · DQ AT FLAG` chip, flash and message |
 | DQ | `DQ` flash, `DQ` flag in the standings and results, reason on the results screen |
 
@@ -114,6 +139,8 @@ In portrait, the meters and messages move up by one button height while Defer is
 | `tracks`, `race`, `controlled` | 6, 23 and 17 passed on `99b63f3`. The one `controlled` n/a, real window blur and tab switch, was already there. `controlled` now checks that an unserved stop disqualifies at the flag |
 | `routing`, `practice`, `championship`, `reverse` | 16, 10, 9 and 9 passed on `254ba32` |
 | `touch`, `responsive`, `touchrace` | 53, 71 and 7 passed on `254ba32`. `responsive`'s crowded HUD now includes both service chips and the breach chip |
+
+**Last-chance warning (#65).** `test/deadlineWarning.test.ts` (10 tests) drives a human car under continuous simulation on Clubman Park and records its messages and events in order to the flag. It covers a stop-and-go deferred automatically, one deferred with N, one due on the final lap, a fuel stop committed by an override and then served, one committed on the second-last lap, repeated overrides, and the bot from the issue (Space every 8 s for a whole 4-car race: 8 phase offsets on each of two circuits, 8 of the 16 races ending in a missed-deadline DQ). In every case it asserts that a DQ-worded warning comes before the entrance that decides the breach, that it is the last message of its step (the toast left on screen), and that the chip state is on from that warning through that entrance. It also checks that a retired car gets no last chance or message, that the mirror built from a snapshot reads the same last-chance state, and that the message survives the wire. 80 seeded races (5 circuits × 8 offsets, bot player and all-AI, run out to full results) gave byte-identical results, finish times, stops, offences, fuel and standings before and after the change. The `lastchance` browser scenario drives the override path with real keys at 1280×720 and on the emulated touch pad at 390×844 and 844×390. It checks the toast order, that the chip comes first and stays clear of every control, the Space warning and the breach chip replacing it. It also takes screenshots. It passed 14 of 14.
 
 Browser setup: headless Chromium 156.0.8078.4, Linux 7.0.0-42-generic x64, Node 26.7.0, 480×270 at Low unless a scenario sets its own size. All runs are bounded by `--max-minutes`.
 

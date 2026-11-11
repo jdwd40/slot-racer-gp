@@ -564,7 +564,9 @@ export class Race {
         return;
       }
       c.laneOverride = !c.laneOverride;
-      this.pmsg(c, c.laneOverride ? 'msg.routeInside' : 'msg.routeOutside', 'info');
+      // skipping a last-chance stop is the move that leads to the DQ, so the override says so at the moment it is chosen
+      if (c.laneOverride && this.lastChance(c)) this.pmsg(c, 'msg.routeInsideDq', 'bad');
+      else this.pmsg(c, c.laneOverride ? 'msg.routeInside' : 'msg.routeOutside', 'info');
       return;
     }
     if (c.change) return;
@@ -652,6 +654,19 @@ export class Race {
     if (due > LAPS) return 'late';
     const lap = Math.max(1, c.crossed);
     return due > lap ? 'next' : due === lap ? 'due' : 'overdue';
+  }
+
+  /**
+   * Last chance (#65): a compulsory stop is due on the lap being raced and missing this lap's entrance would latch the breach
+   * (a DQ at the flag): a committed fuel stop, or a stop-and-go whose one deferral is used or that is due on the final lap.
+   * Read-only, from fields every online snapshot carries, so the mirror's HUD shows the same chip offline and online.
+   */
+  lastChance(c: Car): boolean {
+    // a retired (dnf) or disqualified car is out of the race: nothing is due any more, so no chip and no message
+    if (this.practice || c.finished || c.status !== 'running' || c.svcBreach) return false;
+    const lap = Math.max(1, c.crossed);
+    if (c.fuelDue > 0 && c.fuelDue === lap) return true;
+    return c.sgOwed > 0 && c.sgDue === lap && (c.sgDeferred || lap >= LAPS);
   }
 
   /** Another car is standing in (or rolling through) the stop-and-go box. */
@@ -1261,9 +1276,15 @@ export class Race {
         // service earlier in this step (box, bay) is already applied; deadlines are judged before the finish is classified
         const prior = c.svcBreach;
         const flag = c.lapsDone >= LAPS && !this.practice;
+        const sgWasDeferred = c.sgDeferred;
+        // "Final lap!" first: the HUD shows only the newest toast, so any deadline warning or breach posted at this same
+        // crossing must come after it, or the cheerful message would hide the DQ one (#65)
+        if (!flag && c.human && c.lapsDone === LAPS - 1 && !this.practice) this.pmsg(c, 'msg.finalLap', 'good');
         this.serviceDeadline(c, flag);
         if (flag) this.finishCar(c, tCross, prior);
-        else if (c.human && c.lapsDone === LAPS - 1 && !this.practice) this.pmsg(c, 'msg.finalLap', 'good');
+        // a compulsory stop now on its last lap gets a one-off warning a whole lap before the entrance that decides it
+        // (#65). An automatic deferral at this crossing has already said "last chance". A message only: nothing reads it back
+        if (!flag && c.human && this.lastChance(c) && !(c.sgDeferred && !sgWasDeferred)) this.pmsg(c, 'msg.pitThisLap', 'bad');
       }
       c.lapStartT = tCross; c.lapValid = true; c.sectors = 0;
     }
