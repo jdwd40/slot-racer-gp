@@ -3,6 +3,10 @@
 //
 //   node scripts/online-check.mjs [gate lobby service connection layout accounts career]   (default: all)
 //   accounts and career need SLOTRUSH_TEST_DATABASE_URL (e.g. $(node scripts/local-pg.mjs env) after `node scripts/local-pg.mjs start`)
+//   node scripts/online-check.mjs race2 --url https://slotrush.jdwd40.com [--origin https://slotrush.jdwd40.com]
+//     the 2-browser race alone against a deployed site (no local build or servers): one multiplayer room with AI fill, two
+//     humans to the finish, matching results, and each browser's `state` frame size and rate. The pages are the site's own,
+//     so their WebSocket Origin is the site's; --origin, if given, must equal the URL's origin (a guard against a wrong URL).
 //
 // What runs: an online-enabled build (VITE_ONLINE=1) in dist-online/, two vite previews (same-origin /api and /ws proxies, as
 // Nginx does in production), and two in-process room servers built from server/ (scripts/qa-server.ts):
@@ -88,7 +92,7 @@ async function openPage(run, url, view = 'laptop', { touch = false, name = view,
   await page.addInitScript(() => {
     // Brake press timing, armed by the check: to the first server state that shows it (network + server), and to the first drawn frame
     // stateN/stateBytes: every `state` frame this page received and its size (UTF-8 bytes on the wire, #67)
-    const q = (window.__lat = { arm: false, downAt: 0, waitNet: false, waitDraw: false, net: [], drawn: [], stateN: 0, stateBytes: 0 });
+    const q = (window.__lat = { arm: false, downAt: 0, waitNet: false, waitDraw: false, net: [], drawn: [], stateN: 0, stateBytes: 0, stateT0: 0, stateT1: 0 });
     window.addEventListener('keydown', (e) => { if (q.arm && !e.repeat && e.code === 'KeyS') { q.arm = false; q.downAt = performance.now(); q.waitNet = q.waitDraw = true; } }, true);
     const W = window.WebSocket;
     window.WebSocket = class extends W {
@@ -97,6 +101,7 @@ async function openPage(run, url, view = 'laptop', { touch = false, name = view,
         this.addEventListener('message', (ev) => {
           if (typeof ev.data !== 'string' || !ev.data.startsWith('{"t":"state"')) return;
           q.stateN++; q.stateBytes += new TextEncoder().encode(ev.data).length;
+          q.stateT1 = performance.now(); if (!q.stateT0) q.stateT0 = q.stateT1;
           if (!q.waitNet) return;
           // v2 (#67): cars are in the race's static order, which the mirror race keeps; a delta names only changed fields,
           // so a press shows as the first `brake` above 0 in this car's entry
@@ -438,31 +443,44 @@ async function connection(run, c) {
     await cl.connect();
     const j = await cl.request({ t: 'create', name: 'Probe', mode: 'solo', settings: { track: 'circuit-1' } });
     cl.send({ t: 'start' });
-    let snap = null;
-    cl.onMessage = (m) => { if (m.t === 'state') snap = m.snap; };
+    let snap = null, recovered = 0, maxStallT = 0;
+    const me = () => snap.cars.find((c) => c.id === j.you);
+    cl.onMessage = (m) => {
+      if (m.t !== 'state') return;
+      snap = m.snap;
+      recovered += m.ev.filter((e) => e.type === 'recover' && e.car === j.you).length;
+      maxStallT = Math.max(maxStallT, me().stallT ?? 0);
+    };
     await waitUntil(() => snap && snap.phase === 'racing', 20000);
     cl.startHeartbeat();
     const out = [];
     for (let k = 0; k < 15; k++) {
+      // A car that sits still on the racing lane for 3 s is recovered to its bay (#69), where Brake no longer shows, so the
+      // probe must never wait at a standstill: before each press it drives on under Throttle at least as far and as fast as
+      // ends a stopped-on-track episode (STALL.goDist 4 m at goV 3 m/s), so every count starts again from zero. The speed
+      // stays low (about 4-6 m/s, under any corner limit) and the press stops it within a fraction of a second.
+      const u0 = me().u;
+      cl.setHeld(true, false);
+      await waitUntil(() => me().mode === 'race' && me().v >= 4 && me().u - u0 >= 6, 5000);
       const t0 = performance.now();
       cl.setHeld(false, true);
-      await waitUntil(() => snap.cars.find((c) => c.id === j.you).brake > 0, 3000);
+      await waitUntil(() => me().brake > 0, 3000);
       out.push(performance.now() - t0);
       cl.setHeld(false, false);
-      await waitUntil(() => snap.cars.find((c) => c.id === j.you).brake === 0, 3000);
-      await sleep(120);
+      await waitUntil(() => me().brake === 0, 3000);
     }
     cl.send({ t: 'leave' }); cl.close();
     const v = out.sort((x, y) => x - y);
-    const r = { label, n: v.length, medianMs: +v[Math.floor(v.length / 2)].toFixed(1), p90Ms: +v[Math.floor(v.length * 0.9)].toFixed(1), maxMs: +v.at(-1).toFixed(1) };
+    // `recovered` 0 and `maxStallT` under the 3 s grace: the probe measured the protocol, never the stopped-on-track rule
+    const r = { label, n: v.length, medianMs: +v[Math.floor(v.length / 2)].toFixed(1), p90Ms: +v[Math.floor(v.length * 0.9)].toFixed(1), maxMs: +v.at(-1).toFixed(1), recovered, maxStallT: +maxStallT.toFixed(2) };
     run.evidence.protocolLatency = [...(run.evidence.protocolLatency ?? []), r];
     return r;
   };
   const pl0 = await proto('loopback');
-  c.ok('Protocol path, loopback: press -> server step -> next 20 Hz snapshot (headless client, no rendering)', pl0.medianMs < 120, pl0);
+  c.ok('Protocol path, loopback: press -> server step -> next 20 Hz snapshot (headless client, no rendering)', pl0.medianMs < 120 && pl0.recovered === 0, pl0);
   P.delayMs = 60; P.jitterMs = 30;
   const pl1 = await proto('+60 ms each way, 0-30 ms jitter');
-  c.ok('Protocol path, induced latency: confirmation grows by about the added round trip only', pl1.medianMs < pl0.medianMs + 220, pl1);
+  c.ok('Protocol path, induced latency: confirmation grows by about the added round trip only', pl1.medianMs < pl0.medianMs + 220 && pl1.recovered === 0, pl1);
   P.delayMs = 0; P.jitterMs = 0;
   const a = await openPage(run, url, 'small', { name: 'keys' });
   // ---- Escape while a create is still unanswered (stalled link) cancels it: no seat is kept and no room is entered later
@@ -523,12 +541,25 @@ async function connection(run, c) {
   const rt0 = A.raceTime ?? room.race.raceTime;
   const laps0 = await read(a.page, () => window.__game.race.car(window.__game.localId).lapsDone);
   const evBefore = await read(a.page, () => window.__game.net.buf.reanchors);
+  // rolling into the stall: the measurements above end at a standstill, and a car still for 3 s is recovered to its bay (#69)
+  await driveFor(a, 1500);
   P.stallUntil = Date.now() + 1500;
   await sleep(2500);
   const st = await read(a.page, () => ({ buf: { ...window.__game.net.buf }, laps: window.__game.race.car(window.__game.localId).lapsDone, conn: window.__game.net.conn }));
   const stall = { serverAdvancedS: +(room.race.raceTime - rt0).toFixed(2), maxGapMs: st.buf.maxGapMs, reanchors: st.buf.reanchors - evBefore, lapsBefore: laps0, lapsAfter: st.laps, conn: st.conn };
   run.evidence.stall = stall;
-  c.ok('1.5 s stall: the shared race keeps running on the server, the client holds then re-anchors, no lap replayed', stall.serverAdvancedS > 2 && stall.maxGapMs >= 1400 && stall.conn === 'connected' && st.laps >= laps0 && st.laps <= laps0 + 1, stall);
+  // the page notes an arrival when its main thread gets to the message: at SwiftShader's 2-3 fps that is up to one frame late
+  // on either side of the stall, so the gap it sees is the 1.5 s stall within one frame (100 ms at a usable frame rate)
+  stall.frameMs = Math.round(1000 / Math.max(1, m1.fps));
+  c.ok('1.5 s stall: the shared race keeps running on the server, the client holds then re-anchors, no lap replayed', stall.serverAdvancedS > 2 && stall.maxGapMs >= 1500 - Math.max(100, stall.frameMs) && stall.conn === 'connected' && st.laps >= laps0 && st.laps <= laps0 + 1, stall);
+  // the stalled link let the car stand (its held pedals time out on the server): drive on first, so the standstill before
+  // reverse engages starts a fresh stopped-on-track count (#69, 3 s) instead of adding to the one the stall began
+  // ...and on the racing lane with no pit request: the driver asks for a stop when fuel is low, and holding Brake on the
+  // way in would end in the bay, not in reverse
+  for (const end = Date.now() + 20000; Date.now() < end;) {
+    await driveFor(a, 400);
+    if (await read(a.page, () => { const g = window.__game, p = g.race.car(g.localId); return p.mode === 'race' && p.v > 3 && !p.pitReq && !p.fuelReq && !p.change; })) break;
+  }
   await a.keys.release();
 
   // ---- deliberate reverse (keyboard): stop, keep holding Brake
@@ -595,7 +626,7 @@ async function connection(run, c) {
   // ---- expiry: the phone cannot reconnect for longer than the grace period
   await b.page.routeWebSocket(/\/ws$/, (ws) => ws.close({ code: 4000, reason: 'blocked' }));
   await read(b.page, () => window.__game.netDrop());
-  await waitFor(b.page, () => window.__game.screen === 'online', undefined, (run.real.cfg.graceS + 15) * 1000);
+  await waitFor(b.page, () => window.__game.screen === 'online', undefined, (run.real.cfg.graceS + 15) * 1000).catch(async (e) => { throw new Error(`${e.message} ${JSON.stringify(await read(b.page, () => ({ screen: window.__game.screen, net: window.__game.net && { conn: window.__game.net.conn, state: window.__game.net.room?.state }, me: window.__game.race.car(window.__game.localId)?.status, card: document.querySelector('.overlay.show .card')?.textContent?.slice(0, 160) })))}`); });
   const exp = await read(b.page, () => ({ msg: document.getElementById('n-msg').textContent, seat: sessionStorage.getItem('srgp.seat') }));
   c.ok('Seat expiry: the phone is told its seat expired and the stored seat is gone', exp.msg === STRINGS['net.end.expired'] && exp.seat === null, exp);
   await b.page.unrouteAll({ behavior: 'ignoreErrors' });
@@ -915,14 +946,81 @@ async function career(run, c) {
   return [a, b];
 }
 
-const SCENARIOS = { gate, lobby, service, connection, layout, accounts, career };
+/**
+ * Each page's `state` frames since `resetFrames`: count, average size in UTF-8 bytes as received, and the rate over the time
+ * from the first to the last (#67). Counted in the page's own WebSocket wrapper (openPage), before the game decodes them.
+ */
+const resetFrames = (page) => read(page, () => { const q = window.__lat; q.stateN = 0; q.stateBytes = 0; q.stateT0 = 0; q.stateT1 = 0; });
+const frameStats = (page) => read(page, () => {
+  const q = window.__lat, s = (q.stateT1 - q.stateT0) / 1000;
+  return { n: q.stateN, avgBytes: Math.round(q.stateBytes / Math.max(1, q.stateN)), perS: s > 0 ? +((q.stateN - 1) / s).toFixed(1) : null };
+});
+
+/**
+ * Two browsers race one multiplayer room with AI fill (four cars) to the finish: matching results, and what each received
+ * (#67: average `state` frame size and rate). Runs on the time-scaled local server, or alone against a deployed site
+ * (--url): one room, two sockets, so it stays inside the production per-address limits.
+ */
+async function race2(run, c) {
+  const url = run.remoteUrl ?? run.fastUrl;
+  const a = await openPage(run, url, 'small', { name: 'keys', fpsCap: CAP });
+  const b = await openPage(run, url, 'small', { name: 'keys2', fpsCap: CAP });
+  const code = await createRoom(a, 'Check A', { ai: true });
+  await joinRoom(b, 'Check B', code);
+  await waitFor(b.page, () => window.__game.screen === 'lobby');
+  await b.page.click('#l-ready');
+  await waitFor(a.page, () => window.__game.net.room.participants.length === 2 && window.__game.net.room.participants.every((p) => p.ready || p.host));
+  await a.page.click('#l-start');
+  for (const s of [a, b]) await waitFor(s.page, () => window.__game.screen === 'race' && window.__game.net.raceId, undefined, 30000);
+  for (const s of [a, b]) await resetFrames(s.page);
+  const cars = await read(a.page, () => window.__game.race.cars.length);
+  const fin = await driveAll([a, b], done, 10 * 60000);
+  for (const s of [a, b]) await waitFor(s.page, () => window.__game.screen === 'netres', undefined, 180000);
+  const frames = await Promise.all([a, b].map((s) => frameStats(s.page)));
+  const res = await Promise.all([a, b].map((s) => read(s.page, () => window.__game.net.result)));
+  c.ok('2-player race (AI fill, 4 cars): both browsers drove to their finish', cars === 4 && fin.every((x) => !x.error), { cars, fin });
+  c.ok('2-player race: both browsers show the same final server standings (same result digest)', res[0].outcome === 'completed' && res[0].digest === res[1].digest && res[0].classification.length === 4, res[0].classification.map((x) => `${x.pos ?? '-'}:${x.status}`));
+  // 20 a second of race time: the local server runs at time x2, so 40 a wall second there
+  const hz = 20 * (run.remoteUrl ? 1 : run.fast.cfg.timeScale);
+  c.ok(`2-player race: each browser received the v2 stream at about ${hz} states/s averaging under 1.5 KB (#67)`, frames.every((f) => f.n > 200 && f.avgBytes < 1500 && f.perS > hz * 0.75 && f.perS < hz * 1.25), { hz, frames });
+  run.evidence.race2 = { classification: res[0].classification.map((x) => `${x.pos ?? '-'}:${x.status}`), digest: res[0].digest, stateFrames: frames };
+  for (const s of [a, b]) { const l = s.page.locator('#r-leave'); if (await l.count()) await l.click(); }
+  return [a, b];
+}
+
+const SCENARIOS = { gate, lobby, service, connection, layout, accounts, career, race2 };
+
+/** `race2` alone against a deployed site: no build, no local servers, one room (see the header). */
+async function remote(url, origin, names) {
+  const u = new URL(url);
+  if (origin && origin !== u.origin) throw new Error(`--origin ${origin} is not the origin of ${url} (${u.origin})`);
+  if (names.some((n) => n !== 'race2')) throw new Error('--url runs only race2: the other scenarios read the local servers\' state');
+  const browser = await chromium.launch({ headless: true });
+  const run = { contexts: new Set(), browser, remoteUrl: u.origin + '/', evidence: {} };
+  const c = new Checks();
+  console.log(`Chromium ${browser.version()} against ${u.origin}\n\nrace2`);
+  let sessions = [];
+  try { sessions = await race2(run, c); } catch (e) { c.ok('Scenario ran to the end', false, String(e.stack ?? e).split('\n').slice(0, 3).join(' | ')); }
+  for (const s of sessions) { c.ok(`No page errors (${s.name})`, s.errors.length === 0, s.errors.slice(0, 5)); await s.context.close().catch(() => null); }
+  for (const ctx of run.contexts) await ctx.close().catch(() => null);
+  await browser.close();
+  const failed = c.list.filter((x) => x.status === 'failed').length;
+  writeFileSync(path.join(OUT, 'report.json'), JSON.stringify({ url: u.origin, browser: `chromium ${browser.version()}`, checks: c.list, evidence: run.evidence }, null, 2));
+  console.log(`\n${c.list.length - failed} passed, ${failed} failed\nEvidence: ${JSON.stringify(run.evidence)}\nReport: ${OUT}`);
+  process.exit(failed ? 1 : 0);
+}
 
 async function main() {
-  const names = process.argv.slice(2).length ? process.argv.slice(2) : Object.keys(SCENARIOS);
+  const argv = process.argv.slice(2);
+  const flag = (k) => { const i = argv.indexOf(k); return i >= 0 ? argv.splice(i, 2)[1] : null; };
+  const remoteUrl = flag('--url'), origin = flag('--origin');
+  const names = argv.length ? argv : remoteUrl ? ['race2'] : Object.keys(SCENARIOS);
   for (const n of names) if (!SCENARIOS[n]) throw new Error(`unknown scenario ${n}: ${Object.keys(SCENARIOS).join(' ')}`);
   const limit = setTimeout(() => { console.error(`Time limit of ${MAX_MIN} minutes reached.`); process.exit(2); }, MAX_MIN * 60000);
   limit.unref();
   mkdirSync(OUT, { recursive: true });
+  if (remoteUrl) return remote(remoteUrl, origin, names);
+  if (origin) throw new Error('--origin needs --url');
   console.log('Building the online-enabled client (VITE_ONLINE=1) into dist-online/ …');
   execFileSync('npx', ['vite', 'build', '--outDir', 'dist-online', '--emptyOutDir'], { cwd: ROOT, env: { ...process.env, VITE_ONLINE: '1' }, stdio: 'ignore' });
   const qaFile = path.join(ROOT, '.qa/qa-server.mjs');
