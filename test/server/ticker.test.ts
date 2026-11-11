@@ -117,12 +117,12 @@ describe('room tick timer lifecycle', () => {
     mgr.start();
     const a = create(mgr); if (!a.ok) throw new Error(a.code);
     vi.advanceTimersByTime(50);
-    mgr.tickMaxMs = 80;
+    mgr.tickLoadMs = 80;
     expect(create(mgr)).toMatchObject({ ok: false, code: 'overloaded' });
     expect(mgr.running).toBe(true);
     a.room.close('test');
     expect(mgr.running).toBe(false);
-    expect(mgr.tickMaxMs).toBe(0);
+    expect(mgr.tickLoadMs).toBe(0);
     expect(create(mgr).ok).toBe(true);
   });
 
