@@ -161,6 +161,20 @@ const PARKED_OFF_T = 2;
  */
 export const RETIRE_COAST_MAX = 4;
 
+/**
+ * Stopped-on-track recovery (#69, docs/auto-bay.md#stopped-on-track-recovery). A human car stopped on the racing lane, not held
+ * by the game and not trapped behind a car ahead, gets a warning; after `grace` seconds of simulation time it is moved off the
+ * track to its own bay. Speeds in m/s and distances in m of slot, like every other tuning table here. The stop and resume
+ * thresholds are far apart (hysteresis): a flicker of Throttle, a nudge or a push from behind never ends a stopped episode.
+ */
+export const STALL = {
+  grace: 3,            // seconds of active simulation time stopped before the car is recovered (first step at or after it)
+  stopV: 1,            // a car slower than this (by magnitude), its driver not pressing Throttle alone, has stopped: an episode starts
+  goV: 3,              // ...and it ends only when the car drives on at this speed or faster under its own Throttle...
+  goDist: 4,           // ...for this distance without a break (about three car lengths)
+  blockGap: 6,         // a stopped car with a slow car this close ahead (clear slot) on its own path is trapped, not blocking
+};
+
 export interface OffState { x: number; y: number; vx: number; vy: number; yaw: number; spin: number; t: number; z: number; vz: number; u0: number; lane: number; }
 
 export interface Car {
@@ -276,6 +290,14 @@ export interface Car {
   sgLeave: boolean;
   /** Throttle as last seen in the bay: a departure needs a fresh press, so a pedal held while arriving must be released first */
   upPrev: boolean;
+  /** stopped-on-track episode (#69): simulation seconds counted towards recovery, 0 when none is running */
+  stallT: number;
+  /** distance driven without a break under the car's own Throttle at STALL.goV or faster: a resumption at STALL.goDist */
+  stallRun: number;
+  /** recovered off the track (mode `tow`, out of traffic) and waiting for its own bay to be free to be placed in */
+  stallHold: boolean;
+  /** this bay stay is a stopped-on-track recovery: nothing is refuelled or served, the car may only rejoin (#69 review B1) */
+  stallSvc: boolean;
 }
 
 export type MsgKind = 'info' | 'good' | 'warn' | 'bad';
@@ -292,6 +314,8 @@ export type RaceEvent =
   | { type: 'final' }
   | { type: 'breach'; car: Car; what: 'stopGo' | 'fuel' }
   | { type: 'tow'; car: Car }
+  /** a stopped car was moved off the racing lane to its own bay (#69): once per recovery, for every client */
+  | { type: 'recover'; car: Car }
   | { type: 'offence'; car: Car; other: Car; n: number; cause: 'rear' | 'cut'; stop: boolean }
   | { type: 'served'; car: Car }
   | { type: 'go' }
@@ -322,6 +346,8 @@ export interface CarSnapshot {
   serviceT: number; penalty: number; towT: number; recoverT: number; bumpT: number;
   /** view state a client's HUD and arrows read (approach numbering, queue holds, bay targeting, fresh-throttle cue) */
   hiU: number; squeezeHold: boolean; pitHold: boolean; towSvc: boolean; pitFuel: boolean; serviced: boolean; upPrev: boolean;
+  /** stopped-on-track recovery (#69): the warning's count and the wait for the bay. Additive, so optional for older snapshots */
+  stallT?: number; stallHold?: boolean; stallSvc?: boolean;
 }
 /** Authoritative race state: JSON-safe (no cycles, no Infinity or NaN, no browser objects), with driver IDs for every reference. */
 export interface RaceSnapshot {
@@ -497,6 +523,7 @@ export class Race {
         revOn: false, revHoldT: 0, revLatch: false, revMark: null,
         pitWait: null, pitCap: 1e9, pitHold: false, exitHold: false, exitReq: false, pitFuel: false,
         sgPhase: null, sgCtl: false, sgCommit: -1, sgVc: 0, sgLeave: false, upPrev: false,
+        stallT: 0, stallRun: 0, stallHold: false, stallSvc: false,
       };
       this.cars.push(c);
     }
@@ -852,6 +879,8 @@ export class Race {
     // race-time limit caps the whole race
     if (this.firstFlagT >= 0 && this.raceTime - this.firstFlagT > this.finishWindow) this.classifyRunning('window');
     if (this.raceTime > this.timeLimit) this.classifyRunning('timeout');
+    // after the terminal classification, so a car the window or the time limit ends on this step gets that one outcome only
+    this.stallUpdate(dt, inputs);
     if (this.phase !== 'racing') return;
     // one human finishing never ends anyone else's race: it closes once every human is terminal (with no human, every car)
     const humans = this.cars.filter((c) => c.human);
@@ -872,7 +901,7 @@ export class Race {
     if (c.retire) c.retireT += dt;
     if (c.retire && this.parkable(c)) { this.park(c); return; }
     if (c.mode === 'off') { this.stepOff(c, dt); return; }
-    if (c.mode === 'tow') { this.stepTow(c, dt); return; }
+    if (c.mode === 'tow') { if (c.stallHold) this.stepStallHold(c, dt); else this.stepTow(c, dt); return; }
     if (c.mode === 'bayIn' || c.mode === 'service' || c.mode === 'bayOut') { this.stepBay(c, dt, input); return; }
 
     // ---- control
@@ -1348,7 +1377,7 @@ export class Race {
   enterBay(c: Car, j: number): void {
     this.holdBay(c, j);
     // Throttle counts as held until the bay sees it released: a pedal held on arrival never asks to leave
-    c.mode = 'bayIn'; c.bay = j; c.bayT = 0; c.v = 0; c.serviceT = 0; c.fuelAtBay = c.fuel; c.towSvc = false; c.exitReq = false; c.upPrev = true;
+    c.mode = 'bayIn'; c.bay = j; c.bayT = 0; c.v = 0; c.serviceT = 0; c.fuelAtBay = c.fuel; c.towSvc = false; c.stallSvc = false; c.exitReq = false; c.upPrev = true;
     c.pitStops++;
     if (!c.human) c.refuelTarget = Math.min(1, Math.max(0.3, this.fuelToFinish(c, this.s(c)) + this.rnd(0.06, 0.2)));
   }
@@ -1378,7 +1407,8 @@ export class Race {
       c.serviceT += dt;
       c.penalty = Math.max(0, c.penalty - dt);
       // refuelling stops at the departure request; the tank never passes full
-      if (c.serviceT > 0.4 && !c.exitReq) c.fuel = Math.min(1, c.fuel + REFUEL_RATE * dt);
+      // a stopped-on-track recovery gets none: fuel stays exactly as it was, so stopping by the bay never beats a real visit
+      if (c.serviceT > 0.4 && !c.exitReq && !c.stallSvc) c.fuel = Math.min(1, c.fuel + REFUEL_RATE * dt);
       // a committed fuel stop counts once the car has stood in its bay for the departure-ready time (a full tank is fine; a tow is not a visit)
       if (c.fuelDue > 0 && !c.towSvc && c.serviceT > SERVICE_READY) { c.fuelDue = 0; this.pmsg(c, 'msg.fuelDone', 'good'); }
       // a departure request is latched: it waits in the bay for a safe merge and then goes, once, without pressing again.
@@ -1391,7 +1421,7 @@ export class Race {
           if (!why) { c.exitReq = true; this.pmsg(c, 'msg.departReq', 'info'); }
           else this.pmsg(c, why === 'penalty' ? 'msg.departPenalty' : 'msg.departSettle', 'warn', { n: Math.max(0.1, why === 'penalty' ? c.penalty : SERVICE_READY - c.serviceT + 0.05).toFixed(1) });
         }
-      } else if ((c.fuel >= c.refuelTarget || c.fuel >= 1) && c.penalty <= 0) c.exitReq = true;
+      } else if ((c.stallSvc || c.fuel >= c.refuelTarget || c.fuel >= 1) && c.penalty <= 0) c.exitReq = true;
       // the merge is granted by the shared pit traffic at the start of a step, from where everyone is
       if (c.exitReq && this.pit.merges[c.bay] === c.idx) { c.mode = 'bayOut'; c.bayT = 0; c.pitPlan = false; c.waitingClear = false; }
     } else {
@@ -1399,7 +1429,7 @@ export class Race {
       c.d = this.T.BAY_D + (this.T.PIT_D - this.T.BAY_D) * this.T.smooth(c.bayT);
       c.yawOff = Math.sin(c.bayT * Math.PI) * 0.5;
       if (c.bayT >= 1) {
-        c.mode = 'pitlane'; c.v = 0; c.d = this.T.PIT_D; c.yawOff = 0; c.serviced = true; c.exitReq = false;
+        c.mode = 'pitlane'; c.v = 0; c.d = this.T.PIT_D; c.yawOff = 0; c.serviced = true; c.exitReq = false; c.stallSvc = false;
         // the player is driven on along the pit lane, through the exit yield, and handed back past the merge
         if (c.human && !c.finished) c.sgLeave = true;
         // back in the through lane: the merge and the bay are released, once
@@ -1476,6 +1506,7 @@ export class Race {
     c.off = { x: p.x, y: p.y, z: p.z, vx: 0, vy: 0, vz: 0, yaw: p.h, spin: 0, t: PARKED_OFF_T, u0: c.u, lane: -1 };
     c.mode = 'off'; c.retire = 'parked'; c.v = 0; c.throttle = 0; c.brake = 0; c.change = null; c.slip = 0; c.wobble = 0; c.yawOff = 0;
     c.bumpT = 0; c.recoverT = 0; c.towT = 0; c.latRatio = 0; c.squeezeHold = false; c.yielding = false; c.pitHold = false; c.exitHold = false;
+    c.stallHold = false; c.stallSvc = false; c.stallT = 0; c.stallRun = 0;
     this.leaveSqueeze(c); this.pit.releaseAll(c, 'terminal');
   }
 
@@ -1491,7 +1522,7 @@ export class Race {
     const mark = dist < 0 ? Math.max(c.revMark ?? -Infinity, c.u) : null;
     c.u += dist;
     this.holdBay(c, j);
-    c.bay = j; c.mode = 'service'; c.serviceT = 0; c.d = this.T.BAY_D; c.laneSide = -1; c.yawOff = 0; c.revMark = null; c.towSvc = true; c.exitReq = false; c.upPrev = true;
+    c.bay = j; c.mode = 'service'; c.serviceT = 0; c.d = this.T.BAY_D; c.laneSide = -1; c.yawOff = 0; c.revMark = null; c.towSvc = true; c.stallSvc = false; c.exitReq = false; c.upPrev = true;
     if (mark !== null) c.revMark = mark;
     c.towPit = false;
     if (c.u > c.hiU) c.hiU = c.u;
@@ -1499,6 +1530,121 @@ export class Race {
     c.refuelTarget = Math.max(c.refuelTarget, 0.75);
     if (c.human) this.pmsg(c, 'msg.towPenalty', 'bad', { n: Math.round(c.penalty) });
     this.laps(c);
+  }
+
+  // ---------------------------------------------------------------- stopped-on-track recovery (#69)
+  /**
+   * Why a car's stopped episode cannot run now, or null when the rule applies. `off`: not this car or not now (practice, the
+   * AI, before the green, a terminal result, a retired car, anywhere but the racing lane). `held`: a legitimate wait the
+   * simulation itself imposes, never a guess at intent: the pit queue or its approach, the pit exit, the squeeze priority,
+   * automatic pit control, a marshal's re-slot, an empty tank (the out-of-fuel tow recovers that car, so never twice), or a
+   * slow car close ahead on its own path. Selecting Pit, holding a pedal or asking for a lane is none of these.
+   */
+  stallBlock(c: Car): 'off' | 'held' | null {
+    if (this.practice || this.phase !== 'racing' || !c.human || c.status !== 'running' || c.finished || c.retire || c.mode !== 'race') return 'off';
+    if (c.pitHold || c.exitHold || c.squeezeHold || c.yielding || c.sgCtl || c.recoverT > 0 || c.fuel <= 0) return 'held';
+    return this.stallTrapped(c) ? 'held' : null;
+  }
+
+  /**
+   * A car stands (or crawls, slower than STALL.goV) within STALL.blockGap of clear slot ahead of this one on its own travel
+   * path: this car is trapped behind it, not blocking. Judged along the slot, so a car on the other lane, on another level
+   * of a bridge (or out of traffic: de-slotted, towed, in a bay) never counts. A car moving off at STALL.goV or more does
+   * not trap anyone, so a follower that then stays put gets a fresh episode of its own.
+   */
+  stallTrapped(c: Car): boolean {
+    const s = this.s(c);
+    for (const o of this.cars) {
+      if (o === c || (o.mode !== 'race' && o.mode !== 'pitlane' && o.mode !== 'grid') || o.v >= STALL.goV) continue;
+      if (Math.abs(o.d - c.d) >= this.T.CAR_W || Math.abs(o.z - c.z) > 1) continue;
+      const g = this.T.gapS(s, this.s(o));
+      if (g > 0 && g - this.T.CAR_LEN < STALL.blockGap) return true;
+    }
+    return false;
+  }
+
+  /**
+   * Run every human car's stopped episode for this step, once all cars have moved and touched. Every car is judged from the
+   * same placement before any is recovered, so array order never decides who was blocking whom: in a queue the front car is
+   * the one counting and the cars trapped behind it are held, in the same step. Due cars are then recovered in grid order.
+   * Everything is simulation time: a paused race steps nothing, and frame rate or snapshot rate never changes the count.
+   */
+  stallUpdate(dt: number, inputs: Controls): void {
+    const blocks = this.cars.map((c) => this.stallBlock(c));
+    const due: Car[] = [];
+    this.cars.forEach((c, i) => {
+      // a legitimate wait (or the rule not applying) ends the episode: a trapped car that then stays put starts afresh
+      if (blocks[i]) { c.stallT = 0; c.stallRun = 0; return; }
+      const inp = this.inputOf(c, inputs);
+      const own = inp.up && !inp.down;
+      if (c.stallT <= 0) {
+        // Throttle alone pressed at a standstill is driving off (anything that still holds the car is a case above), so the
+        // start, a pull-away behind traffic or a re-slot never flashes a warning
+        if (Math.abs(c.v) < STALL.stopV && !own) { c.stallT = dt; c.stallRun = 0; }
+        return;
+      }
+      // only a genuine resumption ends a running episode: an unbroken run of STALL.goDist under the car's own Throttle at
+      // STALL.goV or faster. A push from behind has no Throttle in it, and a flicker or a nudge never covers the distance
+      c.stallRun = own && c.v >= STALL.goV ? c.stallRun + c.v * dt : 0;
+      if (c.stallRun >= STALL.goDist - 1e-9) { c.stallT = 0; c.stallRun = 0; return; }
+      // backing up (reverse gear, or rolling back after it) is the legitimate recovery manoeuvre (docs/reverse.md): it pauses
+      // the count, never resets it. The standstill that engages reverse still counts, so a back-and-forth nudge gains nothing
+      if (c.v > -STALL.stopV) c.stallT += dt;
+      // the tolerance only absorbs float summing (360 steps of 1/120 s): the first step at or after the deadline. A car that is
+      // pulling away under its own Throttle at that moment is let finish the pull-away (about 0.6 s from a standstill, the
+      // run above): lifting, braking or stopping during it recovers it on that step, so a last-moment nudge buys nothing
+      if (c.stallT >= STALL.grace - 1e-9 && !(own && c.v > 0)) due.push(c);
+    });
+    for (const c of due) this.stallRecover(c);
+  }
+
+  /**
+   * Recover a stopped car (#69): off the racing lane at once, then into its own bay. This is not the out-of-fuel tow: there
+   * is no time penalty, no lap or service bookkeeping, and no distance is gained. The car goes back to the last place it
+   * passed its own bay (never forward), so it can only lose progress: `u` decreases while `crossed`, the laps, `hiU` (approach
+   * numbering) and the sectors stay; the move crosses no timing line forward, and a line it is moved back over is not counted
+   * again when it is driven (laps() counts only new crossings). Debts, deadlines, a latched breach and the fuel in the tank
+   * are kept and the lap is void. Returns false, changing nothing, for a car no longer on the racing lane with a running
+   * result: one towed, de-slotted, retired or finished this step, or already recovered, is never recovered (again).
+   */
+  stallRecover(c: Car): boolean {
+    if (c.mode !== 'race' || c.status !== 'running' || c.finished || c.retire) return false;
+    c.u -= this.T.ahead(this.T.BAYS[c.bayHome], this.s(c));
+    if (c.change) { c.laneSide = c.change.to; c.change = null; }
+    // out of traffic now: the squeeze queue, any pit reservation, routing state and contact state go; debts stay
+    this.leaveSqueeze(c); this.pit.releaseAll(c, 'recover');
+    this.clearPitIntent(c);
+    c.laneReq = false; c.sgCommit = -1; c.sgLeave = false; c.sgCtl = false; c.sgPhase = null; c.sgServing = false;
+    c.revOn = false; c.revHoldT = 0;
+    c.v = 0; c.throttle = 0; c.brake = 0; c.slip = 0; c.wobble = 0; c.latRatio = 0; c.yawOff = 0; c.bumpT = 0;
+    c.squeezeHold = false; c.yielding = false; c.pitHold = false; c.exitHold = false; c.pitCap = 1e9; c.pitWait = null;
+    c.laneSide = -1; c.d = this.T.BAY_D; c.lapValid = false; c.towPit = false;
+    c.stallT = 0; c.stallRun = 0;
+    for (const o of this.cars) if (o !== c) this.touching[Math.min(o.idx, c.idx) * 4 + Math.max(o.idx, c.idx)] = false;
+    this.emit({ type: 'recover', car: c });
+    this.pmsg(c, 'msg.stallRecovered', 'bad');
+    // its own bay is normally free (no other car ever uses it); if not, it waits out of traffic and invisible, never on the slot
+    if (this.bayFree(c.bayHome, c)) this.stallPlace(c);
+    else { c.mode = 'tow'; c.stallHold = true; c.towT = 1; }
+    this.pose(c);
+    return true;
+  }
+
+  /** Put a recovered car at rest in its own bay, as if it had just turned in: the usual service and fresh-Throttle departure follow. */
+  stallPlace(c: Car): void {
+    this.holdBay(c, c.bayHome);
+    c.mode = 'service'; c.bay = c.bayHome; c.stallHold = false; c.serviceT = 0; c.fuelAtBay = c.fuel; c.off = null;
+    c.d = this.T.BAY_D; c.v = 0; c.yawOff = 0; c.towT = 0;
+    // recovery, not a pit visit: no fuel is added (stallSvc), it serves no committed fuel stop (towSvc), runs no penalty and is
+    // not counted as a stop. The bay is only a safe place to rejoin from: fuel needs a real visit through the entrance.
+    // Throttle counts as held until the bay sees it released, so a pedal held through the recovery never leaves
+    c.towSvc = true; c.stallSvc = true; c.penalty = 0; c.exitReq = false; c.upPrev = true;
+  }
+
+  /** A recovered car whose own bay is taken waits out of traffic until it is free, then is placed in it (#69). */
+  stepStallHold(c: Car, dt: number): void {
+    c.v = 0; c.towT += dt;
+    if (this.bayFree(c.bayHome, c)) this.stallPlace(c);
   }
 
   // ---------------------------------------------------------------- AI
@@ -1827,6 +1973,7 @@ export class Race {
         revOn: c.revOn, sgPhase: c.sgPhase, sgCtl: c.sgCtl, pitWait: c.pitWait, exitReq: c.exitReq, bayInUse: c.bay,
         serviceT: c.serviceT, penalty: c.penalty, towT: c.towT, recoverT: c.recoverT, bumpT: c.bumpT,
         hiU: c.hiU, squeezeHold: c.squeezeHold, pitHold: c.pitHold, towSvc: c.towSvc, pitFuel: c.pitFuel, serviced: c.serviced, upPrev: c.upPrev,
+        stallT: c.stallT, stallHold: c.stallHold, stallSvc: c.stallSvc,
       })),
       pit: {
         box: idOf(this.pit.box), exit: idOf(this.pit.exit),

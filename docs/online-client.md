@@ -44,6 +44,7 @@ The title screen names them separately:
 - **No local simulation.** The browser keeps a *mirror* `Race` (`src/net/mirror.ts`). Every authoritative snapshot overwrites it, so the HUD, lane and pit arrows, bay glow, service prompts, touch-pad cues, camera, marker and audio read the same fields and methods as offline.
   - A unit test runs a server race and compares the mirror's answers with the server's every 3 steps: approach number, Defer availability, pit route, due state, departure block, box busy, bay and order.
   - The snapshot gained seven view fields to make this exact: `hiU`, `squeezeHold`, `pitHold`, `towSvc`, `pitFuel`, `serviced`, `upPrev`. The change is additive and needs no protocol bump.
+  - #69 added `stallT` and `stallHold` the same way, so the stopped-on-track countdown on the HUD is the server's count, refreshed with every snapshot. There is no client timer. The `recover` event shows "<name> stopped on track — moved to the pits" to the other drivers ([stopped-on-track recovery](auto-bay.md#stopped-on-track-recovery)).
 - **Corrections never replay anything.** A snapshot replaces state; nothing is re-derived. Completed laps, pit visits, penalties and results are whatever the server says. Snapshots with a tick not newer than the last are dropped whole. One-shot events (toasts, sounds, flashes) arrive once, in the state message that first carries them. A resume's catch-up state has no events, so nothing replays after a reconnect.
 - **Interpolation and buffering.** `SnapBuffer` keeps at most 24 snapshots.
   - Cars are drawn 100 ms (two snapshot intervals at 20 Hz) behind the newest one, interpolated between the two that bracket that time.
@@ -117,7 +118,8 @@ After step 11 of the [runbook](online-server.md#production-activation-runbook-ow
 2. Create a room, then join it from a phone using the code (or the Share link). Check that both show each other's name, number and colour, then Ready → Start.
 3. Drive a lap on both. On the phone, switch to another app for a few seconds and come back. The race menu must be showing, the car must have coasted, and the race must have kept running on the desktop.
 4. Turn on the phone's flight mode for 5 s, then off. The banner must show *Reconnecting* and then disappear, with the same car.
-5. Finish (or Leave) and confirm that both show the same Final standings.
+5. **Stopped on track (#69).** On a straight away from the pits, one driver lifts off and stays stopped. That driver must see `MOVE YOUR CAR · PITS IN 3`, then 2, then 1, with the status line, and no driving control may be covered. Then the car must vanish from the lane and appear in its own bay with "Stopped on track — moved to pits", while the other device shows "<name> stopped on track — moved to the pits" and the car in that bay. A car stopped right behind it must not get a countdown until the first one is gone. Then, with Throttle still held from before, the recovered car must not leave; release it and press again once Ready, and it must leave only when the pit lane is clear. Repeat once on the phone (touch pad) and once on the desktop (keyboard), and once with the stopped phone in flight mode for 2 s mid-countdown: the recovery must still come 3 s after the stop, not later.
+6. Finish (or Leave) and confirm that both show the same Final standings, with the recovered driver classified like any other.
 
 Real phone and tablet play has not been tested by this work (see the evidence). These steps are the first physical-device check.
 

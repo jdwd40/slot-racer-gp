@@ -562,7 +562,8 @@ describe('Brake, reverse, pause and frames', () => {
     expect(P.sgOwed).toBe(0); expect(P.mode).toBe('race');
     expect(tr.phases).toContain('queued');
     expect(tr.minV).toBe(0);
-    const after = run(r, BRAKE, 3);
+    // well past REV.engage, and short of STALL.grace: a car stopped on the road for 3 s is moved to its bay (#69)
+    const after = run(r, BRAKE, 1.2);
     expect(after.minV).toBe(0); expect(P.revOn).toBe(false); expect(P.v).toBe(0);
     // release, press again and hold: ordinary reverse under the existing rules
     run(r, NONE, DT);

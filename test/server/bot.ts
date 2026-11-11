@@ -19,8 +19,8 @@ export function drive(snap: RaceSnapshot, id: string, pace = 1): BotOut {
   if (!c || c.status !== 'running') return { up: false, down: false, pit: false };
   const T = trackFor(snap.track);
   if (c.mode === 'bayIn' || c.mode === 'service' || c.mode === 'bayOut') {
-    // stay for the refuel, then a fresh press leaves
-    return { up: c.sgPhase === 'ready' && c.fuel > 0.9, down: false, pit: false };
+    // stay for the refuel, then a fresh press leaves (after a stopped-on-track recovery the bay adds no fuel: leave when ready)
+    return { up: c.sgPhase === 'ready' && (c.fuel > 0.9 || c.stallSvc === true), down: false, pit: false };
   }
   const side = (c.change ? c.change.to : c.laneSide) < 0 ? -1 : 1;
   const prof = profile(snap.track, side);
