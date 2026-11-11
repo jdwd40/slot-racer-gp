@@ -73,7 +73,7 @@ Smoke checks through the real game at a controlled 10 FPS:
 
 ## Remaining limitations
 
-- Below 4 FPS the race still runs slower than wall time, by design. The 7 November playtest was not reproduced and its frame rate is unknown, so it may be in this range. If so, it needs the separate graphics work.
+- Below 4 FPS the race still runs slower than wall time, by design. The 7 November playtest was not reproduced and its frame rate is unknown, so it may be in this range. If so, it needs the separate graphics work. Since #66 a device whose median frame is over 50 ms at the start of a race drops to the Low preset once (docs/graphics.md); `MAX_GAP` is unchanged.
 - Real-GPU behaviour is untested, including how interpolation looks on 60 Hz and 120 Hz or faster displays.
 - Blur and hidden were simulated with synthetic events, not a real tab switch. The hidden-tab return on the results screen and the mid-callback stop were checked only in unit tests.
 - `test/timing.test.ts` drives real `Race` and `FixedStepper` objects but mirrors `tick()` in a small harness, because `main.ts` needs a DOM. The browser checks above cover the real code; that one-off script is not committed, and `docs/validation.md` has the repeatable checks.

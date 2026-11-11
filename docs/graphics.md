@@ -18,6 +18,23 @@ Renderer pixel ratio = `min(preset cap, actual devicePixelRatio)`. A missing or 
 - **What stays full resolution:** canvas CSS size, camera aspect (taken from the window) and the DOM HUD do not depend on the preset. The minimap canvas follows the device ratio, not the preset, and now also updates when the DPR changes.
 - **Keyboard:** Tab reaches the group, and the arrow keys change the preset and wrap. Space and Enter on the selector do not start or resume a race. Esc and other game keys still work.
 
+## Automatic fallback to Low
+
+On a device too slow for its preset, the game drops to Low once by itself (#66). The decision logic is `src/autoQuality.ts` (pure, unit-tested in `test/autoQuality.test.ts`); `src/main.ts` feeds it frame timestamps and applies the result with the same `setPreset` as the selector.
+
+Why: the race clock discards any part of a frame over `MAX_GAP` (250 ms, `src/timing.ts`), so at about 7 FPS an offline race runs slower than wall time (0.9× in the 11 November SwiftShader run). Low is the one setting that draws markedly less. `MAX_GAP` is unchanged.
+
+- **Rule:** at the start of every race (offline, practice, championship round or online), the raw `requestAnimationFrame` gaps are sampled until they add up to 5 s of wall time and there are at least 10 of them. If their median is over 50 ms (under 20 FPS), the preset becomes Low and a toast says "Switched to Low graphics for smoother play". A median at or under 50 ms leaves the preset alone for that race; the next race is measured afresh.
+- **What counts:** only frames while the race screen is up and the page is visible, countdown included. Title, pause, results and other menus do not count. The gap into the first counted frame after any break (pause, a hidden or backgrounded tab, a new race) is dropped, so time the page was not drawing never reads as one slow frame.
+- **Compile and build stalls:** the median, plus the 10-gap floor, means a single shader-compile or scene-build stall cannot cause the switch, even one that fills the whole 5 s window by itself.
+- **Once, and the player wins:** it switches at most once per device and never switches back. Any pick in the selector, before or after a switch, is final: nothing is switched automatically from then on. A preset saved before this feature existed counts as such a pick (only the selector ever saved one). There is no oscillation because no rule ever raises the preset.
+- **Undo:** while the switch is in force and the preset is still Low, the graphics selector (title and pause screens) shows the notice with "Undo: back to <preset>", which restores the preset it replaced. The undo counts as the player's pick.
+- **Storage:** `srgp.gfxAuto` holds `switched:<replaced preset>` or `manual`. The preset itself is saved in `srgp.graphics` as usual. With storage unavailable every access is caught: the fallback still works, at most once per page load.
+- **Unaffected:** race simulation, timing, results, records and the server. Only the drawing buffer changes, exactly as when the player picks Low. No protocol or rules change.
+- **Browser validation:** `scripts/browser-check.mjs` clicks a preset when it opens the game, which counts as a pick, so scenarios and `perf` captures stay on the preset they ask for.
+
+Checked on the production build in headless Chromium on SwiftShader at 1280×720 with an empty profile (diagnostic, not real hardware): the game switched from Balanced to Low during the first race's countdown (median gap 200 ms on a loaded host), the drawing buffer went 1280 → 640 wide, the toast showed, the pause screen offered the undo, undo restored Balanced and stored `manual`, and after a reload a further race stayed on Balanced. With storage blocked it still switched, with no page errors.
+
 ## Trade-offs
 
 - Low looks visibly soft: fine track rails and crowds blur in the close view. In the full-circuit view the rails shimmer and the lane arrow gets thin. The player marker, HUD chips and minimap stay clear.
@@ -88,4 +105,4 @@ Run through the production build in headless Chromium at 480×270, using real ke
 - Firefox and Safari.
 - Screen reader output for the selector.
 
-Adaptive resolution, cheaper lighting and shadow settings are left out of this change. Cheaper lighting should wait for real-hardware measurements.
+Continuous adaptive resolution, cheaper lighting and shadow settings are left out; the only automatic change is the one-off fallback to Low above. Cheaper lighting should wait for real-hardware measurements.

@@ -29,7 +29,7 @@ node scripts/online-check.mjs                   # browser checks of lobbies and 
 
 The same checks plus `npm run build` run in GitHub Actions (`.github/workflows/ci.yml`) on pull requests and pushes to `main`. The `server` CI job builds, tests (PostgreSQL 17 service container, no secrets), smoke-checks and packages the room server. A push to `main` deploys the exact checked static build artifact to the VPS site only when **both** the `check` and `server` jobs succeeded for that commit; a failed, cancelled or skipped job blocks it, and PRs never deploy ([deployment and rollback](docs/deployment.md)). Nothing deploys the room server automatically: the owner rolls it out by hand ([release procedure](docs/online-server.md#release-procedure-owner)). Green CI is not four-player browser or accelerated-hardware validation; that is #4. The tests also cover the room server (`test/server/`): room rules, the protocol, headless WebSocket races and the database layer.
 
-The game tests cover the simulation and graphics preset logic (`src/race.ts`, `src/pit.ts`, `src/track.ts`, `src/records.ts`, `src/timing.ts`, `src/graphics.ts`, `src/input.ts`): collision penalties, lap counting, lane changes, leaderboards and championship scoring, fixed-step timing, graphics preset resolution and storage, input sources and touch pointer handling, and a bounded all-AI race on each circuit, plus the frame-time statistics. Rendering and browser input are covered by `npm run check:browser` instead, and audio by neither. See [browser validation](docs/validation.md), which also has the frame-time capture and comparison.
+The game tests cover the simulation and graphics preset logic (`src/race.ts`, `src/pit.ts`, `src/track.ts`, `src/records.ts`, `src/timing.ts`, `src/graphics.ts`, `src/autoQuality.ts`, `src/input.ts`): collision penalties, lap counting, lane changes, leaderboards and championship scoring, fixed-step timing, graphics preset resolution and storage, the automatic fallback to Low on slow devices, input sources and touch pointer handling, and a bounded all-AI race on each circuit, plus the frame-time statistics. Rendering and browser input are covered by `npm run check:browser` instead, and audio by neither. See [browser validation](docs/validation.md), which also has the frame-time capture and comparison.
 
 The build output is plain HTML/JS/CSS; serve the `dist/` folder from any static host.
 
@@ -41,7 +41,7 @@ The build output is plain HTML/JS/CSS; serve the `dist/` folder from any static 
 - `assets/ui/strings.json` — all player-visible text.
 - `docs/architecture-audit.md` — architecture and deployment audit.
 - `docs/timing.md` — simulation timing policy and its test evidence.
-- `docs/graphics.md` — graphics presets, their trade-offs and measurements.
+- `docs/graphics.md` — graphics presets, the automatic fallback to Low, their trade-offs and measurements.
 - `docs/touch.md` — touch controls, the shared input layer and their evidence.
 - `docs/reverse.md` — hold-Brake reverse: tuning, recovery limits, race-integrity rules and evidence.
 - `docs/penalties.md` — service obligations: deferral, deadlines, disqualification, results and save compatibility.

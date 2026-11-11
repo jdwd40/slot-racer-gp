@@ -13,6 +13,7 @@ import * as R from './records';
 import { GhostRecorder, GhostPlayer } from './ghost';
 import { FixedStepper, STEP, MAX_GAP, Pose, blendPose } from './timing';
 import { PRESETS, PresetId, pixelRatioFor, savedPreset, savePreset } from './graphics';
+import { AutoQuality } from './autoQuality';
 import { NetSession, loadSeat, refusalText, type Conn, type ResultView, type Seat, type EndReason } from './net/session';
 import { AccountClient, accountKey, type AuthError, type AuthState } from './net/account';
 import { SnapBuffer, applySnapshot, localEvent, mirrorRace } from './net/mirror';
@@ -45,6 +46,8 @@ function createRenderer(): THREE.WebGLRenderer {
 }
 const renderer = createRenderer();
 let preset = savedPreset();
+// watches the first seconds of each race and drops to Low once on a device that cannot keep up (#66, src/autoQuality.ts)
+const autoQuality = new AutoQuality((() => { try { return window.localStorage; } catch { return null; } })());
 let dpr = window.devicePixelRatio;
 renderer.setPixelRatio(pixelRatioFor(preset, dpr));
 renderer.setSize(vp.w, vp.h, false);
@@ -126,7 +129,7 @@ function paintBays(): void {
   }));
 }
 rebuildVisuals();
-function setRace(r: Race): void { race = r; laneArrowKey = ''; lastCrossed = 0; prevPoses = race.cars.map(poseOf); stepper.rebase(); rebuildVisuals(); }
+function setRace(r: Race): void { race = r; autoQuality.beginRace(); laneArrowKey = ''; lastCrossed = 0; prevPoses = race.cars.map(poseOf); stepper.rebase(); rebuildVisuals(); }
 
 // practice ghost + records
 const recorder = new GhostRecorder();
@@ -264,12 +267,12 @@ function carPickerHtml(): string {
 
 const ARROW_STEP: Record<string, number> = { ArrowLeft: -1, ArrowUp: -1, ArrowRight: 1, ArrowDown: 1 };
 /** A settings radio group for the title and pause cards, named by the data attribute its buttons carry; wire it up with bindRadios. */
-function radiosHtml(name: string, label: string, opts: readonly { id: string; label: string }[], current: string): string {
+function radiosHtml(name: string, label: string, opts: readonly { id: string; label: string }[], current: string, extra = ''): string {
   const btns = opts.map((o) => {
     const on = o.id === current;
     return `<button class="tab ${on ? 'sel' : ''}" role="radio" aria-checked="${on}" tabindex="${on ? 0 : -1}" data-${name}="${o.id}">${t(o.label)}</button>`;
   }).join('');
-  return `<div class="gfx"><div class="lbl2" id="o-${name}">${t(label)}</div><div class="tabs" role="radiogroup" aria-labelledby="o-${name}">${btns}</div></div>`;
+  return `<div class="gfx"><div class="lbl2" id="o-${name}">${t(label)}</div><div class="tabs" role="radiogroup" aria-labelledby="o-${name}">${btns}</div>${extra}</div>`;
 }
 
 function bindRadios(name: string, choose: (id: string) => void): void {
@@ -298,12 +301,34 @@ function bindRadios(name: string, choose: (id: string) => void): void {
 }
 
 const TOUCH_OPTS = TOUCH_MODES.map((id) => ({ id, label: `touch.${id}` }));
+/** Under the graphics selector while the automatic switch to Low is in force: says why, and offers the way back. */
+function autoNoteHtml(): string {
+  const to = autoQuality.undoTarget(preset);
+  if (!to) return '';
+  const name = t(PRESETS.find((p) => p.id === to)!.label);
+  return `<div class="gfx-auto" id="o-gfx-auto"><small>${t('gfx.autoLow')}</small> <button class="tab" id="o-gfx-undo">${t('gfx.autoUndo', { preset: name })}</button></div>`;
+}
 function settingsHtml(): string {
-  return radiosHtml('preset', 'gfx.label', PRESETS, preset) + radiosHtml('touch', 'touch.label', TOUCH_OPTS, touchMode);
+  return radiosHtml('preset', 'gfx.label', PRESETS, preset, autoNoteHtml()) + radiosHtml('touch', 'touch.label', TOUCH_OPTS, touchMode);
+}
+/** Re-mark the graphics selector after a change made outside it (undo), and drop the auto-switch note once it no longer applies. */
+function syncPresetRadios(): void {
+  overlay.querySelectorAll<HTMLButtonElement>('[data-preset]').forEach((x) => {
+    const on = x.dataset.preset === preset;
+    x.classList.toggle('sel', on); x.setAttribute('aria-checked', String(on)); x.tabIndex = on ? 0 : -1;
+  });
+  if (!autoQuality.undoTarget(preset)) overlay.querySelector('#o-gfx-auto')?.remove();
 }
 function bindSettings(): void {
-  bindRadios('preset', (id) => setPreset(id as PresetId));
+  // a pick in the selector is the player's own choice, which the automatic fallback never overrides afterwards
+  bindRadios('preset', (id) => { autoQuality.playerChose(); setPreset(id as PresetId); syncPresetRadios(); });
   bindRadios('touch', (id) => setTouchMode(id as TouchMode));
+  overlay.querySelector('#o-gfx-undo')?.addEventListener('click', (e) => {
+    e.stopPropagation();
+    const to = autoQuality.undo(preset);
+    if (to) setPreset(to);
+    syncPresetRadios();
+  });
 }
 
 function showTitle(): void {
@@ -642,7 +667,7 @@ window.addEventListener('blur', suspend);
 // the results screen keeps simulating when unfocused, so the rebase matters there too: time spent hidden is never replayed
 // back from hidden: the online keepalive gives the socket a fresh silence window (src/net/client.ts) instead of counting time
 // this page was frozen or throttled against it; a socket that really died is then caught by the watchdog and resumed
-document.addEventListener('visibilitychange', () => { if (document.hidden) suspend(); else { net?.client.wake(); netGuard.wake(); } stepper.rebase(); });
+document.addEventListener('visibilitychange', () => { autoQuality.interrupt(); if (document.hidden) suspend(); else { net?.client.wake(); netGuard.wake(); } stepper.rebase(); });
 renderer.domElement.addEventListener('wheel', (e) => { e.preventDefault(); zoomBy(e.deltaY > 0 ? 1.12 : 0.89); }, { passive: false });
 
 /**
@@ -1679,6 +1704,12 @@ function frame(now: number): void {
   // dt paces presentation only (camera, wheels, toasts) and keeps running on menus; race time comes from the stepper
   const dt = Math.min(MAX_GAP, Math.max(0, (now - last) / 1000));
   last = now; time += dt;
+  // raw rAF timestamps, not the clamped dt: a 150 ms frame must read as 150 ms. Only a race on a visible page counts
+  // (offline and online alike), so menus, pause, results and hidden-tab gaps never look like slow frames
+  if (autoQuality.frame(now, screen === 'race' && !document.hidden, preset)) {
+    setPreset('low');
+    hud.toast(t('gfx.autoLow'), 'info');
+  }
   let poses: Pose[];
   let alpha = 1;
   if (net && netRaceId) {
