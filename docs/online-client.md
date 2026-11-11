@@ -2,7 +2,7 @@
 
 Up to four people race in one private room from their own browsers, on desktop or touch devices, against the authoritative room server from [#22](online-server.md). Evidence: [online-client-evidence.md](online-client-evidence.md).
 
-**Status.** Built and checked locally against the real server code. Production is **not** switched on. The deployed static build has no `VITE_ONLINE`, so it shows local play only and never calls `/api` or `/ws`. The owner turns it on with the [runbook](online-server.md#production-activation-runbook-owner), then runs the [checks below](#after-activation-owner).
+**Status.** Live in production: the deployed static build sets `VITE_ONLINE=1` (activated with the [runbook](online-server.md#production-activation-runbook-owner)), and still offers online play only while `/api/health` answers `ok` with its exact protocol version. Each release is checked with the [release procedure](online-server.md#release-procedure-owner). The [checks below](#after-activation-owner) are the owner's physical-device checks; green CI does not replace them or the final validation in #4.
 
 ## Three ways to race
 
