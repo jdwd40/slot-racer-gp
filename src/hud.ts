@@ -268,7 +268,8 @@ export class Hud {
       st = `<b class="cyan">${t('hud.sgL.entryBay', { b })}</b>`;
     } else if (p.mode === 'service') {
       // refuelling, then why departure is not available yet, or what Throttle does now (Waiting for clear exit once asked)
-      st = `<b>${t('hud.refuel', { n: Math.round(p.fuel * 100) })}</b>`;
+      // a stopped-on-track recovery is not a pit stop: the bay adds no fuel, so the line says so rather than "refuelling"
+      st = `<b>${t(p.stallSvc ? 'hud.stallBay' : 'hud.refuel', { n: Math.round(p.fuel * 100) })}</b>`;
       if (p.fuelDue > 0 && !p.towSvc) st += ` · <span class="org">${t('hud.fuelServing', { n: Math.max(0, SERVICE_READY - p.serviceT + 0.05).toFixed(1) })}</span>`;
       else if (this.fuelVisit) st += ` · <span class="grn">${t('hud.fuelServed')}</span>`;
       const why = race.departBlock(p);

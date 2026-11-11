@@ -119,10 +119,10 @@ The protocol is JSON text over WebSocket at `/ws`. The first client message must
 
 **Stopped-on-track recovery on the wire (#69).** These additions are backward compatible, so `PROTOCOL_VERSION` stays 1:
 
-- Each `CarSnapshot` gained two optional fields: `stallT`, the seconds counted towards recovery (0 when no countdown runs), and `stallHold`, recovered and waiting for its bay. The mirror copies them only when present, and a snapshot without them reads as no countdown.
+- Each `CarSnapshot` gained three optional fields: `stallT`, the seconds counted towards recovery (0 when no countdown runs); `stallHold`, recovered and waiting for its bay; and `stallSvc`, in its bay after a recovery, where no fuel is added. The mirror copies them only when present, and a snapshot without them reads as no countdown.
 - The recovery is one ordinary race event in `state.ev`, `{ type: 'recover', car: <driver id> }`, with the driver's `msg.stallRecovered` message alongside. A client that does not know the event type ignores it.
 - No message type, field of a client message or message loop was added, and the snapshot rate and its cap are unchanged.
-- A client and server must still run the same rules: the existing rollout check compares `rules`.
+- The browser gates online play on `protocol` only. The rules are compared only by the deploy smoke check, between the server and its build. A tab still running an older bundle (also protocol 1) can therefore race on a newer server. It shows no countdown or `recover` toast, and its car simply appears in its bay. Results stay correct because the server is authoritative. Reload such tabs after a rules upgrade.
 
 Bump `PROTOCOL_VERSION` on any incompatible change. The browser enables online play only when `/api/health` reports exactly its protocol version. The rollout smoke check compares the server's protocol and rules with the build's `server-dist/protocol.json`. `RULES_VERSION` (`race-core-2026.11.3`) is recorded in every envelope. Bump it whenever a simulation change could change a result. History: `race-core-2026.11.1` first online rules; `race-core-2026.11.2` retired cars leave the track (#44); `race-core-2026.11.3` a human car stopped on the racing lane for 3 s is moved back to its own bay (#69). Personal bests are stored per rules version (`personal_bests` key, [career.md](career.md)), so a bump starts a new set of personal bests for races on the room server (multiplayer and every other online mode); laps set under an older version are kept apart.
 

@@ -2,7 +2,7 @@
 // car ahead, gets a three-second warning and is then moved to its own bay. These tests drive the shared race core (the same
 // code the room server runs) under continuous simulation. See docs/auto-bay.md#stopped-on-track-recovery.
 import { describe, it, expect } from 'vitest';
-import { Race, Car, LAPS, PEN, REFUEL_RATE, REV, STALL, type Controls, type Input, type RosterEntry, type WireEvent, type RaceSnapshot } from '../src/race';
+import { Race, Car, LAPS, PEN, STALL, type Controls, type Input, type RosterEntry, type WireEvent, type RaceSnapshot } from '../src/race';
 import { stallLeft } from '../src/hud';
 import { applySnapshot, localEvent, mirrorRace } from '../src/net/mirror';
 import { FINISH_S } from '../src/track';
@@ -651,12 +651,11 @@ describe('the recovery itself', () => {
     expect(r.pit.held(p)).toEqual(['bay2']);
     expect(msgsOf(ev, 'p')).not.toContain('msg.towPenalty');
     expect(ev.filter((e) => e.type === 'tow' || e.type === 'lap' || e.type === 'served')).toEqual([]);
-    // standing in the bay is not the committed fuel stop and not the stop-and-go; it refuels only at the usual rate
-    const t0 = r.raceTime;
-    run(r, {}, 2);
+    // standing in the bay is not the committed fuel stop and not the stop-and-go, and it adds no fuel at all
+    run(r, {}, 10);
     expect(p.fuelDue).toBe(LAP); expect(p.sgOwed).toBe(PEN.stopSeconds); expect(p.svcBreach).toBe('fuel');
-    expect(p.fuel).toBeLessThanOrEqual(fuel + REFUEL_RATE * (r.raceTime - t0) + 1e-9);
-    expect(p.fuel).toBeLessThan(1);
+    expect(p.fuel).toBe(fuel);
+    expect(p.stallSvc).toBe(true);
     expect(r.departBlock(p)).toBe(null);       // no tow penalty: only the usual settle time
   });
 
@@ -840,6 +839,144 @@ describe('no shortcut: progress, laps, timing and position', () => {
       expect(p.u).toBeLessThan(x.u);
       r.drainEvents();
     }
+  });
+});
+
+describe('no free pit stop (review B1)', () => {
+  it('a recovered car gains no fuel in its bay, however long it stays, and leaves with what it had', () => {
+    const r = race([human('p', 3)]);
+    const p = r.car('p')!;
+    place(r, p, U(r, STRAIGHT), 1, 0);
+    p.fuel = 0.3;
+    run(r, {}, 3 + DT, (e) => recov(e).length > 0);
+    expect(p.mode).toBe('service');
+    run(r, {}, 20);
+    expect(p.fuel).toBe(0.3);
+    expect(p.pitStops).toBe(0);
+    // leave (release, then press when Ready) and run out to the pit exit: never more than at the transfer
+    let maxFuel = 0;
+    run(r, (rr) => ({ p: { up: rr.car('p')!.sgPhase === 'ready', down: false } }), 20, () => { maxFuel = Math.max(maxFuel, p.fuel); return p.mode === 'race'; });
+    expect(p.mode).toBe('race');
+    expect(maxFuel).toBe(0.3);
+    expect(p.fuel).toBeLessThanOrEqual(0.3);
+  });
+
+  /**
+   * The review's race: a human on 0.3 fuel 120 m before the line wants 0.85 or more. Either a real visit (Pit, then automatic
+   * control and the bay), or stopping by its own bay on the outside lane and waiting to be recovered (then, since the bay adds
+   * no fuel, a real visit a lap later). Seconds until it is back on the road past the pit exit with 0.85.
+   */
+  function toFuel(slot: number, busy: boolean, stall: boolean): { t: number; recovered: boolean } {
+    const r = race([human('p', slot), ai('x', slot === 1 ? 2 : 1)]);
+    const p = r.car('p')!, x = r.car('x')!;
+    p.fuel = 0.3;
+    place(r, p, U(r, r.T.FINISH_S - 120), -1, 15);
+    if (busy) { x.mode = 'pitlane'; x.u = U(r, r.T.PEN_S); x.d = r.T.pitD(r.s(x)); x.v = 0; x.laneSide = -1; x.sgOwed = 12; x.sgDue = LAP + 1; x.pitReq = true; }
+    else place(r, x, U(r, 120), 1, 0);
+    if (!stall) r.requestPit('p');
+    const stopAt = U(r, r.T.BAYS[p.bayHome] + 0.4);
+    const t0 = r.raceTime;
+    let recovered = false, asked = !stall, prev = p.mode, at = -1;
+    run(r, (rr) => {
+      const c = rr.car('p')!;
+      // in a bay: wait for the tank, or leave as soon as it is clear that this bay adds nothing
+      if (c.mode === 'service' || c.mode === 'bayIn' || c.mode === 'bayOut') return { p: { up: c.sgPhase === 'ready' && (c.fuel > 0.9 || (c.serviceT > 1.5 && c.fuel <= c.fuelAtBay)), down: false } };
+      if (stall && !recovered) return { p: stopAt - c.u <= (c.v * c.v) / 60 + 0.2 ? BOTH : drive(rr.snapshot(), 'p') };
+      if (!asked && c.mode === 'race') { rr.requestPit('p'); asked = true; }
+      return { p: drive(rr.snapshot(), 'p') };
+    }, 150, (ev) => {
+      if (recov(ev, 'p').length) recovered = true;
+      if (prev === 'pitlane' && p.mode === 'race' && p.fuel >= 0.85 && at < 0) at = r.raceTime - t0;
+      prev = p.mode;
+      return at >= 0;
+    });
+    return { t: at, recovered };
+  }
+
+  for (const slot of [0, 3]) for (const busy of [false, true]) {
+    it(`stopping by bay ${slot + 1} to be recovered is never faster than a real pit visit (box ${busy ? 'busy with a 12 s stop-and-go' : 'free'})`, () => {
+      const real = toFuel(slot, busy, false);
+      const stall = toFuel(slot, busy, true);
+      expect(real.t).toBeGreaterThan(0);
+      expect(stall.recovered).toBe(true);
+      // the recovery gives no fuel, so the stall route still needs the whole real visit, a lap later
+      expect(stall.t).toBeGreaterThan(real.t + 10);
+    });
+  }
+});
+
+describe('exemptions and clean-up, each on its own (review NB4)', () => {
+  it('every held flag on its own is a legitimate wait; with none the rule applies', () => {
+    const r = race([human('p')]);
+    const p = r.car('p')!;
+    place(r, p, U(r, STRAIGHT), 1, 0);
+    expect(r.stallBlock(p)).toBe(null);
+    for (const set of [(c: Car) => { c.pitHold = true; }, (c: Car) => { c.exitHold = true; }, (c: Car) => { c.squeezeHold = true; }, (c: Car) => { c.yielding = true; }, (c: Car) => { c.sgCtl = true; }, (c: Car) => { c.recoverT = 0.5; }, (c: Car) => { c.fuel = 0; }]) {
+      const keep = { ...p };
+      set(p);
+      expect(r.stallBlock(p)).toBe('held');
+      Object.assign(p, keep);
+      expect(r.stallBlock(p)).toBe(null);
+    }
+  });
+
+  it('a car on another level of the slot (more than 1 m above or below) does not trap, whatever its slot distance', () => {
+    const r = race([human('a'), human('b')]);
+    const a = r.car('a')!, b = r.car('b')!;
+    place(r, a, U(r, STRAIGHT), 1, 0); place(r, b, U(r, STRAIGHT) - r.T.CAR_LEN - 1, 1, 0);
+    expect(r.stallBlock(b)).toBe('held');
+    a.z = b.z + 1.5;
+    expect(r.stallBlock(b)).toBe(null);
+    a.z = b.z - 1.5;
+    expect(r.stallBlock(b)).toBe(null);
+  });
+
+  it('the recovery releases every pit reservation (logged as recover) and clears the car\'s contact state', () => {
+    const r = race([human('p'), ai('x')]);
+    parkAI(r);
+    const p = r.car('p')!, x = r.car('x')!;
+    place(r, x, U(r, 100), 1, 0);
+    // routed for a stop-and-go on the approach: it holds the box
+    place(r, p, U(r, r.T.PIT_IN0 - 20), -1, 0);
+    p.sgOwed = PEN.stopSeconds; p.sgDue = LAP + 1; r.syncRoute(p);
+    r.update(DT, {});
+    expect(r.pit.box).toBe(p.idx);
+    r.touching[Math.min(p.idx, x.idx) * 4 + Math.max(p.idx, x.idx)] = true;
+    expect(r.stallRecover(p)).toBe(true);
+    expect(r.pit.box).toBe(-1);
+    expect(r.pit.log.some((e) => e.car === p.idx && e.zone === 'box' && e.op === 'release' && e.why === 'recover')).toBe(true);
+    expect(r.pit.held(p)).toEqual([`bay${p.bayHome}`]);
+    expect(touches(r, p)).toBe(false);
+  });
+
+  it('a car the finish window classifies on the step its count expires gets that one outcome: DNF, no recovery', () => {
+    const r = new Race({ roster: [human('a'), human('p')], seed: 3, track: 'circuit-1', finishWindow: 10 });
+    r.phase = 'racing'; r.t = 60; r.raceTime = 50;
+    for (const c of r.cars) { c.mode = 'race'; c.graceT = 0; c.crossed = LAP; c.lapsDone = LAP - 1; }
+    const p = r.car('p')!;
+    place(r, p, U(r, STRAIGHT), 1, 0);
+    r.car('a')!.status = 'finished'; r.car('a')!.finished = true; r.car('a')!.mode = 'off'; r.car('a')!.off = { x: 0, y: 0, vx: 0, vy: 0, yaw: 0, spin: 0, t: 9, z: 0, vz: 0, u0: 0, lane: 1 };
+    r.ai = () => ({ t: 0, b: 1 });
+    // the window closes on the very step the count reaches 3 s
+    r.firstFlagT = r.raceTime + 3 - 10 - 1 / 240;
+    const ev = run(r, {}, 3, undefined, 1 / 120);
+    expect(p).toMatchObject({ status: 'dnf', dnfReason: 'window', mode: 'race' });
+    expect(recov(ev)).toEqual([]);
+  });
+});
+
+describe('the pit entrance (review NB1)', () => {
+  it('stopped between the pit entrance and its own bay: moved back about a lap, over the line and that entrance, to re-drive the same approach', () => {
+    const r = race([human('p', 3)]);
+    const p = r.car('p')!;
+    // just past the entrance on the outside road lane, short of bay 4 (21.5)
+    place(r, p, U(r, r.T.PIT_IN0 + 3), -1, 0);
+    const u = p.u, appr = r.apprLap(p), hiU = p.hiU, crossed = p.crossed;
+    run(r, {}, 3 + DT, (e) => recov(e).length > 0);
+    expect(p.mode).toBe('service');
+    expect(u - p.u).toBeCloseTo(r.T.L - (r.T.BAYS[3] - r.T.PIT_IN0 - 3), 6);
+    // nothing counted back: the same approach number, the same furthest point, the same lap count
+    expect([r.apprLap(p), p.hiU, p.crossed]).toEqual([appr, hiU, crossed]);
   });
 });
 

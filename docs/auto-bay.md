@@ -94,10 +94,10 @@ In a three-car queue only the front car counts; the two behind it are trapped. I
 `Race.stallRecover()` is a new recovery, not the out-of-fuel tow. It emits one `recover` event (for every client) and `msg.stallRecovered` ("Stopped on track — moved to pits") to its driver. It returns false and changes nothing for a car no longer on the racing lane with a running result. So a car towed, de-slotted, retired or finished on the same step is never recovered too, and a recovered car is never recovered again.
 
 - **Off the lane at once.** The car leaves the squeeze queue. Any pit reservation is released (`recover`). A lane change in progress is completed, routing intent is cleared (as entering the pit lane clears it) and contact state is cleared. Speed, pedals, slip, reverse and every automatic hold are reset.
-- **Into its own bay.** The car is placed at rest in `service` in `bayHome`, holding that bay, as if it had just turned in. It is not counted as a pit stop and no penalty runs. `towSvc` is set, so standing in the bay **does not serve** a committed fuel stop, and the stop-and-go box is behind it, so a stop-and-go is not served either.
+- **Into its own bay, only to rejoin.** The car is placed at rest in `service` in `bayHome`, holding that bay, as if it had just turned in. It is not counted as a pit stop and no penalty runs. The bay is only a safe place to rejoin from: `stallSvc` is set, so **no fuel is added** however long it stands there (the HUD says `MOVED TO PITS · NO REFUELLING · FUEL n%`). `towSvc` is set too, so standing there does not serve a committed fuel stop, and the stop-and-go box is behind it, so a stop-and-go is not served either. For fuel or service the car must make a real visit through the pit entrance.
 - **Bay not free.** No other car ever uses a car's bay, so this only arises in a scripted set-up. If the bay is taken anyway, the car waits in mode `tow` with `stallHold`: out of collisions and traffic, and drawn as gone (`towT` past the tow blink). It is placed the first step the bay is free. That step emits no second event, takes no second reservation and leaves no permanent limbo.
 - **Kept:** the driver, car, livery, number, `status: running`, laps, lap times and best lap, offences, `timePen`, the fuel in the tank at the moment of transfer, every stop-and-go and fuel-stop debt, deadline and deferral, a latched breach, `hiU` (approach numbering) and the sector bits.
-- **Leaving.** The usual bay rules apply ([departure](#departure)): `upPrev` is set, so a Throttle held through the stop and the recovery must be released and pressed again once Ready. The car refuels at the normal rate while it stands there (a tank is never filled at once). It leaves when the merge is clear and is driven to the pit exit, with the start grace there as usual. Out-of-fuel tows keep their own rules and their own time penalty; this recovery adds none.
+- **Leaving.** The usual bay rules apply ([departure](#departure)): `upPrev` is set, so a Throttle held through the stop and the recovery must be released and pressed again once Ready. The fuel stays exactly as it was at the transfer. It leaves when the merge is clear and is driven to the pit exit, with the start grace there as usual. Out-of-fuel tows keep their own rules and their own time penalty; this recovery adds none.
 
 ### No shortcut
 
@@ -105,9 +105,14 @@ The car is moved **back** to the last place it passed its own bay (`u` falls by 
 
 - Stopped anywhere from the line round to just before its bay, the car moves back over the line it last crossed. `crossed` never decreases and `laps()` counts only new crossings, so driving over that line again counts nothing. The lap is completed only at the real next crossing, and it is void (`lapValid` false), so it cannot be a best lap, a board entry or a career best. This covers the start-line wrap on lap 1 and the final lap: a car recovered mid-way round its final lap must drive the whole lap again and finishes at the real flag.
 - Stopped between its bay and the line, it moves back a few metres and crosses the line once, from the pit lane, as after any stop.
-- The pit entrance is never in the stretch moved over (it lies before the bays), and approaches count from `hiU`, so no deadline or approach moves.
+- Stopped after its bay (anywhere from the bay round to the pit entrance), the stretch moved over does not contain the pit entrance. Stopped between the pit entrance and its own bay, the car moves back about a lap, over the line *and* over that entrance, and drives the same approach again. Approaches count from `hiU`, so no approach number, deadline or deferral moves. The car can use that approach once more, just as reversing back over a missed entrance already allows, at the cost of almost a lap (tested).
+- Fuel: none is added in the bay (above). Stopping by the bay to be recovered and then making a real visit is never faster than the real visit alone. On Clubman Park with 0.3 fuel, 120 m before the line, to rejoin with 0.85: a real visit took 16.2 s with the box free and 20.6 s behind a 12 s stop-and-go; the recovery route took 38.2 to 38.8 s (tested for bays 1 and 4, box free and busy).
 
 The loss is the distance driven since the car last passed its bay, from a few metres up to about a lap. It never pays to stop.
+
+**Order on one step.** The rule is judged after the finish window and the race-time limit, so a car those classify on the same step gets that one result (for example DNF `window`) and no recovery.
+
+**Known limits.** The rule is about stopped cars, as the issue asks. A car crawling at `stopV` or more, or one that hops (stops for under 3 s, drives the 4 m at 3 m/s, stops again), never completes a count. Followers can pass it at the switches. Reversing on an empty road pauses the count for as long as it continues; reversing into a car behind stops the car, and the count then runs. A rolling minimum-progress rule could be a follow-up.
 
 ### Player feedback
 
@@ -117,7 +122,7 @@ The loss is the distance driven since the car last passed its bay, from a few me
 
 ### Online
 
-The server's race core counts, decides and recovers. Snapshots carry `stallT` and `stallHold` per car; both are additive, and the mirror copies them, so the HUD reads the server's count. The recovery goes out once as the ordinary race event `{ type: 'recover', car }`, with the personal message alongside. There is no new message type and no extra message loop. A disconnected car has no immunity: its controls are neutral and its count runs like anyone's. A reconnect gets the current state, with no events replayed, so the count is neither reset nor extended and a recovery is never repeated.
+The server's race core counts, decides and recovers. Snapshots carry `stallT`, `stallHold` and `stallSvc` per car; both are additive, and the mirror copies them, so the HUD reads the server's count. The recovery goes out once as the ordinary race event `{ type: 'recover', car }`, with the personal message alongside. There is no new message type and no extra message loop. A disconnected car has no immunity: its controls are neutral and its count runs like anyone's. A reconnect gets the current state, with no events replayed, so the count is neither reset nor extended and a recovery is never repeated.
 
 ### Evidence (#69)
 
