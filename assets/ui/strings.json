@@ -74,6 +74,8 @@
     { "id": "gfx.low", "text": "Low" },
     { "id": "gfx.balanced", "text": "Balanced" },
     { "id": "gfx.high", "text": "High" },
+    { "id": "gfx.autoLow", "text": "Switched to Low graphics for smoother play" },
+    { "id": "gfx.autoUndo", "text": "Undo: back to {preset}" },
     { "id": "pause.title", "text": "Paused" },
     { "id": "pause.resume", "text": "Resume" },
     { "id": "pause.restart", "text": "Restart Race" },

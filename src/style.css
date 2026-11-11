@@ -118,6 +118,8 @@ small { color: #9ca3af; font-weight: 500; }
 .row.wrap { flex-wrap: wrap; }
 .gfx { margin-bottom: 14px; }
 .setup .gfx { margin-bottom: 0; }
+/* the automatic Low fallback's note and undo, inside the graphics group (#66) */
+.gfx-auto { display: flex; gap: 6px; justify-content: center; align-items: center; flex-wrap: wrap; max-width: 320px; margin: 0 auto; color: #9ca3af; }
 .cta.small { font-size: 13px; padding: 10px 14px; }
 .round { font-size: 11px; letter-spacing: 1.5px; color: #c084fc; font-weight: 800; margin-top: 2px; }
 .btn.off { opacity: 0.45; }
