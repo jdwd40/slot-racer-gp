@@ -15,7 +15,8 @@ afterEach(() => vi.restoreAllMocks());
 /** Messages that tell the player, before the deciding entrance, that missing it means a DQ. */
 const WARN = ['msg.sgLastLap', 'msg.sgLastLapFinal', 'msg.pitThisLap', 'msg.deferred'];
 
-interface Mark { t: number; lap: number; what: string; chip: boolean }
+/** `step`: the simulation step it happened in; `lastMsg`: it is the last message of that step, so the toast the HUD shows */
+interface Mark { t: number; lap: number; what: string; chip: boolean; step: number; lastMsg: boolean }
 type Hook = (r: Race, P: Car) => void;
 
 /** The player alone on circuit-1, `into` metres past the line on lap `lap`. */
@@ -37,8 +38,8 @@ function solo(lap: number): { r: Race; P: Car; rival: Car } {
  */
 function drive(r: Race, P: Car, hook: Hook = () => {}, maxSec = 400, until?: () => boolean, wire?: WireEvent[]): Mark[] {
   const out: Mark[] = [];
-  let appr = r.apprLap(P), tap = false;
-  const mark = (what: string): void => { out.push({ t: r.raceTime, lap: P.crossed, what, chip: r.lastChance(P) }); };
+  let appr = r.apprLap(P), tap = false, step = 0;
+  const mark = (what: string): void => { out.push({ t: r.raceTime, lap: P.crossed, what, chip: r.lastChance(P), step, lastMsg: false }); };
   for (let t = 0; t < maxSec && !P.finished && !until?.(); t += DT) {
     hook(r, P);
     tap = !tap;
@@ -46,8 +47,12 @@ function drive(r: Race, P: Car, hook: Hook = () => {}, maxSec = 400, until?: () 
     const up = P.mode === 'service' ? r.departBlock(P) === null && tap
       : P.sgCtl || P.sgLeave ? false : P.v < prof[Math.floor(r.s(P) / r.T.PROFILE_STEP) % prof.length] * 0.95;
     r.update(DT, all(r, { up, down: false }));
+    step++;
+    // hud.toast keeps one toast: the player sees the step's last message (events are handled in order, offline and online)
+    const mine = r.events.filter((e) => e.type === 'msg' && e.to === P.id);
+    const shown = mine[mine.length - 1];
     for (const e of r.events) {
-      if (e.type === 'msg') { if (e.to === P.id) mark(e.text); }
+      if (e.type === 'msg') { if (e.to === P.id) { mark(e.text); out[out.length - 1].lastMsg = e === shown; } }
       else if ('car' in e && e.car === P && (e.type === 'breach' || e.type === 'dq' || e.type === 'finish' || e.type === 'offence')) mark(e.type === 'dq' ? `dq:${e.reason}` : e.type === 'breach' ? `breach:${e.what}` : e.type);
     }
     // taken off the race as the room server does, so a test can replay them into a mirror
@@ -78,6 +83,8 @@ function warnedBefore(tl: Mark[], warn: string, lastEntrance: number, breach: st
   const w = at(tl, warn), e = at(tl, `entrance ${lastEntrance}`), b = at(tl, breach);
   expect(w, `${warn} posted`).toBeGreaterThanOrEqual(0);
   expect(w, `${warn} before entrance ${lastEntrance}`).toBeLessThan(e);
+  // and it is the toast left on screen: nothing posted later in the same step (such as "Final lap!") replaces it
+  expect(tl[w].lastMsg, `${warn} is the last message of its step: ${tl.filter((m) => m.step === tl[w].step).map((m) => m.what)}`).toBe(true);
   expect(e).toBeLessThan(b);
   // a full lap's warning, not a last-second one: at least ~10 s on circuit-1 before the deciding entrance
   expect(tl[e].t - tl[w].t).toBeGreaterThan(10);
@@ -113,6 +120,9 @@ describe('a deferred stop-and-go', () => {
     const { r, P, rival } = solo(LAPS - 1);
     P.offences = 2; r.offence(P, rival, 'rear');
     const tl = drive(r, P, overrideOn([LAPS - 1, LAPS]));
+    // "Final lap!" is posted first at that crossing, so the DQ warning is the toast left on screen
+    const at12 = tl.filter((m) => m.step === tl[at(tl, 'msg.sgLastLapFinal')].step).map((m) => m.what);
+    expect(at12).toEqual(['msg.finalLap', 'msg.sgLastLapFinal']);
     warnedBefore(tl, 'msg.sgLastLapFinal', LAPS, 'dq:stopGo');
   });
 });
@@ -135,6 +145,32 @@ describe('a committed fuel stop from an inside-lane override', () => {
     const tl = drive(r, P, overrideOn([LAPS - 1, LAPS]));
     expect(whats(tl).slice(0, 6)).toEqual(['msg.pitRequested', 'msg.fuelOverride', `entrance ${LAPS - 1}`, 'msg.finalLap', 'msg.pitThisLap', 'msg.routeInsideDq']);
     warnedBefore(tl, 'msg.pitThisLap', LAPS, 'dq:fuel');
+  });
+
+  it('a retired car is out of the race: no last chance and no message at the line that starts its due lap', () => {
+    const { r, P } = solo(9);
+    P.fuel = 0.5; r.requestPit(P.id);
+    drive(r, P, overrideOn([9]), 60, () => P.fuelDue > 0);
+    expect(P.fuelDue).toBe(10);
+    r.retire(P.id);
+    expect(P.status).toBe('dnf');
+    // a retired car usually parks at once; if it does coast over the line, the lap count still runs (laps()), so call it
+    // directly at the crossing that starts the due lap
+    r.events.length = 0;
+    P.u = T.FINISH_S + 9 * T.L + 1; P.hiU = P.u; P.crossed = 9; P.lapsDone = 8; P.sectors = 7;
+    r.laps(P);
+    expect(P.crossed).toBe(10);
+    expect(r.lastChance(P)).toBe(false);
+    expect(r.events.filter((e) => e.type === 'msg').map((e) => (e as { text: string }).text)).not.toContain('msg.pitThisLap');
+    // retire() already sets finished, which lastChance() checks; status is checked too, so a terminal car whose finished
+    // flag is not set (a hand-built or older snapshot) still reads as out of the race
+    P.finished = false;
+    expect(r.lastChance(P)).toBe(false);
+    // control: the same crossing for a running car does post it
+    const { r: r2, P: Q } = solo(10);
+    Q.fuelDue = 10; Q.u = T.FINISH_S + 9 * T.L - 1; Q.hiU = Q.u; Q.crossed = 9; Q.lapsDone = 8;
+    r2.laps(Q); Q.u += 2; Q.hiU = Q.u; r2.laps(Q);
+    expect(r2.events.filter((e) => e.type === 'msg').map((e) => (e as { text: string }).text)).toContain('msg.pitThisLap');
   });
 });
 
@@ -188,6 +224,7 @@ describe('the test bot from the issue: Space every 8 s for a whole race', () => 
       const w = tl.slice(0, e).map((m) => WARN.includes(m.what) && m.lap === due).lastIndexOf(true);
       expect(e, `${track}+${off}`).toBeGreaterThan(0);
       expect(w, `${track}+${off}: warned on lap ${due}`).toBeGreaterThanOrEqual(0);
+      expect(tl[w].lastMsg, `${track}+${off}: ${tl[w].what} is the visible toast`).toBe(true);
       // (no minimum lead here: a bot that runs dry is towed over the entrance, and a tow's service never settles the stop)
       for (let i = w; i <= e; i++) expect(tl[i].chip, `${track}+${off}: chip at ${tl[i].what}`).toBe(true);
     }

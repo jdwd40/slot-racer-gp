@@ -49,6 +49,9 @@ button:focus-visible { outline: 2px solid #fff; outline-offset: 2px; }
 .chip.rev { background: #f4f4f5; color: #111; }
 .blink { animation: blink 0.5s infinite alternate; }
 @keyframes blink { from { opacity: 1; } to { opacity: 0.45; } }
+/* the last-chance chip (#65) never fades below 0.8: its dim phase must stay readable on a small, bright phone screen */
+.chip.last-chance { animation-name: blink-strong; }
+@keyframes blink-strong { from { opacity: 1; } to { opacity: 0.8; } }
 .br { position: absolute; bottom: var(--eB); right: var(--eR); }
 #h-mini { width: var(--mini-w); height: var(--mini-h); }
 .toast { position: absolute; top: calc(var(--eT) + 52px); left: 50%; transform: translate(-50%, -10px); padding: 9px 18px; border-radius: 10px; font-size: 16px; font-weight: 700; background: rgba(10,14,20,0.82); opacity: 0; transition: opacity 0.2s, transform 0.2s; white-space: nowrap; border-left: 4px solid #60a5fa; }

@@ -236,7 +236,7 @@
     { "id": "msg.fuelOverride", "text": "Pit route overridden — fuel stop now compulsory next lap" },
     { "id": "msg.fuelDone", "text": "Fuel stop done — obligation cleared" },
     { "id": "msg.penStillOwed", "text": "Stop-and-go still owed — serve it by the end of its due lap" },
-    { "id": "msg.sgLastLap", "text": "Stop-and-go not served — last chance: serve it this lap" },
+    { "id": "msg.sgLastLap", "text": "Stop-and-go not served — last chance: serve it this lap or be disqualified" },
     { "id": "msg.sgLastLapFinal", "text": "Stop-and-go not served — final lap: serve it before the flag or be disqualified" },
     { "id": "msg.sgLate", "text": "No pit entry left for this stop-and-go — unserved at the flag means disqualification" },
     { "id": "msg.breachSg", "text": "Stop-and-go deadline missed — you will be disqualified at the flag" },
