@@ -45,6 +45,24 @@ Functional runs default to 480×270 at Low so SwiftShader can run them. Perf cap
 
 `__game.advance` and scripted state are functional coverage only and are never used for timing or smoothness.
 
+**Stopped-on-track rule in the scenarios (#69).** Skipping the lights with `__game.advance` leaves the player standing on the grid, which would count towards the 3 s rule, so the harness clears the stopped count after every `advance`. Scenarios that place a stopped car and then read the HUD take longer than 3 s of race time per check on SwiftShader; `routing`, `touch`, `service`, `lastchance`, `reverse`, `queue`, `autosg` and `autobay` therefore switch the rule off for their race (`__qa.noStall()`). `race`, `touchrace`, `controlled` and `stall` keep it on. At SwiftShader's 3 to 5 frames a second the scripted driver sometimes brakes to a standstill at a corner; in one `touchrace` run (#72 review) it was recovered once, left the bay and still finished. Its refuelling check ignores a recovery bay stay. The scripted driver leaves a recovery bay as soon as it may, since that bay adds no fuel.
+
+| Scenario, #69 review fixes on `c109ab2` | Passed | Failed |
+| --- | --- | --- |
+| `reverse` | 9 | 0 |
+| `routing` | 16 | 0 |
+| `service` | 16 | 0 |
+| `lastchance` | 14 | 0 |
+| `queue` | 12 | 0 |
+| `controlled` | 17 (plus the existing n/a) | 0 |
+| `autosg` | 16 | 0 |
+| `autobay` | 27 | 0 |
+| `touch` | 53 | 0 |
+| `touchrace` | 7 | 0 |
+| `stall` | 27 | 0 |
+
+Each was run on its own, in headless Chromium 156.0.8078.4 with SwiftShader.
+
 ### Metrics
 
 `scripts/frame-stats.mjs` works from one row per animation callback, tested in `test/frameStats.test.ts`.

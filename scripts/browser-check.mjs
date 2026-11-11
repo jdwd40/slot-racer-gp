@@ -41,9 +41,12 @@ function instrument({ seed }) {
     };
   }
   const qa = (window.__qa = { rows: [], log: [], pixels: null, wantPixels: false, pointerIds: new Set(), padClicks: 0 });
+  // the stopped-on-track rule off for the current race (#69): see scriptedTime
+  qa.noStall = () => { window.__game.race.stallUpdate = () => {}; };
   window.addEventListener('pointerdown', (e) => qa.pointerIds.add(e.pointerId), true);
   window.addEventListener('click', (e) => { if (e.target.closest?.('.tbtn')) qa.padClicks++; }, true);
   const seen = {};
+  const T0wrap = (g, u) => g.T.wrapS(u).toFixed(1);
   const note = (ts, raceTime, key, value) => {
     if (seen[key] === value) return;
     seen[key] = value;
@@ -85,6 +88,8 @@ function instrument({ seed }) {
     note(ts, r.raceTime, 'pitReq', p.pitReq);
     note(ts, r.raceTime, 'pitStops', p.pitStops);
     note(ts, r.raceTime, 'offences', p.offences);
+    // stopped-on-track countdown (#69), in whole seconds left, and where the car stood when it began
+    note(ts, r.raceTime, 'stall', p.stallT > 0 ? `${Math.ceil(3 - p.stallT)}s at s=${T0wrap(g, p.u)} v=${p.v.toFixed(2)}` : '');
     note(ts, r.raceTime, 'view', g.view);
     note(ts, r.raceTime, 'toast', document.getElementById('h-toast')?.textContent ?? '');
     if (qa.wantPixels) { qa.wantPixels = false; qa.pixels = samplePixels(); }
@@ -93,7 +98,7 @@ function instrument({ seed }) {
   /** Read the player's situation and decide the keys: stay under the corner speed, hold back in traffic, pit for fuel or a penalty. */
   qa.drive = (o) => {
     const g = window.__game, r = g.race, T = g.T, p = r.car(window.__game.localId), s = T.wrapS(p.u);
-    const st = { screen: g.screen, phase: r.phase, mode: p.mode, lap: p.lapsDone, crossed: p.crossed, v: p.v, fuel: p.fuel, side: p.laneSide, raceTime: r.raceTime, finished: p.finished, sgOwed: p.sgOwed, pitStops: p.pitStops, view: g.view, lapValid: p.lapValid };
+    const st = { screen: g.screen, phase: r.phase, mode: p.mode, lap: p.lapsDone, crossed: p.crossed, v: p.v, fuel: p.fuel, side: p.laneSide, raceTime: r.raceTime, finished: p.finished, sgOwed: p.sgOwed, pitStops: p.pitStops, view: g.view, lapValid: p.lapValid, stallSvc: p.stallSvc };
     const cmd = { up: false, down: false, lane: false, pit: false };
     if (g.screen !== 'race' || p.finished) return { st, cmd };
     if (r.phase === 'countdown') { cmd.up = !!o.holdOnGrid; return { st, cmd }; }
@@ -139,7 +144,8 @@ function instrument({ seed }) {
       else if (stop === null || a < -1) cmd.up = true;
       else if (a < Math.max(0.8, reach + 0.2)) cmd.down = true;
       else cmd.up = p.v < Math.min(T.PIT_SPEED, 1.5 + a);
-    } else if (p.mode === 'service') cmd.up = p.fuel >= fill && p.penalty <= 0 && p.sgPhase !== 'refuel';   // a fresh press once ready
+    // a fresh press once ready; a stopped-on-track recovery adds no fuel (#69), so that bay is left as soon as it may be
+    } else if (p.mode === 'service') cmd.up = (p.fuel >= fill || p.stallSvc) && p.penalty <= 0 && p.sgPhase !== 'refuel';
     else if (p.mode === 'bayOut') cmd.up = true;
     return { st, cmd };
   };
@@ -173,6 +179,20 @@ class Checks {
   }
 }
 
+/**
+ * Scripted fast-forward is set-up, not driving (#69). A scenario that skips the lights with `__game.advance` leaves the player
+ * standing on the grid for seconds, then places it by script: without this, that time counted towards the stopped-on-track
+ * rule and the car was recovered to its bay mid-scenario. So every `advance` ends with the stopped count cleared; whatever
+ * happens in real frames afterwards counts as usual. `__qa.noStall()` switches the rule off for a scenario that holds the car
+ * still on the road on purpose: the pit, service, reverse and touch scenarios place a stopped car and read the HUD, which at
+ * SwiftShader frame rates takes longer than 3 s of race time. `race`, `touchrace`, `controlled` and `stall` keep the rule on.
+ */
+function scriptedTime() {
+  const g = window.__game;
+  const advance = g.advance;
+  g.advance = (sec) => { advance(sec); for (const c of g.race.cars) { c.stallT = 0; c.stallRun = 0; } };
+}
+
 async function open(run, { seed = SEED, fixtures = null, viewport = run.viewport, dpr = run.dpr, preset = run.preset, device = {} } = {}) {
   // newContext is an empty, throwaway profile; nothing here touches a real browser profile
   const context = await run.browser.newContext({ viewport, deviceScaleFactor: dpr, ...device });
@@ -182,12 +202,13 @@ async function open(run, { seed = SEED, fixtures = null, viewport = run.viewport
   page.on('pageerror', (e) => errors.push(`pageerror: ${e.message}`));
   page.on('console', (m) => { if (m.type() === 'error') errors.push(`console: ${m.text()}`); });
   await page.addInitScript(instrument, { seed });
-  const load = async () => { await page.goto(run.url); await page.waitForFunction(() => window.__game && window.__game.screen === 'title'); };
+  const load = async () => { await page.goto(run.url); await page.waitForFunction(() => window.__game && window.__game.screen === 'title'); await page.evaluate(scriptedTime); };
   await load();
   if (fixtures) {
     await page.evaluate((f) => { for (const [k, v] of Object.entries(f)) localStorage.setItem(k, v); }, fixtures);
     await page.reload();
     await page.waitForFunction(() => window.__game && window.__game.screen === 'title');
+    await page.evaluate(scriptedTime);
   }
   const choice = page.locator(`[data-preset="${preset}"]`);
   if (await choice.count()) await choice.click();
@@ -417,6 +438,7 @@ async function routing(run, c) {
     g.applyTrack(x);
     g.startSession('race');
     g.advance(7);
+    window.__qa.noStall(); // reads the HUD of a car held still by script for seconds of software frames: not the stopped-on-track rule (#69; see the stall scenario)
     const r = g.race, p = r.car(window.__game.localId);
     const sw = [...T.SWITCHES].sort((a, b) => T.ahead(a.s1, T.PIT_IN0) - T.ahead(b.s1, T.PIT_IN0))[0];
     const put = (car, u, side, v) => { car.u = u; car.laneSide = side; car.d = side * T.LANE_HALF; car.v = v; car.change = null; car.mode = 'race'; car.throttle = 0; car.graceT = 0; car.recoverT = 0; car.cutT = 0; car.pushedT = 0; };
@@ -1016,6 +1038,7 @@ async function touch(run, c) {
     const g = window.__game, T = g.T;
     g.startSession('race');
     g.advance(7);
+    window.__qa.noStall(); // reads the HUD of a car held still by script for seconds of software frames: not the stopped-on-track rule (#69; see the stall scenario)
     const r = g.race, p = r.car(window.__game.localId);
     const sw = [...T.SWITCHES].sort((a, b) => T.ahead(a.s1, T.PIT_IN0) - T.ahead(b.s1, T.PIT_IN0))[0];
     const put = (car, u, side, v) => { car.u = u; car.laneSide = side; car.d = side * T.LANE_HALF; car.v = v; car.change = null; car.mode = 'race'; car.throttle = 0; car.graceT = 0; car.recoverT = 0; car.cutT = 0; car.pushedT = 0; };
@@ -1142,6 +1165,7 @@ async function service(run, c) {
     const g = window.__game, T = g.T;
     if (g.screen !== 'race') g.startSession(g.mode === 'champ' ? 'champ' : 'race');
     if (g.race.phase === 'countdown') g.advance(7);
+    window.__qa.noStall(); // reads the HUD of a car held still by script for seconds of software frames: not the stopped-on-track rule (#69; see the stall scenario)
     const r = g.race, p = r.car(window.__game.localId);
     const put = (car, u, side, v) => Object.assign(car, { u, hiU: u, laneSide: side, d: side * T.LANE_HALF, v, change: null, mode: 'race', throttle: 0, graceT: 0, recoverT: 0, cutT: 0, pushedT: 0, revMark: null });
     const into = x.into < 0 ? T.L + x.into : x.into; // negative: metres before the line that ends the lap
@@ -1290,6 +1314,7 @@ async function lastchance(run, c) {
   const setup = (page) => read(page, () => {
     const g = window.__game, T = g.T;
     if (g.race.phase === 'countdown') g.advance(7);
+    window.__qa.noStall(); // reads the HUD of a car held still by script for seconds of software frames: not the stopped-on-track rule (#69; see the stall scenario)
     const r = g.race, p = r.car(g.localId);
     const sw = [...T.SWITCHES].sort((a, b) => T.ahead(a.s0, T.PIT_IN0) - T.ahead(b.s0, T.PIT_IN0))[0];
     const put = (car, u, side, v) => Object.assign(car, { u, hiU: u, laneSide: side, d: side * T.LANE_HALF, v, change: null, mode: 'race', throttle: 0, graceT: 0, recoverT: 0, cutT: 0, pushedT: 0, revMark: null });
@@ -1838,7 +1863,11 @@ async function touchrace(run, c) {
   const seen = { pitlane: false, service: false, status: '' };
   const onTick = async (st) => {
     if (st.mode === 'pitlane' && !seen.pitlane) { seen.pitlane = true; }
-    if (st.mode === 'service' && !seen.service) {
+    // a stopped-on-track recovery (#69: the scripted driver at software frame rates sometimes stands at a corner for 3 s) is
+    // a bay stay too, but not the fuel stop this check is about
+    if (st.mode === 'service' && st.stallSvc) seen.recoveries = (seen.recoveries ?? 0) + (seen.inRecovery ? 0 : 1);
+    seen.inRecovery = st.mode === 'service' && st.stallSvc;
+    if (st.mode === 'service' && !st.stallSvc && !seen.service) {
       seen.service = true;
       seen.status = await page.locator('#h-status').textContent();
       seen.overlaps = (await read(page, measureHud, CONTROLS)).pairs;
@@ -1874,6 +1903,7 @@ async function reverse(run, c) {
     const g = window.__game, T = g.T;
     if (g.screen !== 'race') g.startSession('race');
     if (g.race.phase === 'countdown') g.advance(7);
+    window.__qa.noStall(); // reads the HUD of a car held still by script for seconds of software frames: not the stopped-on-track rule (#69; see the stall scenario)
     const r = g.race, p = r.car(window.__game.localId);
     r.cars.forEach((o2, i) => { if (i) { o2.u = p.u + T.L / 2 + i * 8; o2.laneSide = 1; o2.d = T.LANE_HALF; o2.mode = 'race'; o2.change = null; } });
     r.squeezeQ.length = 0;
@@ -1959,6 +1989,7 @@ async function queue(run, c) {
     const g = window.__game, T = g.T, L = 3;
     if (g.screen !== 'race') g.startSession('race');
     if (g.race.phase === 'countdown') g.advance(7);
+    window.__qa.noStall(); // reads the HUD of a car held still by script for seconds of software frames: not the stopped-on-track rule (#69; see the stall scenario)
     const r = g.race, p = r.car(window.__game.localId);
     if (!r.__ai) { const ai = r.ai.bind(r); r.__ai = ai; r.ai = (car, dt) => ((window.__qa.holdAI ?? []).includes(car.idx) ? { t: 0, b: 1 } : ai(car, dt)); }
     window.__qa.holdAI = x.hold ?? [];
@@ -2104,6 +2135,7 @@ async function autosg(run, c) {
     const g = window.__game, T = g.T, L = 3;
     if (g.screen !== 'race') g.startSession('race');
     if (g.race.phase === 'countdown') g.advance(7);
+    window.__qa.noStall(); // reads the HUD of a car held still by script for seconds of software frames: not the stopped-on-track rule (#69; see the stall scenario)
     const r = g.race, p = r.car(window.__game.localId);
     r.pit = new r.pit.constructor(r);
     r.squeezeQ.length = 0;
@@ -2270,6 +2302,7 @@ async function autobay(run, c) {
     const g = window.__game, T = g.T, L = 3;
     if (g.screen !== 'race') g.startSession('race');
     if (g.race.phase === 'countdown') g.advance(7);
+    window.__qa.noStall(); // reads the HUD of a car held still by script for seconds of software frames: not the stopped-on-track rule (#69; see the stall scenario)
     const r = g.race, p = r.car(window.__game.localId);
     r.pit = new r.pit.constructor(r);
     r.squeezeQ.length = 0;
@@ -2750,7 +2783,7 @@ async function main() {
         if (s) {
           c.ok('No page or console errors', errors.length === 0, errors.slice(0, 5));
           c.evidence.environment ??= await environment(run, s.page);
-          c.evidence.log = (await capture(s.page)).log.filter((e) => ['screen', 'phase', 'mode', 'toast', 'offences'].includes(e.key));
+          c.evidence.log = (await capture(s.page)).log.filter((e) => ['screen', 'phase', 'mode', 'toast', 'offences', 'stall'].includes(e.key));
           await s.context.close();
         }
         const status = c.list.some((x) => x.status === 'failed') ? 'failed' : 'passed';
