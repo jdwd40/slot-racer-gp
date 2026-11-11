@@ -40,6 +40,9 @@ export const CAR_DYNAMIC = {
   revOn: 'exact', sgPhase: 'exact', sgCtl: 'exact', pitWait: 'exact', exitReq: 'exact', bayInUse: 'exact',
   serviceT: 'exact', penalty: 'exact', towT: 'exact', recoverT: 'exact', bumpT: 'exact',
   hiU: 3, squeezeHold: 'exact', pitHold: 'exact', towSvc: 'exact', pitFuel: 'exact', serviced: 'exact', upPrev: 'exact',
+  // #69 stopped-on-track recovery: a countdown that runs only while a car is stopped on the racing lane (exact, like the
+  // other timers: it costs nothing the rest of the time and the HUD counts down the server's own value), and two flags
+  stallT: 'exact', stallHold: 'exact', stallSvc: 'exact',
 } as const satisfies Record<Exclude<keyof CarSnapshot, StaticKey>, Precision>;
 
 /** Race-level fields (everything but `cars`). Only the clocks change every step; they keep 1 ms. */

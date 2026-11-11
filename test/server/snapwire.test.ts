@@ -20,7 +20,7 @@ function recordRace(seed = 11, track = 'circuit-3') {
   ];
   const race = new Race({ roster, track, seed, runOn: 'live' });
   const frames: { tick: number; snap: RaceSnapshot; ev: unknown[] }[] = [];
-  let seq = 0, ev: unknown[] = [];
+  let seq = 0, ev: unknown[] = [], parkFrom = -1;
   for (let tick = 1; tick < 60 * 600 && !race.final; tick++) {
     const s = race.snapshot();
     const a = drive(s, 'h_a', 1), b = drive(s, 'h_b', 0.93);
@@ -28,7 +28,11 @@ function recordRace(seed = 11, track = 'circuit-3') {
     // b changes lane now and then and spins off on a slow lap: lane changes, de-slots, tows and their timers all travel
     if (tick % 1500 === 0) race.act({ driver: 'h_b', seq: ++seq, type: 'lane' });
     const fast = tick % 4000 > 3700;
-    race.update(STEP, { h_a: a, h_b: fast ? { up: true, down: false } : b });
+    // and once lets go entirely on the racing lane: stopped for 3 s it is recovered to its bay (#69 stallT/stallHold/stallSvc
+    // and a `recover` event), a recovery a v2 client must see exactly as the server does
+    if (parkFrom < 0 && tick >= 8000 && s.cars.find((c) => c.id === 'h_b')!.mode === 'race') parkFrom = tick;
+    const parked = parkFrom > 0 && tick < parkFrom + 600;
+    race.update(STEP, { h_a: a, h_b: parked ? { up: false, down: false } : fast ? { up: true, down: false } : b });
     ev.push(...race.drainEvents());
     if (tick % 3 === 0 || race.final) { frames.push({ tick, snap: race.snapshot(), ev }); ev = []; }
   }
@@ -36,7 +40,7 @@ function recordRace(seed = 11, track = 'circuit-3') {
   return frames;
 }
 
-const wire = (tick: number, frame: object): WireStateMsg => JSON.parse(JSON.stringify({ t: 'state', tick, now: 0, lagMs: 0, ev: [], ...frame })) as WireStateMsg;
+const wire = (tick: number, frame: object, ev: unknown[] = []): WireStateMsg & { ev: unknown[] } => JSON.parse(JSON.stringify({ t: 'state', tick, now: 0, lagMs: 0, ev, ...frame })) as WireStateMsg & { ev: unknown[] };
 /** within the declared rounding of each field: half a unit of the last kept decimal (exact fields equal) */
 function close(full: unknown, got: unknown, p: Precision, path: string): void {
   if (p === 'exact' || typeof full !== 'number') {
@@ -64,9 +68,12 @@ describe('snapshot wire format v2 (#67)', () => {
   it('a whole recorded race round-trips: decoded = full snapshots with the declared rounding, mirrors agree within it', () => {
     const enc = new SnapEncoder('race-1'), dec = new SnapDecoder();
     let mFull: Race | null = null, mWire: Race | null = null;
-    const seen = { off: 0, change: 0, service: 0, final: 0, statics: 0 };
+    const seen = { off: 0, change: 0, service: 0, final: 0, statics: 0, stallT: 0, stallHold: 0, stallSvc: 0, recover: 0 };
     for (const f of frames) {
-      const msg = wire(f.tick, enc.next(f.snap, f.tick, f.tick * STEP * 1000));
+      const msg = wire(f.tick, enc.next(f.snap, f.tick, f.tick * STEP * 1000), f.ev);
+      // events travel as they are, beside the snapshot
+      expect(msg.ev).toEqual(JSON.parse(JSON.stringify(f.ev)));
+      seen.recover += f.ev.filter((e) => (e as { type: string }).type === 'recover').length;
       if (msg.static) seen.statics++;
       const got = dec.decode(msg);
       expect(got).not.toBe(null);
@@ -79,6 +86,9 @@ describe('snapshot wire format v2 (#67)', () => {
         if (c.off) seen.off++;
         if (c.change) seen.change++;
         if (c.mode === 'service') seen.service++;
+        if ((c.stallT ?? 0) > 0) seen.stallT++;
+        if (c.stallHold) seen.stallHold++;
+        if (c.stallSvc) seen.stallSvc++;
       });
       if (f.snap.final) seen.final++;
       // the browser's mirror: the same state whether fed the full snapshots (v1) or the decoded stream (v2)
@@ -96,6 +106,8 @@ describe('snapshot wire format v2 (#67)', () => {
     // the race exercised what the format has to carry, and the static fields went exactly once
     expect(seen.statics).toBe(1);
     expect(seen.off).toBeGreaterThan(0); expect(seen.change).toBeGreaterThan(0); expect(seen.service).toBeGreaterThan(0); expect(seen.final).toBe(1);
+    expect(seen.stallT).toBeGreaterThan(0); expect(seen.stallSvc).toBeGreaterThan(0); expect(seen.recover).toBeGreaterThanOrEqual(1);
+    // stallHold (recovered while its own bay was taken) is the rare branch: the next test drives it through the wire
     expect(dec.stats).toMatchObject({ gaps: 0, noStatic: 0 });
     expect(dec.stats.keyframes).toBeGreaterThanOrEqual(Math.floor((frames.length * 3 * STEP * 1000) / KEYFRAME_MS));
     expect(enc.stats.deltas).toBeGreaterThan(enc.stats.keyframes * 15);
@@ -130,6 +142,28 @@ describe('snapshot wire format v2 (#67)', () => {
     expect(got).toEqual(JSON.parse(JSON.stringify(wireRounded(gone))));
     const back = dec.decode(wire(4, enc.next(b, 4, 150)))!;
     expect(back).toEqual(JSON.parse(JSON.stringify(wireRounded(b))));
+  });
+
+  it('the #69 stall fields round-trip in every state: countdown, hold in the tow, bay without fuel, and absent', () => {
+    const enc = new SnapEncoder('r'), dec = new SnapDecoder();
+    const base = frames[600].snap;
+    const variant = (k: number, f: (c: CarSnapshot) => void): RaceSnapshot => { const s = JSON.parse(JSON.stringify(base)) as RaceSnapshot; f(s.cars[1]); s.t += k; return s; };
+    const seq = [
+      variant(0, () => undefined),
+      variant(1, (c) => { c.stallT = 1.2345678; }),
+      variant(2, (c) => { c.stallT = 0; c.stallHold = true; c.mode = 'tow'; }),
+      variant(3, (c) => { c.stallHold = false; c.stallSvc = true; c.mode = 'service'; }),
+      // an older-shaped snapshot without the optional fields: they are named as deleted and the mirror reads no countdown
+      variant(4, (c) => { delete c.stallT; delete c.stallHold; delete c.stallSvc; }),
+      variant(5, (c) => { c.stallT = 0.5; c.stallHold = false; c.stallSvc = false; }),
+    ];
+    seq.forEach((s, i) => {
+      const f = enc.next(s, i + 1, i * 50);
+      const got = dec.decode(wire(i + 1, f))!;
+      expect(got).toEqual(JSON.parse(JSON.stringify(wireRounded(s))));
+      expect(got.cars[1].stallT).toBe(s.cars[1].stallT);   // exact on the wire: the HUD counts down the server's value
+      if (i === 4) expect(f.snap.cars[1][DELETED]).toEqual(['stallT', 'stallHold', 'stallSvc']);
+    });
   });
 
   it('a 4-car race averages well under 1.5 KB a state (v1 sent every field of every car)', () => {
@@ -265,7 +299,7 @@ describe('the room server streams v2 states', () => {
 
   it('same seed and inputs give the same result digest as before the wire change (race results unchanged)', () => {
     // inputs scripted by tick (never read from snapshots), so the result is a function of the seed and inputs alone. The
-    // digest covers the whole envelope except its random ids and the protocol number; pinned on main before #67 (c109ab2)
+    // digest covers the whole envelope except its random ids and the protocol number; pinned on main before #67 (1b2f865, rules race-core-2026.11.3)
     const run = () => {
       const h = harness({}, 4242);
       const peers = [new FakePeer(), new FakePeer()];
@@ -284,7 +318,7 @@ describe('the room server streams v2 states', () => {
     };
     const a = run(), b = run();
     expect(b).toEqual(a);
-    expect(a).toEqual({ digest: '047e1f2d6e2aa9273fbaec4f6189f78a2eb3da35af93b621ffc50d7525b4d563', outcome: 'completed', ticks: 18031 });
+    expect(a).toEqual({ digest: '00ce7abd722e661d701f68521260aba33d08fdb24160b5477c345c1505eacfc0', outcome: 'completed', ticks: 18031 });
   });
 });
 
