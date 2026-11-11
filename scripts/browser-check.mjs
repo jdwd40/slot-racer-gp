@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Bounded browser validation of the real game. Procedure and results: docs/validation.md.
 //
-//   node scripts/browser-check.mjs [tracks race controlled routing practice championship touch responsive touchrace reverse service queue autosg autobay localslot online memory netbanner]   functional checks (default: all)
+//   node scripts/browser-check.mjs [tracks race controlled routing practice championship touch responsive touchrace reverse service lastchance queue autosg autobay localslot online memory netbanner]   functional checks (default: all)
 //   node scripts/browser-check.mjs perf --label updated --machine "<name>"          frame-time capture
 //   node scripts/browser-check.mjs compare <baseline.json> <updated.json>           like-for-like comparison
 //
@@ -1276,6 +1276,87 @@ async function service(run, c) {
   return t;
 }
 
+/**
+ * Last-chance warning (#65): a fuel stop committed by driving past the pit on the inside-lane override is announced at the
+ * line that starts its due lap ("pit at this lap's entrance or be disqualified"), and the red PIT THIS LAP — or DQ chip stays
+ * until the stop is served or the breach is latched. Space on that lap says what skipping means. Keyboard at desktop size,
+ * then the emulated touch pad at phone portrait and landscape, with the chip clear of every control. Real frames and real
+ * keys or touches from a scripted start just before the last switch ahead of the pit entrance.
+ */
+async function lastchance(run, c) {
+  const st = (page) => read(page, () => { const g = window.__game, r = g.race, p = r.car(g.localId); return { crossed: p.crossed, fuelDue: p.fuelDue, last: r.lastChance(p), breach: p.svcBreach, mode: p.mode, override: p.laneOverride, chips: document.getElementById('h-chips').textContent, first: document.querySelector('#h-chips .chip')?.textContent ?? '', toast: document.getElementById('h-toast').textContent }; });
+  const toasts = (page) => read(page, () => window.__qa.log.filter((e) => e.key === 'toast' && e.value).map((e) => e.value));
+  /** lap 3, 15 m before the last switch ahead of the pit entrance, rivals parked half a lap on */
+  const setup = (page) => read(page, () => {
+    const g = window.__game, T = g.T;
+    if (g.race.phase === 'countdown') g.advance(7);
+    const r = g.race, p = r.car(g.localId);
+    const sw = [...T.SWITCHES].sort((a, b) => T.ahead(a.s0, T.PIT_IN0) - T.ahead(b.s0, T.PIT_IN0))[0];
+    const put = (car, u, side, v) => Object.assign(car, { u, hiU: u, laneSide: side, d: side * T.LANE_HALF, v, change: null, mode: 'race', throttle: 0, graceT: 0, recoverT: 0, cutT: 0, pushedT: 0, revMark: null });
+    const u = 3 * T.L + T.PIT_IN0 - T.ahead(sw.s0, T.PIT_IN0) - 15;
+    r.cars.forEach((o, i) => { if (i) { o.crossed = 3; o.lapsDone = 2; put(o, u + T.L / 2 + i * 8, 1, 0); } });
+    p.crossed = 3; p.lapsDone = 2; p.sectors = 0; p.fuel = 0.6;
+    put(p, u, -1, 8);
+    r.squeezeQ.length = 0;
+  });
+  const views = [
+    { label: 'desktop 1280x720, keyboard', viewport: { width: 1280, height: 720 }, touch: false, shot: 'lastchance-desktop-1280x720.png' },
+    { label: 'phone portrait 390x844, touch', viewport: { width: 390, height: 844 }, touch: true, shot: 'lastchance-phone-390x844.png' },
+    { label: 'phone landscape 844x390, touch', viewport: { width: 844, height: 390 }, touch: true, shot: 'lastchance-phone-844x390.png' },
+  ];
+  let last = null;
+  for (const v of views) {
+    const s = await open(run, { viewport: v.viewport, dpr: v.touch ? 2 : 1, device: v.touch ? PHONE : {} });
+    const { page } = s;
+    if (v.touch) { s.keys = new PadKeys(new Fingers(page, await s.context.newCDPSession(page))); await page.click('[data-touch="on"]'); }
+    await pickRaceSetup(page);
+    await page.click('#o-start');
+    await waitFor(page, () => window.__game.screen === 'race');
+    await setup(page);
+    await s.keys.tap('KeyP');
+    await frames(page, 2);
+    await s.keys.tap('Space');
+    await frames(page, 2);
+    // past the entrance on the override, then over the line into the due lap
+    await driveUntil(s, (x) => x.crossed >= 4, { budgetMs: 90000 });
+    await s.keys.release();
+    await frames(page, 3);
+    const a = await st(page);
+    const seen = await toasts(page);
+    const iOver = seen.findIndex((x) => x.startsWith(text('msg.fuelOverride'))), iLast = seen.findIndex((x) => x.startsWith(text('msg.pitThisLap')));
+    c.ok(`${v.label}: override past the pit commits the stop, then the due lap opens with "pit this lap or be disqualified"`, a.fuelDue === 4 && a.crossed === 4 && iOver >= 0 && iLast > iOver && a.toast.startsWith(text('msg.pitThisLap')), { a, seen: seen.slice(-6) });
+    c.ok(`${v.label}: red PIT THIS LAP — or DQ chip shown, first in the row`, a.last && a.first.includes(STRINGS['hud.lastChance']), a.chips);
+    if (v.touch) {
+      const m = await read(page, measureHud, CONTROLS);
+      const chip = await read(page, () => { const r = document.querySelector('#h-chips .last-chance').getBoundingClientRect(); return { x: r.x, y: r.y, r: r.right, b: r.bottom, vw: innerWidth, vh: innerHeight }; });
+      c.ok(`${v.label}: chip fully on screen and nothing in the HUD overlaps a control`, chip.x >= 0 && chip.y >= 0 && chip.r <= chip.vw && chip.b <= chip.vh && m.pairs.length === 0 && m.pageX <= 0, { chip, overlaps: m.pairs });
+    }
+    await page.screenshot({ path: path.join(run.out, v.shot) });
+    if (!v.touch) {
+      // Space on the due lap, 15 m before the last switch ahead of the entrance (the override only lasts one switch). Placed by
+      // script, as at the start: SwiftShader frames make the scripted driver run wide now and then, and a car off the slot has
+      // no lane to choose. The override says what skipping means; then past the entrance on the inside and over the line
+      await read(page, () => { const g = window.__game, T = g.T, p = g.race.car(g.localId); const sw = [...T.SWITCHES].sort((a, b) => T.ahead(a.s0, T.PIT_IN0) - T.ahead(b.s0, T.PIT_IN0))[0]; const u = 4 * T.L + T.PIT_IN0 - T.ahead(sw.s0, T.PIT_IN0) - 15; Object.assign(p, { u, hiU: Math.max(p.hiU, u), laneSide: -1, d: -T.LANE_HALF, v: 8, change: null, mode: 'race', throttle: 0, recoverT: 0, revMark: null }); });
+      await frames(page, 2);
+      await s.keys.tap('Space');
+      await frames(page, 3);
+      const b = await st(page);
+      c.ok(`${v.label}: Space on the due lap warns that skipping this stop is a DQ`, b.override && b.toast.startsWith(text('msg.routeInsideDq')), b);
+      await page.screenshot({ path: path.join(run.out, 'lastchance-desktop-override.png') });
+      await driveUntil(s, (x) => x.crossed >= 5, { budgetMs: 120000 });
+      await s.keys.release();
+      await frames(page, 3);
+      const d = await st(page);
+      c.ok(`${v.label}: missed: the breach is latched and its chip replaces the last-chance chip`, d.breach === 'fuel' && !d.last && d.chips.includes(STRINGS['hud.breach']) && !d.chips.includes(STRINGS['hud.lastChance']), d);
+      await page.screenshot({ path: path.join(run.out, 'lastchance-desktop-breach.png') });
+    }
+    c.ok(`${v.label}: no page or console errors`, s.errors.length === 0, s.errors.slice(0, 5));
+    if (last) await last.context.close();
+    last = s;
+  }
+  return last;
+}
+
 // ------------------------------------------------------------ responsive layouts
 const LAYOUTS = [['phone portrait, small', 360, 640], ['phone portrait', 390, 844], ['phone landscape, small', 640, 360], ['phone landscape', 844, 390], ['tablet portrait', 768, 1024]];
 const CONTROLS = ['t-throttle', 't-brake', 't-lane', 't-pit', 't-pause'];
@@ -2452,8 +2533,8 @@ async function netbanner(run, c) {
   return s;
 }
 
-const SCENARIOS = { tracks, race, controlled, routing, practice, championship, touch, responsive, touchrace, reverse, service, queue, autosg, autobay, localslot, online, memory, netbanner };
-const USAGE = 'usage: browser-check.mjs [tracks|race|controlled|routing|practice|championship|touch|responsive|touchrace|reverse|service|queue|autosg|autobay|localslot|online|memory|netbanner ...] | perf | compare <a.json> <b.json>\n'
+const SCENARIOS = { tracks, race, controlled, routing, practice, championship, touch, responsive, touchrace, reverse, service, lastchance, queue, autosg, autobay, localslot, online, memory, netbanner };
+const USAGE = 'usage: browser-check.mjs [tracks|race|controlled|routing|practice|championship|touch|responsive|touchrace|reverse|service|lastchance|queue|autosg|autobay|localslot|online|memory|netbanner ...] | perf | compare <a.json> <b.json>\n'
   + 'options: --dist <dir> --url <url> --commit <sha> --machine <name> --label <name> --viewport WxH --dpr N --preset low|balanced|high\n'
   + '         --seconds N --headed --channel <chrome|msedge> --out <dir> --max-minutes N';
 
