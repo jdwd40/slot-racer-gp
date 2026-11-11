@@ -70,9 +70,9 @@ An authoritative server for private rooms of up to four human drivers, plus serv
   - Snapshots show it as such (`mode: 'off'`, `v: 0`, `off` in the bay). The browser mirror draws it parked in the bay; the wire format is unchanged.
 - **Slow sockets.** A socket with more than `SLOTRUSH_SEND_BUFFER_MAX` (256 KB) queued is closed (4008) and goes into its grace period. A slow client never buffers without limit. The state stream is held to the wall-clock snapshot rate in every phase (see *Snapshot rate*), so a link that keeps up with ordinary racing also keeps up with the AI run-on and a catch-up (#49).
 
-## Protocol v1
+## Protocol v2
 
-The protocol is JSON text over WebSocket at `/ws`. The first client message must be `{ "t": "hello", "v": 1, "proto": "slotrush" }`. Anything else first gets `hello_required`. A different version gets `nack protocol` and is closed with code 4002. A missing hello is closed after 5 s.
+The protocol is JSON text over WebSocket at `/ws`. The first client message must be `{ "t": "hello", "v": 2, "proto": "slotrush" }`. Anything else first gets `hello_required`. A different version gets `nack protocol` and is closed with code 4002. A missing hello is closed after 5 s.
 
 | Client → server | Fields | Notes |
 | --- | --- | --- |
@@ -89,7 +89,7 @@ The protocol is JSON text over WebSocket at `/ws`. The first client message must
 | `welcome` | Server build, rules version and server time |
 | `joined` | Public room, `you`, the **private reconnect token** (only here, only to that socket), current `ctlSeq`/`actSeq` |
 | `room` | Public room snapshot on every change (`rev` increases). It never contains a token |
-| `state` | `tick` (server simulation steps), `now` (server ms), `lagMs`, the race snapshot and the events since the last state. It is sent `SLOTRUSH_SNAPSHOT_HZ` times a second of wall time (see *Snapshot rate*), and at once on a resume. Since #69 each car in the snapshot also has `stallT` and `stallHold`, and the events can include `{ type: 'recover', car }` (see below) |
+| `state` | `tick` (server simulation steps), `now` (server ms), `lagMs`, `ev` (the events since the last state) and the race snapshot as a keyframe or a delta (see *State messages*). It is sent `SLOTRUSH_SNAPSHOT_HZ` times a second of wall time (see *Snapshot rate*), and at once on a resume. Each car can carry the optional #69 fields `stallT`, `stallHold` and `stallSvc`, and the events can include `{ type: 'recover', car }` (see below) |
 | `result` | The race's result envelope, broadcast once when the race closes. A resume into `results` gets the same envelope again, after `joined` and `state`, so a driver whose link dropped at the finish still receives it |
 | `ack` / `nack` | `nack` carries `ref` (message type), `code` and optional `seq`/`detail` |
 | `bye` | `left`, `closed`, `shutdown`, `superseded` and so on, then the socket closes |
@@ -117,14 +117,47 @@ The protocol is JSON text over WebSocket at `/ws`. The first client message must
 - **Origin and connections.** The `Origin` header must exactly match `SLOTRUSH_ALLOWED_ORIGINS` for WebSocket upgrades (otherwise 403 before the upgrade) and for `/api` POSTs. The path must be `/ws` (otherwise 404). Connections are capped in total and per client address (otherwise 503). The client address is `X-Real-IP` only when the TCP peer is loopback (Nginx).
 - **Ordering.** Server ticks and server timestamps order everything. Over one connection (TCP), messages arrive in order. Across reconnects, the per-seat sequence numbers reject anything stale. All members of a room receive the same serialized bytes for every broadcast, so every client sees identical decisions (tested).
 
-**Stopped-on-track recovery on the wire (#69).** These additions are backward compatible, so `PROTOCOL_VERSION` stays 1:
+**Stopped-on-track recovery on the wire (#69).** #69 added these within protocol 1, as backward-compatible additions; since v2 they travel like every other dynamic field (*State messages*):
 
 - Each `CarSnapshot` gained three optional fields: `stallT`, the seconds counted towards recovery (0 when no countdown runs); `stallHold`, recovered and waiting for its bay; and `stallSvc`, in its bay after a recovery, where no fuel is added. The mirror copies them only when present, and a snapshot without them reads as no countdown.
 - The recovery is one ordinary race event in `state.ev`, `{ type: 'recover', car: <driver id> }`, with the driver's `msg.stallRecovered` message alongside. A client that does not know the event type ignores it.
 - No message type, field of a client message or message loop was added, and the snapshot rate and its cap are unchanged.
-- The browser gates online play on `protocol` only. The rules are compared only by the deploy smoke check, between the server and its build. A tab still running an older bundle (also protocol 1) can therefore race on a newer server. It shows no countdown or `recover` toast, and its car simply appears in its bay. Results stay correct because the server is authoritative. Reload such tabs after a rules upgrade.
+- The browser gates online play on `protocol` only; the rules are compared only by the deploy smoke check, between the server and its build. Under protocol 1 a tab with a bundle from before #69 could race on a #69 server without the countdown or `recover` toast. Since v2 every bundle before #67 is refused (see *Mixed versions*), so a tab racing on a v2 server always knows these fields. A future rules change within one protocol has the same caveat: reload such tabs after a rules upgrade.
 
-Bump `PROTOCOL_VERSION` on any incompatible change. The browser enables online play only when `/api/health` reports exactly its protocol version. The rollout smoke check compares the server's protocol and rules with the build's `server-dist/protocol.json`. `RULES_VERSION` (`race-core-2026.11.3`) is recorded in every envelope. Bump it whenever a simulation change could change a result. History: `race-core-2026.11.1` first online rules; `race-core-2026.11.2` retired cars leave the track (#44); `race-core-2026.11.3` a human car stopped on the racing lane for 3 s is moved back to its own bay (#69). Personal bests are stored per rules version (`personal_bests` key, [career.md](career.md)), so a bump starts a new set of personal bests for races on the room server (multiplayer and every other online mode); laps set under an older version are kept apart.
+### State messages
+
+Since v2 (#67) a `state` does not carry the whole `Race.snapshot()`. That was about 70 fields per car as plain JSON, about 5 KB a message and 97 KB/s per player at 20 Hz, with WebSocket compression off on purpose (Nginx strips `Sec-WebSocket-Extensions`, and neither end negotiates permessage-deflate; that stays so). The encoding is `src/net/snapwire.ts`, shared by the server and every client:
+
+```json
+{"t":"state","tick":3,"now":1762862400000,"lagMs":0,"ev":[],"key":1,
+ "static":{"race":"<raceId>","cars":[{"id":"<participant>","slot":0,"control":"human","name":"Ann","color":16763930,"num":7,"bay":0}, …]},
+ "snap":{"v":1,"track":"circuit-1","laps":13,"practice":false,"phase":"countdown","t":0.05,"raceTime":0, …,
+         "cars":[{"status":"running","mode":"grid","u":19.1,"v":0,"d":-0.5, …,"fuel":1,"lapStartT":0, …,"upPrev":false}, …]}}
+{"t":"state","tick":600,"now":1762862409950,"lagMs":0,"ev":[],"base":597,
+ "snap":{"t":10,"raceTime":4.933,"cars":[{"u":110.681,"v":23.052,"x":55.166,"y":60.712,"h":1.817,"wobble":0.282,"fuel":0.941,"hiU":110.681},
+                                        {"u":108.363,"v":11.37,"y":58.284,"hiU":108.363}]}}
+```
+
+(Abridged; `…` marks omitted fields and cars.)
+
+- **Static fields** (`CAR_STATIC`: `id`, `slot`, `control`, `name`, `color`, `num`, `bay`) never change during a race. They go once per race, in `static` with the race id: in the first state of the race and in every resume state. Both are keyframes. `snap.cars` lists the cars in the order of `static.cars`, by position.
+- **Every other field** is listed in `RACE_FIELDS` (race level) or `CAR_DYNAMIC` (per car) with its wire precision. The table is checked against the snapshot type at compile time, so a new snapshot field does not build until it is listed, and adding one is one line there (plus `CAR_FIELDS` in `src/net/mirror.ts` for the mirror to copy it).
+- **Keyframe** (`key: 1`): every dynamic field of every car and every race-level field. **Delta** (`base`: the tick of the state broadcast just before it): only the fields whose encoded value changed since then, `{}` for an unchanged car, nothing for an unchanged race-level field. Objects (`change`, `off`, `pit`, `final`, `lastSeq`) are compared by value and sent whole when they change. An optional field that was present and is now absent is listed in that car's `"-"` array, so present → absent → present round-trips exactly.
+- **Precision.** Fields that change almost every step are rounded to 3 decimals on the wire: race `t` and `raceTime` (1 ms); per car `u`, `v`, `d`, `laneSide`, `x`, `y`, `z`, `h`, `roll`, `pitch`, `yawOff`, `wobble`, `hiU`, every number inside `off`, `throttle`, `brake` and `fuel`: 1 mm, 1 mm/s, 1 mrad, 0.1% of a pedal or the tank. Everything else, including lap times, the #69 fields (`stallT`, the stopped-on-track countdown, like the other timers; `stallHold`; `stallSvc`), `lapStartT`, penalties, timers and service state, is sent exactly: those change a few times a lap, so rounding would save nothing, and the HUD shows the server's own lap times. A rounded value is within half a unit of its last decimal; `-0` is sent as `0`.
+- **Rounding never reaches the race.** The encoder rounds a copy of the snapshot after the step. The simulation, the result envelope, its digest and `RULES_VERSION` are unchanged: the same seed and inputs give the same result digest as before v2 (pinned in `test/server/snapwire.test.ts`).
+- **Keyframes** go out at least every `KEYFRAME_MS` (1 s) of race wall time, measured on the same scaled clock as the snapshot slots. Whatever a client lost, it is whole again within a second.
+- **Same bytes for everyone.** The room keeps one encoder per race, whose baseline is the last broadcast state. Every member gets the same bytes, and each delta applies to the state they all hold.
+- **Resume.** `Room.stateMsg` sends the last broadcast state (at most one snapshot slot old, at the same tick) as a keyframe with `static`. The broadcasts that follow are deltas from that same state, so the resumed socket decodes them at once and gets the same bytes as everyone else from then on. Its events are the ones already sent; the next broadcast carries every event since.
+- **Cars appearing or retiring.** The race core never adds or removes a car during a race: a retired, DQ or DNF car stays in the list, and its new `status`, `mode` and `off` travel as ordinary changed fields. If the car list ever did change, the encoder would send a keyframe with a new `static`.
+- **Decoding** (`SnapDecoder`, one per connection in `OnlineClient`) rebuilds the full `RaceSnapshot`, rounded as above, so `received`, `latest`, `onMessage`, waiters, `applySnapshot` and `mirrorRace` see the same shape as in v1. A delta whose `base` is not the last decoded state, or anything before the static fields, cannot be decoded. It is dropped whole (counted in `rx.undecodable`), never half-applied, until the next keyframe. Over one ordered connection that does not happen: a new socket starts from its resume state.
+- **Size**, a 4-human race on `circuit-1` at 20 Hz in the in-process harness (production `Room`, bots driving, 13 laps, about 229 s): v1 (main at `1b2f865`, with the #69 fields) averaged **5,134 bytes** a state message (about 100 KB/s). v2 averages **612 bytes** (−88%, about 12 KB/s): keyframes about 4.3 KB once a second (the race's first one, with `static`, 4.3 KB), deltas about 420 bytes. Before #69 the same race measured 4,950 → 603 bytes. Asserted under 1.5 KB in `test/server/snapwire.test.ts`.
+
+Bump `PROTOCOL_VERSION` on any incompatible change. History: 1, the first online protocol; 2, `state` as keyframes and deltas with the static car fields once per race (#67). The browser enables online play only when `/api/health` reports exactly its protocol version. The rollout smoke check compares the server's protocol and rules with the build's `server-dist/protocol.json` (written by `npm run build:server` from `src/net/protocol.ts`), checks that the previous protocol's hello is refused, and that a race streams a keyframe with `static` and then deltas. `RULES_VERSION` (`race-core-2026.11.3`) is recorded in every envelope. Bump it whenever a simulation change could change a result. History: `race-core-2026.11.1` first online rules; `race-core-2026.11.2` retired cars leave the track (#44); `race-core-2026.11.3` a human car stopped on the racing lane for 3 s is moved back to its own bay (#69). Personal bests are stored per rules version (`personal_bests` key, [career.md](career.md)), so a bump starts a new set of personal bests for races on the room server (multiplayer and every other online mode); laps set under an older version are kept apart.
+
+**Mixed versions.** A page and a server of different protocols never race together:
+
+- **An old page against a newer server** (a browser with a cached v1 bundle). Its health check sees another protocol and keeps online play off. A page that passed the check before the upgrade has its hello refused (`nack protocol`, close 4002). A v1 page then says *This page is out of date for the game server. Reload the page to update.*; a resume after the restart is refused the same way and its seat expires. It is never sent a v2 state. From v2 on, the page itself says *A new version of Slot Rush is available. Reload to play online.* with a **Reload** button: on the title screen when `/api/health` reports a newer protocol, after a create, join or resume whose hello is refused with `protocol`, and when a reconnect is refused that way (session end `outdated`, no retry loop).
+- **A new page against an older server** (the static client is released before the server is upgraded): the health check sees an older protocol and the page offers local play only until the server is upgraded. Reloading would not help, so it shows the ordinary *Online play is unavailable* note.
 
 ## Timing and overload policy
 
@@ -154,7 +187,7 @@ Ordinary `state` broadcasts follow **wall time, not simulation progress** (#49).
 - **Bound:** in any wall interval of W ms a socket gets at most `floor(W × Hz / 1000) + 1` ordinary states, during racing, catch-up and run-on alike, at every supported rate (5–60). On top of that come, once each: the state at the race start, the final state flushed in the same tick as the classification (so the `result` never waits for a slot), and the state sent to a resuming socket alone.
 - The race never depends on publication, so results, envelopes and the event stream are unchanged; `RULES_VERSION` stays. The browser draws run-on cars at the newest state 20 times a second; each is about 0.67 s of race (8× speed), beyond the interpolation's 2-unit snap distance, so they step rather than slide, which they did not do before at 264 a second.
 - Measured on the issue's fixture (production `RoomManager`, 10 ms ticks, Node 26 on the build host, 256 KiB/s modeled drain; 2 or 3 humans finished by `Race.finishCar`, AI racing on), before → after: run-on states per client in any 1 s 267 → 21, run-on traffic 1,210–1,215 → 92 KiB/s per client, peak queued 257–260 KiB (closed 4008 slow) → 9.5 KiB (no close), every client received the result 0 → 1 time; mean tick cost in the run-on 0.31–0.52 → 0.20–0.36 ms. A 3 s stall's catch-up: 80 → 21 states in the next second. The final classification and the full event stream were identical before and after.
-- At 60 Hz the ordinary stream alone is about 245 KiB/s per client (276 KiB/s in the run-on, whose snapshots are slightly larger), so a 256 KiB/s link is marginal at that setting whatever the phase; it stayed connected over the measured run-on with up to 161 KiB queued.
+- At 60 Hz the ordinary stream alone was about 245 KiB/s per client in v1 (v2 states are about 8 times smaller, see *State messages*) (276 KiB/s in the run-on, whose snapshots are slightly larger), so a 256 KiB/s link is marginal at that setting whatever the phase; it stayed connected over the measured run-on with up to 161 KiB queued.
 - The finish window is 90 s with two or more humans and 120 s for solo. The race time limit is 1200 s. Both bound every race.
 
 ## Result envelope
@@ -261,7 +294,7 @@ Dev dependencies: `esbuild` 0.28.2 (server bundle), `@types/ws` 8.18.2, `@types/
 The production unit runs Node with `--max-old-space-size=96`, `MemoryMax=256M` (with `MemoryHigh=200M`), `CPUQuota=60%`, `TasksMax=48` and `SLOTRUSH_ROOM_CAP=6`. Locally measured on the packed release in production mode, with PostgreSQL attached and the same Node flags, on the build host. These are diagnostics, not the production host.
 
 - **Idle:** RSS 75–84 MB, heap about 13 MB.
-- **At the cap, 6 rooms × 4 humans racing for 60 s** (24 sockets, 20 state messages a second each): RSS peak 98.7 MB, heap 16 MB, **9.1% of one core**, worst tick 2.1 ms, about 84 KB/s per client (about 2 MB/s, or 16 Mbit/s, in total).
+- **At the cap, 6 rooms × 4 humans racing for 60 s** (24 sockets, 20 state messages a second each): RSS peak 98.7 MB, heap 16 MB, **9.1% of one core**, worst tick 2.1 ms, about 84 KB/s per client (about 2 MB/s, or 16 Mbit/s, in total). That was protocol v1; v2 states are about 8 times smaller (*State messages*).
 - **Tick percentiles (#54).** Same setup, rebuilt at `bda6285` (Node 26.7.0, PostgreSQL 18, 4-vCPU shared build host, production mode, `--max-old-space-size=96`). `ticks` are the tick work, `lag` the tick timer's lateness. The polled decayed `tickMaxMs` (the old `worstTickMs`) is shown for comparison.
 
   | Workload | Duration | Ticks | p50 / p95 / p99 / max (ms) | Lag p99 / max (ms) | CPU | RSS peak | Old `worstTickMs` |
@@ -377,7 +410,7 @@ These steps run as an administrator on the site host (`ssh app-vps`). None of th
 - Install a new release beside the old one (step 5 with the new name), run `migrate` (migrations are additive), switch `current`, and run `sudo systemctl restart slotrush-server`.
 - A restart aborts races in progress. They get aborted envelopes, never results. Restart when `/api/health` shows `racing: 0` if possible.
 - Re-run steps 8 and 10.
-- If the protocol version changed, deploy the matching static client in the same window. Until then, the health check keeps an older client's online play off.
+- If the protocol version changed, deploy the matching static client in the same window. Until then, the health check keeps an older client's online play off (*Mixed versions*).
 
 ### Release procedure (owner)
 
@@ -399,7 +432,7 @@ Before declaring a release ready:
 
    - Nothing under `server/`, `src/net/` or the shared race core changed: the live server may stay. Its `protocol`, `rules` and `schema` must still equal this commit's.
    - Server code changed: upgrade it from this commit's `slotrush-server-<sha>` artifact (*Upgrades*). Its `server-dist/VERSION` must be `<sha>`, and `server-dist/protocol.json` must hold this commit's protocol and rules.
-   - `PROTOCOL_VERSION` changed: the new static client offers local play only until the server is upgraded, and older open pages lose online play after it; upgrade the server in the same window.
+   - `PROTOCOL_VERSION` changed: the new static client offers local play only until the server is upgraded, and older open pages lose online play after it (they are refused, never desynced, see *Mixed versions*); upgrade the server in the same window. Races in progress are aborted by the restart anyway.
    - `RULES_VERSION` changed: results and personal bests start a new rules set ([career.md](career.md)); upgrade the server so online races use the new rules.
    - A new migration: back up the database and run `migrate` before restarting. A server refuses to start on a schema it does not match (exit 78).
 3. **Public verification** (read-only, from any machine with the release checked out):

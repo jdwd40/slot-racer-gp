@@ -60,7 +60,10 @@ describe('online gate (browser)', () => {
     expect(await probeOnline(true, (() => res(200, { ok: true, protocol: PROTOCOL_VERSION, version: 'abc', accounts: true, profiles: true })) as unknown as typeof fetch, 'https://x')).toMatchObject({ state: 'available', accounts: true });
     expect(await probeOnline(true, (() => res(200, { ok: true, protocol: PROTOCOL_VERSION, version: 'abc', accounts: true })) as unknown as typeof fetch, 'https://x')).toMatchObject({ state: 'available', accounts: false });
     expect(f).toHaveBeenCalledWith('https://slotrush.jdwd40.com/api/health', expect.anything());
-    expect(await probeOnline(true, (() => res(200, { ok: true, protocol: PROTOCOL_VERSION + 1 })) as unknown as typeof fetch, 'https://x')).toMatchObject({ state: 'unavailable', reason: expect.stringContaining('protocol') });
+    // a newer server means this page is outdated (it says so and offers a reload, #67); an older one is just unavailable
+    expect(await probeOnline(true, (() => res(200, { ok: true, protocol: PROTOCOL_VERSION + 1 })) as unknown as typeof fetch, 'https://x')).toEqual({ state: 'outdated', server: PROTOCOL_VERSION + 1 });
+    expect(await probeOnline(true, (() => res(200, { ok: true, protocol: PROTOCOL_VERSION - 1 })) as unknown as typeof fetch, 'https://x')).toMatchObject({ state: 'unavailable', reason: expect.stringContaining('protocol') });
+    expect(await probeOnline(true, (() => res(200, { ok: true, protocol: String(PROTOCOL_VERSION + 1) })) as unknown as typeof fetch, 'https://x')).toMatchObject({ state: 'unavailable' });
     expect(await probeOnline(true, (() => res(503, { ok: false })) as unknown as typeof fetch, 'https://x')).toMatchObject({ state: 'unavailable', reason: 'health 503' });
     expect(await probeOnline(true, (() => res(200, { ok: false, protocol: PROTOCOL_VERSION })) as unknown as typeof fetch, 'https://x')).toMatchObject({ state: 'unavailable' });
     expect(await probeOnline(true, (() => Promise.reject(new TypeError('net'))) as unknown as typeof fetch, 'https://x')).toMatchObject({ state: 'unavailable', reason: 'unreachable' });

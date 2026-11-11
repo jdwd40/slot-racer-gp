@@ -10,6 +10,7 @@ import {
   type ChampionshipTag, type ClientMsg, type ErrorCode, type LiveryId, type Mode, type PublicAi, type PublicParticipant,
   type AwardsView, type AwardSync, type PublicRoom, type RoomSettings, type RoomState, type ServerMsg,
 } from '../src/net/protocol';
+import { SnapEncoder } from '../src/net/snapwire';
 import { CHAMP_TRACKS } from '../src/records';
 import { computeAwards, makeScoring, type Scoring } from './career';
 import type { Config } from './config';
@@ -104,6 +105,8 @@ export class Room {
   /** wall-clock snapshot slot (see publish) of the last state broadcast, and the step it carried */
   private snapSlot = 0;
   private snapTick = -1;
+  /** this race's snapshot encoder (#67): holds the last broadcast state every member has, which deltas are relative to */
+  private enc: SnapEncoder | null = null;
   /** the finalized envelope of the last race (state 'results'); built once per race */
   result: Readonly<ResultEnvelope> | null = null;
   /** the last race's career awards and where their storage stands (sent to every member, replayed on resume) */
@@ -315,7 +318,7 @@ export class Room {
       case 'rematch':
         if (!host) return nack('forbidden', 'only the room host calls a rematch');
         if (this.state !== 'results') return nack('bad_state');
-        this.state = 'lobby'; this.race = null; this.raceId = null; this.result = null; this.awards = null; this.roster = [];
+        this.state = 'lobby'; this.race = null; this.enc = null; this.raceId = null; this.result = null; this.awards = null; this.roster = [];
         for (const x of this.parts) { x.ready = false; x.inRace = false; }
         this.touch(now); this.broadcastRoom();
         return null;
@@ -348,6 +351,7 @@ export class Room {
       finishWindow: humans > 1 ? 90 : SOLO_FINISH_WINDOW, timeLimit: RACE_TIME_LIMIT,
     });
     this.raceId = randomUUID();
+    this.enc = new SnapEncoder(this.raceId);
     for (const p of this.parts) { p.inRace = !p.left; p.held = neutral(); p.ready = false; }
     this.state = 'race';
     this.baseWall = now; this.stepsDone = 0; this.lagSteps = 0; this.startedAt = now; this.greenAt = null;
@@ -523,7 +527,7 @@ export class Room {
     this.state = 'closed';
     this.log.info('room.close', { room: this.id, reason });
     for (const p of this.parts) if (p.peer) { this.sendTo(p.peer, { t: 'bye', code: reason === 'shutdown' ? 'shutdown' : 'closed', detail: reason }); p.peer.close(reason === 'shutdown' ? 1012 : 1000, reason); p.peer = null; }
-    this.race = null;
+    this.race = null; this.enc = null;
     this.deps.onClose?.(this);
   }
 
@@ -561,17 +565,27 @@ export class Room {
     return { t: 'joined', room: this.publicRoom(), you: p.id, token, ctlSeq: p.ctlSeq, actSeq: p.actSeq, resumed };
   }
 
-  /** Race state for one late (re)joiner, so a resumed client is current at once. */
+  /**
+   * Race state for one late (re)joiner, so a resumed client is current at once: a keyframe with the static car fields. It is
+   * the last broadcast state (at most one snapshot slot old), not the live race, because the broadcasts that follow are
+   * deltas from that state: from the next one on, this socket gets the same bytes as everyone else and needs no catching up.
+   * Its events are those already sent; the next broadcast carries every event since. Before any broadcast (never in
+   * practice: the race start broadcasts at once) a stand-alone keyframe of the live race is sent instead, leaving the
+   * room's encoder untouched, and the next broadcast is a keyframe anyway.
+   */
   stateMsg(now: number): string | null {
     if (!this.race) return null;
-    return JSON.stringify({ t: 'state', tick: this.stepsDone, now, lagMs: Math.round(this.lagMs), snap: this.race.snapshot(), ev: [] } satisfies ServerMsg);
+    const r = this.enc?.resume() ?? { tick: this.stepsDone, frame: new SnapEncoder(this.raceId ?? '').next(this.race.snapshot(), this.stepsDone, 0) };
+    return JSON.stringify({ t: 'state', tick: r.tick, now, lagMs: Math.round(this.lagMs), ev: [], ...r.frame } satisfies ServerMsg);
   }
 
   private broadcastRoom(except?: Peer): void { if (this.state !== 'closed') this.broadcast({ t: 'room', room: this.publicRoom() }, except); }
 
   private broadcastState(now: number): void {
     if (!this.race) return;
-    const msg: ServerMsg = { t: 'state', tick: this.stepsDone, now, lagMs: Math.round(this.lagMs), snap: this.race.snapshot(), ev: this.evBuf };
+    // the keyframe interval runs on the same scaled race wall clock as the snapshot slots (publish)
+    const frame = this.enc!.next(this.race.snapshot(), this.stepsDone, (now - this.startedAt) * this.cfg.timeScale);
+    const msg: ServerMsg = { t: 'state', tick: this.stepsDone, now, lagMs: Math.round(this.lagMs), ev: this.evBuf, ...frame };
     this.evBuf = []; this.snapTick = this.stepsDone;
     this.broadcast(msg);
   }

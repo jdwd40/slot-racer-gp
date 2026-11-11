@@ -312,6 +312,8 @@
     { "id": "net.rejoin", "text": "Rejoin room {code}" },
     { "id": "net.onlineNote", "text": "Online races run on the game server: connected solo against three AI cars, or a private room for up to four drivers." },
     { "id": "net.unavailable", "text": "Online play is unavailable right now. Local play works as usual." },
+    { "id": "net.outdated", "text": "A new version of Slot Rush is available. Reload to play online." },
+    { "id": "net.reload", "text": "Reload" },
     { "id": "net.name", "text": "Driver name" },
     { "id": "net.namePh", "text": "Your name" },
     { "id": "net.livery", "text": "Colour" },

@@ -2,7 +2,8 @@
 // activation gate (docs/online-server.md):
 //   node scripts/server-smoke.mjs http://127.0.0.1:8787 [--origin https://slotrush.jdwd40.com] [--expect server-dist/protocol.json]
 // Checks: /api/health ok, /api/version protocol equals the build's, a WebSocket hello, a server-hosted solo race starts and
-// streams state, a bad origin and a protocol mismatch are refused. Never prints tokens.
+// streams state (protocol v2: a keyframe with the static car fields, then deltas), a bad origin, a protocol mismatch and
+// the previous protocol (an old cached page) are refused. Never prints tokens.
 import { readFileSync } from 'node:fs';
 import WebSocket from 'ws';
 
@@ -49,6 +50,14 @@ try {
   const refuse = await until(mm.msgs, (m) => m.t === 'nack' && m.code === 'protocol');
   ok('protocol mismatch refused', !!refuse);
   mm.ws.close();
+  if (expected?.protocol > 1) {
+    // a browser still running the previous bundle must be refused, never streamed a format it would misread
+    const old = await open();
+    old.ws.send(JSON.stringify({ t: 'hello', v: expected.protocol - 1, proto: 'slotrush' }));
+    const r = await until(old.msgs, (m) => m.t === 'nack' && m.code === 'protocol');
+    ok(`previous protocol ${expected.protocol - 1} refused`, !!r);
+    old.ws.close();
+  }
 
   const c = await open();
   c.ws.send(JSON.stringify({ t: 'hello', v: expected?.protocol ?? 1, proto: 'slotrush' }));
@@ -58,8 +67,10 @@ try {
   ok('solo room created', j?.t === 'joined', j?.t === 'nack' ? j.code : `room ${j?.room?.code}`);
   if (j?.t === 'joined') {
     c.ws.send(JSON.stringify({ t: 'start' }));
-    const st = await until(c.msgs, (m) => m.t === 'state' && m.snap?.cars?.length === 4);
-    ok('race state streams', !!st, st ? `track ${st.snap.track}, ${st.snap.cars.length} cars` : '');
+    const st = await until(c.msgs, (m) => m.t === 'state' && m.key === 1 && m.static?.cars?.length === 4 && m.snap?.cars?.length === 4);
+    ok('race state streams', !!st, st ? `track ${st.snap.track}, ${st.static.cars.length} cars` : '');
+    const delta = await until(c.msgs, (m) => m.t === 'state' && typeof m.base === 'number' && !m.static);
+    ok('state deltas follow', !!delta, delta ? `${Buffer.byteLength(JSON.stringify(delta))} bytes` : '');
     c.ws.send(JSON.stringify({ t: 'leave' }));
     ok('left cleanly', !!(await until(c.msgs, (m) => m.t === 'bye' && m.code === 'left')));
   }

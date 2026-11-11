@@ -8,13 +8,26 @@ import { MemoryResultSink } from '../../server/results';
 import { RoomManager } from '../../server/rooms';
 import type { Peer } from '../../server/room';
 import { drive } from './bot';
+import { SnapDecoder, type WireStateMsg } from '../../src/net/snapwire';
+
+/**
+ * Parse a server message as a v2 client sees it: a `state` is decoded (keyframe or delta) into the full snapshot, as
+ * OnlineClient delivers it. An undecodable state (a delta without its base) is returned with `snap: null`.
+ */
+export function decodeMsg(dec: SnapDecoder, d: string): ServerMsg {
+  const m = JSON.parse(d) as ServerMsg;
+  if (m.t !== 'state') return m;
+  return { t: 'state', tick: m.tick, now: m.now, lagMs: m.lagMs, snap: dec.decode(m as unknown as WireStateMsg), ev: m.ev };
+}
 
 export class FakePeer implements Peer {
   msgs: ServerMsg[] = [];
   raw: string[] = [];
   closed: { code: number; reason: string } | null = null;
   bufferedAmount = 0;
-  send(d: string): void { if (this.closed) throw new Error('closed'); this.raw.push(d); this.msgs.push(JSON.parse(d) as ServerMsg); }
+  /** one decoder per peer, as one per connection in the browser */
+  readonly dec = new SnapDecoder();
+  send(d: string): void { if (this.closed) throw new Error('closed'); this.raw.push(d); this.msgs.push(decodeMsg(this.dec, d)); }
   close(code: number, reason: string): void { if (!this.closed) this.closed = { code, reason }; }
   of<K extends ServerMsg['t']>(t: K): Extract<ServerMsg, { t: K }>[] { return this.msgs.filter((m): m is Extract<ServerMsg, { t: K }> => m.t === t); }
   lastRoom(): PublicRoom { return this.of('room').at(-1)?.room ?? this.of('joined').at(-1)!.room; }
