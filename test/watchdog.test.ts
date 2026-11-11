@@ -42,8 +42,8 @@ function fakeServer(script: string[] = [], roomState = 'lobby', resumeDelayMs = 
         participants: [{ id: 'p1', ready: true, connected: true, left: false }], ai: [], raceId: roomState === 'race' ? 'race1' : null, maxHumans: 4, minHumans: 1, graceS: 20 };
       const delay = sockets.indexOf(this) > 0 ? resumeDelayMs : 0;
       this.deliver({ t: 'joined', room, you: 'p1', token: 'tok', ctlSeq: 0, actSeq: 0, resumed: true }, 1 + delay);
-      // a racing room streams snapshots at 20 Hz
-      if (roomState === 'race') setTimeout(() => { if (this.readyState === 1) this.pump = setInterval(() => this.deliver({ t: 'state', tick: 0, now: 0, lagMs: 0, snap: {}, ev: [] }), 50); }, delay);
+      // a racing room streams snapshots at 20 Hz (v2 keyframes of an empty field: always decodable on their own)
+      if (roomState === 'race') setTimeout(() => { if (this.readyState === 1) this.pump = setInterval(() => this.deliver({ t: 'state', tick: 0, now: 0, lagMs: 0, key: 1, static: { race: 'race1', cars: [] }, snap: { cars: [] }, ev: [] }), 50); }, delay);
     }
     close(code = 1000, reason = ''): void {
       if (this.readyState === 3) return;

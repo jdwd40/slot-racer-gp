@@ -1,9 +1,13 @@
 // Online room protocol, shared by the room server (server/) and any client (browser or headless). Plain data only: no
 // secrets, no Node or DOM APIs, so the browser bundle can import it. See docs/online-server.md for the message reference.
 import type { ActionType, Input } from '../race';
+import type { StateFrame } from './snapwire';
 
-/** Wire protocol version. Bump on any incompatible message change; a client and server must agree exactly. */
-export const PROTOCOL_VERSION = 1;
+/**
+ * Wire protocol version. Bump on any incompatible message change; a client and server must agree exactly. History: 1 first
+ * online protocol; 2 `state` snapshots as keyframes and deltas with static car fields once per race (#67, src/net/snapwire.ts).
+ */
+export const PROTOCOL_VERSION = 2;
 export const PROTOCOL_NAME = 'slotrush';
 /**
  * Race rules version recorded in every result envelope. Bump whenever a change to the simulation (physics, timing, service,
@@ -104,7 +108,11 @@ export type ServerMsg =
   | { t: 'welcome'; v: number; server: string; rules: string; now: number }
   | { t: 'joined'; room: PublicRoom; you: string; token: string; ctlSeq: number; actSeq: number; resumed: boolean }
   | { t: 'room'; room: PublicRoom }
-  | { t: 'state'; tick: number; now: number; lagMs: number; snap: unknown; ev: unknown[] }
+  /**
+   * On the wire (v2), `snap` is a WireSnap with `key`/`base`/`static` as in StateFrame (src/net/snapwire.ts). OnlineClient
+   * decodes it before anyone sees it: what it delivers has `snap` as the full RaceSnapshot and none of the three.
+   */
+  | ({ t: 'state'; tick: number; now: number; lagMs: number; snap: unknown; ev: unknown[] } & Partial<Omit<StateFrame, 'snap'>>)
   | { t: 'ack'; seq: number; result: 'queued' }
   | { t: 'nack'; ref: ClientMsgType | 'unknown'; seq?: number; code: ErrorCode; detail?: string }
   | { t: 'result'; envelope: unknown }

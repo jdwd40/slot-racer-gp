@@ -4,7 +4,8 @@ import { PEN, type RaceSnapshot } from '../../src/race';
 import { LIMITS, LIVERIES, type PublicRoom, type ServerMsg } from '../../src/net/protocol';
 import type { Config } from '../../server/config';
 import type { Peer, Room } from '../../server/room';
-import { BotClient, FakePeer, harness } from './harness';
+import { BotClient, FakePeer, decodeMsg, harness } from './harness';
+import { SnapDecoder } from '../../src/net/snapwire';
 
 type H = ReturnType<typeof harness>;
 
@@ -516,6 +517,7 @@ class LinkPeer implements Peer {
   closed: { code: number; reason: string } | null = null;
   stateAt: number[] = [];
   peak = 0;
+  private dec = new SnapDecoder();
   private queued = 0;
   private last: number;
   constructor(private clock: () => number, private bps: number) { this.last = clock(); }
@@ -525,7 +527,7 @@ class LinkPeer implements Peer {
     if (this.closed) throw new Error('closed');
     this.drain();
     this.queued += Buffer.byteLength(d); this.peak = Math.max(this.peak, this.queued);
-    const m = JSON.parse(d) as ServerMsg;
+    const m = decodeMsg(this.dec, d);
     this.raw.push(d); this.msgs.push(m);
     if (m.t === 'state') this.stateAt.push(this.clock());
   }

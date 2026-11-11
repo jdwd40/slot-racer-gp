@@ -5,6 +5,7 @@
 // behind a proxy, a sleeping phone, a NAT timeout): the server has hung up, but nothing tells the browser.
 import { PROTOCOL_NAME, PROTOCOL_VERSION, type ClientMsg, type PublicRoom, type ServerMsg } from './protocol';
 import type { ActionType } from '../race';
+import { SnapDecoder, type WireStateMsg } from './snapwire';
 
 export interface SocketLike {
   readyState: number;
@@ -47,8 +48,11 @@ export const HISTORY_MAX = 8000;
 /** The protocol's server message types: per-type counters and `latest` only ever key on these, so they cannot grow. */
 const SERVER_TYPES: Record<ServerMsg['t'], true> = { welcome: true, joined: true, room: true, state: true, ack: true, nack: true, result: true, awards: true, pong: true, bye: true };
 
-/** Receive counters: kept in every mode, constant size. */
-export interface RxStats { total: number; byType: Partial<Record<ServerMsg['t'], number>>; dropped: number; }
+/**
+ * Receive counters: kept in every mode, constant size. `undecodable`: state messages not delivered because they could not
+ * be decoded (a delta without its base state, see SnapDecoder); never expected over one ordered connection.
+ */
+export interface RxStats { total: number; byType: Partial<Record<ServerMsg['t'], number>>; dropped: number; undecodable: number; }
 
 export class OnlineClient {
   ws: SocketLike | null = null;
@@ -62,7 +66,12 @@ export class OnlineClient {
   readonly received: ServerMsg[] = [];
   /** How many messages `received` may hold: HISTORY_OFF until recordHistory(). */
   historyCap = HISTORY_OFF;
-  readonly rx: RxStats = { total: 0, byType: {}, dropped: 0 };
+  readonly rx: RxStats = { total: 0, byType: {}, dropped: 0, undecodable: 0 };
+  /**
+   * Turns v2 keyframes and deltas back into full snapshots (#67), so `received`, `latest`, onMessage and every waiter see a
+   * `state` with the whole RaceSnapshot in `snap`, as in v1. One per connection: a new socket starts from its resume state.
+   */
+  readonly snaps = new SnapDecoder();
   /** The newest message of each type (bounded by the number of message types). */
   readonly latest: Partial<Record<ServerMsg['t'], ServerMsg>> = {};
   closed: { code: number; reason: string } | null = null;
@@ -105,6 +114,7 @@ export class OnlineClient {
     this.drop();
     const ws = new this.Ctor(this.url, undefined, this.opts as never);
     this.ws = ws;
+    this.snaps.reset();
     await new Promise<void>((res, rej) => {
       // a socket that neither opens nor fails (a dead network path) is given up, so a reconnect loop can try again
       const timer = setTimeout(() => { rej(new Error('connect timeout')); try { ws.close(); } catch { /* not open */ } }, CONNECT_TIMEOUT_MS);
@@ -196,6 +206,13 @@ export class OnlineClient {
     this.lastRxAt = this.now();
     try { m = JSON.parse(s) as ServerMsg; } catch { return; }
     this.rx.total++;
+    if (m?.t === 'state') {
+      const snap = this.snaps.decode(m as unknown as WireStateMsg);
+      // not delivered at all: a consumer only ever sees whole states, and the next keyframe (at most 1 s) recovers. Its events
+      // are lost with it, as they would be with the message itself
+      if (!snap) { this.rx.undecodable++; return; }
+      m = { t: 'state', tick: m.tick, now: m.now, lagMs: m.lagMs, snap, ev: m.ev };
+    }
     if (Object.hasOwn(SERVER_TYPES, m?.t)) { this.rx.byType[m.t] = (this.rx.byType[m.t] ?? 0) + 1; this.latest[m.t] = m; }
     if (this.historyCap > 0) { this.received.push(m); if (this.received.length > this.historyCap) { this.received.shift(); this.rx.dropped++; } }
     if (m.t === 'joined') { this.room = m.room; this.me = m.you; this.token = m.token; this.ctlSeq = Math.max(this.ctlSeq, m.ctlSeq); this.actSeq = Math.max(this.actSeq, m.actSeq); }

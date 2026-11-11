@@ -87,15 +87,20 @@ async function openPage(run, url, view = 'laptop', { touch = false, name = view,
   if (fpsCap) await page.addInitScript((ms) => { const raf = window.requestAnimationFrame.bind(window); const last = new Map(); window.requestAnimationFrame = (cb) => raf(function step(ts) { if (ts - (last.get(cb) ?? 0) < ms) { raf(step); return; } last.set(cb, ts); cb(ts); }); }, Math.round(1000 / fpsCap));
   await page.addInitScript(() => {
     // Brake press timing, armed by the check: to the first server state that shows it (network + server), and to the first drawn frame
-    const q = (window.__lat = { arm: false, downAt: 0, waitNet: false, waitDraw: false, net: [], drawn: [] });
+    // stateN/stateBytes: every `state` frame this page received and its size (UTF-8 bytes on the wire, #67)
+    const q = (window.__lat = { arm: false, downAt: 0, waitNet: false, waitDraw: false, net: [], drawn: [], stateN: 0, stateBytes: 0 });
     window.addEventListener('keydown', (e) => { if (q.arm && !e.repeat && e.code === 'KeyS') { q.arm = false; q.downAt = performance.now(); q.waitNet = q.waitDraw = true; } }, true);
     const W = window.WebSocket;
     window.WebSocket = class extends W {
       constructor(...a) {
         super(...a);
         this.addEventListener('message', (ev) => {
-          if (!q.waitNet || typeof ev.data !== 'string' || !ev.data.startsWith('{"t":"state"')) return;
-          const m = JSON.parse(ev.data), me = window.__game?.localId, c = m.snap.cars.find((x) => x.id === me);
+          if (typeof ev.data !== 'string' || !ev.data.startsWith('{"t":"state"')) return;
+          q.stateN++; q.stateBytes += new TextEncoder().encode(ev.data).length;
+          if (!q.waitNet) return;
+          // v2 (#67): cars are in the race's static order, which the mirror race keeps; a delta names only changed fields,
+          // so a press shows as the first `brake` above 0 in this car's entry
+          const m = JSON.parse(ev.data), g = window.__game, i = g?.race.cars.findIndex((x) => x.id === g.localId), c = i >= 0 ? m.snap.cars[i] : null;
           if (c && c.brake > 0) { q.net.push(+(performance.now() - q.downAt).toFixed(1)); q.waitNet = false; }
         });
       }
@@ -283,6 +288,8 @@ async function lobby(run, c) {
   const res = await Promise.all(all.map((s) => read(s.page, () => ({ digest: window.__game.net.result.digest, rows: [...document.querySelectorAll('.netres tbody tr')].map((r) => r.dataset.status + ':' + r.children[0].textContent), table: document.querySelector('.netres tbody').textContent.replace(/You/g, '') }))));
   c.ok('4-player race: every browser shows the same final server standings', new Set(res.map((r) => r.digest)).size === 1 && res[0].rows.length === 4, res.map((r) => r.rows));
   run.evidence.race4 = res[0].rows;
+  // what each browser received over the lobby and the 4-player race: state frames and their average size on the wire
+  run.evidence.stateFrames4 = await Promise.all(all.map((s) => read(s.page, () => ({ n: window.__lat.stateN, avgBytes: Math.round(window.__lat.stateBytes / Math.max(1, window.__lat.stateN)) }))));
   await snapshotOf(phone.page, 'results-phone-portrait.png');
   // reopen results: the same result again is not fresh and records nothing
   const before = await read(host.page, () => JSON.stringify(Object.entries(localStorage).filter(([k]) => k.startsWith('srgp.board') || k === 'srgp.champ')));
@@ -499,10 +506,10 @@ async function connection(run, c) {
       await a.page.keyboard.down('KeyS'); await sleep(350); await a.page.keyboard.up('KeyS');
       await sleep(250);
     }
-    const r = await read(a.page, () => ({ net: window.__lat.net, drawn: window.__lat.drawn, buf: { ...window.__game.net.buf }, lag: window.__game.net.lagMs }));
+    const r = await read(a.page, () => ({ net: window.__lat.net, drawn: window.__lat.drawn, buf: { ...window.__game.net.buf }, lag: window.__game.net.lagMs, stateFrames: { n: window.__lat.stateN, avgBytes: Math.round(window.__lat.stateBytes / Math.max(1, window.__lat.stateN)) } }));
     const stat = (xs) => { const v = [...xs].sort((x, y) => x - y); const q = (p) => (v.length ? v[Math.min(v.length - 1, Math.floor(p * v.length))] : null); return { n: v.length, median: q(0.5), p90: q(0.9), max: v.at(-1) ?? null }; };
     const frames = r.buf.frames - t0.frames, wall = (Date.now() - w0) / 1000;
-    const out = { label, toServerState: stat(r.net), toDrawnFrame: stat(r.drawn), fps: +(frames / wall).toFixed(1), starvedFrames: r.buf.starved - t0.starved, frames, reanchors: r.buf.reanchors - t0.reanchors, maxGapMs: Math.round(r.buf.maxGapMs), depth: r.buf.depth, staleSnaps: r.buf.stale - t0.stale };
+    const out = { label, toServerState: stat(r.net), toDrawnFrame: stat(r.drawn), fps: +(frames / wall).toFixed(1), starvedFrames: r.buf.starved - t0.starved, frames, reanchors: r.buf.reanchors - t0.reanchors, maxGapMs: Math.round(r.buf.maxGapMs), depth: r.buf.depth, staleSnaps: r.buf.stale - t0.stale, stateFrames: r.stateFrames };
     run.evidence.latency = [...(run.evidence.latency ?? []), out];
     return out;
   };

@@ -6,6 +6,7 @@ import { Race, type RaceSnapshot } from '../../src/race';
 import type { SocketCtor } from '../../src/net/client';
 import { NetSession, loadSeat, type KV, type ResultView, type EndReason } from '../../src/net/session';
 import { SnapBuffer, applySnapshot, localEvent, mirrorRace } from '../../src/net/mirror';
+import { SnapDecoder, SnapEncoder, type WireStateMsg } from '../../src/net/snapwire';
 import { STEP } from '../../src/timing';
 import { createApp, type App } from '../../server/app';
 import { testConfig } from '../../server/config';
@@ -68,6 +69,8 @@ describe('snapshot mirror', () => {
     const srv = new Race({ roster, track: 'circuit-2', seed: 5, runOn: 'live' });
     let mirror: Race | null = null;
     let checked = 0;
+    // over the v2 wire (#67): keyframes and deltas, rounded as declared, decoded as the browser does
+    const enc = new SnapEncoder('race'), dec = new SnapDecoder();
     for (let i = 0; i < 60 * 120; i++) {
       const s = srv.snapshot();
       const ia = drive(s, 'a', 1), ib = drive(s, 'b', 0.95);
@@ -76,7 +79,8 @@ describe('snapshot mirror', () => {
       srv.update(STEP, { a: ia, b: ib });
       srv.events.length = 0;
       if (i % 3) continue;
-      const snap = JSON.parse(JSON.stringify(srv.snapshot())) as RaceSnapshot;   // exactly what goes over the wire
+      const wire = JSON.parse(JSON.stringify({ tick: i, ...enc.next(srv.snapshot(), i, i * STEP * 1000) })) as WireStateMsg;   // exactly what goes over the wire
+      const snap = dec.decode(wire)!;
       if (!mirror) mirror = mirrorRace(snap); else applySnapshot(mirror, snap);
       for (const c of srv.cars) {
         const m = mirror.car(c.id)!;
@@ -91,7 +95,8 @@ describe('snapshot mirror', () => {
         checked++;
       }
       expect(mirror.order().map((c) => c.id)).toEqual(srv.order().map((c) => c.id));
-      expect([mirror.phase, mirror.lights, mirror.raceTime]).toEqual([srv.phase, srv.lights, srv.raceTime]);
+      expect([mirror.phase, mirror.lights]).toEqual([srv.phase, srv.lights]);
+      expect(Math.abs(mirror.raceTime - srv.raceTime)).toBeLessThanOrEqual(0.0005 + 1e-9);   // 1 ms on the wire
     }
     expect(checked).toBeGreaterThan(5000);
     // applying the same snapshot again changes nothing (a correction never replays a lap or a stop)

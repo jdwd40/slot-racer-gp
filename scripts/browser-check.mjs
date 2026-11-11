@@ -22,6 +22,8 @@ const SEED = 20261107;
 const LAPS = 13;
 const TRACK = 'circuit-1';   // Clubman Park
 const CAR = 'sunburst';
+/** the protocol this checkout speaks (as scripts/build-server.mjs reads it) */
+const PROTOCOL = Number(/PROTOCOL_VERSION = (\d+)/.exec(readFileSync(path.join(ROOT, 'src/net/protocol.ts'), 'utf8'))?.[1]);
 const STRINGS = Object.fromEntries(JSON.parse(readFileSync(path.join(ROOT, 'assets/ui/strings.json'), 'utf8')).strings.map((s) => [s.id, s.text]));
 /** the fixed start of a string, up to its first {placeholder} */
 const text = (id) => STRINGS[id].split('{')[0].trim();
@@ -2607,21 +2609,22 @@ async function online(run, c) {
   }
   c.ok('Online build: the same-origin health and protocol check passes', st.state === 'available' && st.wsUrl === new URL('/ws', run.url).href.replace(/^http/, 'ws'), st);
   c.ok('Online build: only same-origin /api/health was requested before any play', net.length > 0 && net.every((p) => p === '/api/health'), net);
-  const trip = await read(page, (wsUrl) => new Promise((resolve) => {
+  const trip = await read(page, ([wsUrl, v]) => new Promise((resolve) => {
     const out = { msgs: [] };
     const ws = new WebSocket(wsUrl);
     const done = () => { try { ws.close(); } catch { /* closed */ } resolve(out); };
     setTimeout(done, 10000);
-    ws.onopen = () => ws.send(JSON.stringify({ t: 'hello', v: 1, proto: 'slotrush' }));
+    ws.onopen = () => ws.send(JSON.stringify({ t: 'hello', v, proto: 'slotrush' }));
     ws.onmessage = (e) => {
       const m = JSON.parse(e.data);
       out.msgs.push(m.t);
       if (m.t === 'welcome') ws.send(JSON.stringify({ t: 'create', name: 'Browser', mode: 'solo', settings: { track: 'circuit-2' } }));
       if (m.t === 'joined') { out.code = m.room.code; out.hasToken = typeof m.token === 'string' && m.token.length > 20; ws.send(JSON.stringify({ t: 'start' })); }
-      if (m.t === 'state' && m.snap.cars.length === 4) { out.track = m.snap.track; out.cars = m.snap.cars.map((x) => x.control); ws.send(JSON.stringify({ t: 'leave' })); }
+      // v2: the race's first state is a keyframe with the static car fields (control among them)
+      if (m.t === 'state' && m.static?.cars.length === 4) { out.track = m.snap.track; out.cars = m.static.cars.map((x) => x.control); ws.send(JSON.stringify({ t: 'leave' })); }
       if (m.t === 'bye') { out.bye = m.code; done(); }
     };
-  }), st.wsUrl);
+  }), [st.wsUrl, PROTOCOL]);
   c.ok('Page WebSocket through the same-origin /ws proxy: hello, solo room, server race state, leave', trip.code && trip.hasToken && trip.track === 'circuit-2' && trip.cars.join() === 'human,ai,ai,ai' && trip.bye === 'left', trip);
   c.ok('No page errors', s.errors.length === 0, s.errors);
   return s;

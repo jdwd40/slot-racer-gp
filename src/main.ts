@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { ONLINE_ENABLED, probeOnline, type OnlineStatus } from './online';
+import { ONLINE_ENABLED, outdatedHtml, probeOnline, type OnlineStatus } from './online';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 import * as T from './track';
 import { Race, Car, LAPS, RaceEvent, DRIVERS, PERSONAS, PEN, DEF, SOLO_ID, DriverId, RosterEntry } from './race';
@@ -370,6 +370,7 @@ function showTitle(): void {
     ${onlineEntryHtml()}
   </div>`;
   overlay.querySelector('#o-online')?.addEventListener('click', () => { sfx.init(); showOnline(); });
+  overlay.querySelector('#o-reload')?.addEventListener('click', () => location.reload());
   overlay.querySelector('#o-account')?.addEventListener('click', () => { sfx.init(); showAccount(); });
   overlay.querySelector('#o-rejoin')?.addEventListener('click', () => { sfx.init(); const st = loadSeat(seatStore()); if (st) void netBegin((n) => n.resume(st)); });
   overlay.querySelectorAll<HTMLElement>('.track').forEach((b) => b.addEventListener('click', () => {
@@ -958,6 +959,7 @@ function onlineEntryHtml(): string {
     return `<div class="row net-entry"><button class="cta" id="o-online">${t('net.online')}</button>${seat ? `<button class="cta alt" id="o-rejoin">${t('net.rejoin', { code: esc(seat.code) })}</button>` : ''}${accountEntryHtml()}</div><p class="modes"><small>${t('net.onlineNote')}</small></p>`;
   }
   if (online.state === 'unavailable') return `<p class="modes net-off"><small>${t('net.unavailable')}</small></p>`;
+  if (online.state === 'outdated') return outdatedHtml();
   return '';
 }
 
@@ -1262,6 +1264,8 @@ async function netBegin(req: (s: NetSession) => Promise<{ ok: true } | { ok: fal
   if (!r.ok) {
     net = null;
     mode = 'race';
+    // the server refused this page's protocol (it was upgraded after this page loaded): say so and offer a reload (#67)
+    if (r.code === 'protocol') { online = { state: 'outdated', server: null }; netNotice = ''; showTitle(); return; }
     // the sign-in this page shows is not the browser's any more (expired, signed out elsewhere, reset, switched in another
     // tab): nothing was entered; find out who this browser is now and let the driver choose again
     const session = r.code === 'expired' && r.detail === 'session';
@@ -1441,6 +1445,8 @@ function onNetEnd(why: EndReason, detail?: string): void {
   setRace(newRace());
   // on the pending card a refused resume means no result is coming: that card says so itself, with its way back (#43)
   if (netGuard.ended(why)) { netNotice = ''; return; }
+  // a reconnect refused for its protocol: the server was upgraded mid-session; this page cannot play online until reloaded
+  if (why === 'outdated') { online = { state: 'outdated', server: null }; netNotice = ''; showTitle(); return; }
   netNotice = why === 'left' ? '' : code ? t(retired ? 'net.end.disconnectedRace' : 'net.end.disconnected', { code }) : t(`net.end.${why}`);
   if (why === 'left' || online.state !== 'available') showTitle(); else showOnline();
 }

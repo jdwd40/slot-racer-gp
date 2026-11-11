@@ -6,8 +6,11 @@ import type { AwardsView, ChampionshipTag, ClientMsg, ErrorCode, LiveryId, Mode,
 import type { ActionType, DriverId, Standing } from '../race';
 
 export type Conn = 'offline' | 'connecting' | 'connected' | 'reconnecting';
-/** Why a session ended for good. `expired`: the seat can no longer be resumed (it is never re-claimed as a new driver). */
-export type EndReason = 'left' | 'expired' | 'closed' | 'shutdown' | 'superseded' | 'lost';
+/**
+ * Why a session ended for good. `expired`: the seat can no longer be resumed (it is never re-claimed as a new driver).
+ * `outdated`: a reconnect's hello was refused for its protocol (the server was upgraded meanwhile): this page must reload.
+ */
+export type EndReason = 'left' | 'expired' | 'closed' | 'shutdown' | 'superseded' | 'lost' | 'outdated';
 
 export interface Seat { room: string; participant: string; token: string; code: string; }
 
@@ -175,7 +178,11 @@ export class NetSession {
         if (r.t === 'joined') { this.held = { up: false, down: false }; this.adopt(r); return; }
         const n = r as Extract<ServerMsg, { t: 'nack' }>;
         if (n.code === 'expired' || n.code === 'forbidden' || n.code === 'not_found') { this.client.drop(); this.finish('expired', n.detail); return; }
-      } catch { /* not reachable yet */ }
+      } catch (e) {
+        // the server now speaks another protocol: retrying cannot succeed, and the old page must never race on it
+        if (String((e as Error).message).includes('hello refused: protocol')) { this.client.drop(); this.finish('outdated'); return; }
+        /* otherwise not reachable yet */
+      }
       // a refused or failed attempt gives its socket up before the next one, or each retry would hold another server connection
       this.client.drop();
       if (this.now() > deadline) { this.finish('expired', 'reconnect window passed'); return; }

@@ -5,7 +5,7 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import WebSocket from 'ws';
 import { LAPS, PEN, type RaceSnapshot } from '../../src/race';
 import { OnlineClient, type SocketCtor } from '../../src/net/client';
-import type { ServerMsg } from '../../src/net/protocol';
+import { PROTOCOL_VERSION, type ServerMsg } from '../../src/net/protocol';
 import { createApp, type App } from '../../server/app';
 import { testConfig } from '../../server/config';
 import { memoryLogger } from '../../server/log';
@@ -173,10 +173,17 @@ describe('headless clients race over WebSockets', () => {
 
 describe('protocol and access checks', () => {
   it('protocol mismatch is refused and closed; hello is required first and only once', async () => {
-    const c = new OnlineClient(base.replace('http', 'ws') + '/ws', Ctor, { headers: { origin: ORIGIN } });
-    await expect(c.connect(2)).rejects.toThrow(/protocol/);
-    await sleep(50);
-    expect(c.closed?.code).toBe(4002);
+    // a cached v1 page (#67: v2 changed the state format) and a client newer than this server are both refused cleanly
+    for (const v of [1, PROTOCOL_VERSION + 1]) {
+      const c = new OnlineClient(base.replace('http', 'ws') + '/ws', Ctor, { headers: { origin: ORIGIN } });
+      const got: ServerMsg[] = [];
+      c.onMessage = (m) => got.push(m);
+      await expect(c.connect(v)).rejects.toThrow(/hello refused: protocol/);
+      await sleep(50);
+      expect(c.closed?.code).toBe(4002);
+      // nothing of a room or a race ever reaches it
+      expect(got.map((m) => m.t)).toEqual(['nack']);
+    }
     const raw = new WebSocket(base.replace('http', 'ws') + '/ws', { headers: { origin: ORIGIN } });
     const got: ServerMsg[] = [];
     raw.on('message', (d) => got.push(JSON.parse(String(d)) as ServerMsg));
@@ -322,9 +329,9 @@ describe('protocol and access checks', () => {
   it('health and version report the protocol, rules and load; unknown API paths are 404 and accounts are off without a database', async () => {
     const h = await fetch(`${base}/api/health`).then(async (r) => ({ s: r.status, b: (await r.json()) as Record<string, unknown> }));
     expect(h.s).toBe(200);
-    expect(h.b).toMatchObject({ ok: true, protocol: 1, rules: 'race-core-2026.11.3', db: 'disabled', accounts: false, roomCap: cfg.roomCap });
+    expect(h.b).toMatchObject({ ok: true, protocol: PROTOCOL_VERSION, rules: 'race-core-2026.11.3', db: 'disabled', accounts: false, roomCap: cfg.roomCap });
     expect(typeof h.b.rssMb).toBe('number');
-    expect(await fetch(`${base}/api/version`).then((r) => r.json())).toMatchObject({ protocol: 1 });
+    expect(await fetch(`${base}/api/version`).then((r) => r.json())).toMatchObject({ protocol: PROTOCOL_VERSION });
     expect((await fetch(`${base}/api/nothing`)).status).toBe(404);
     expect((await fetch(`${base}/api/auth/login`, { method: 'POST', headers: { origin: ORIGIN, 'content-type': 'application/json' }, body: '{}' })).status).toBe(503);
   });

@@ -39,32 +39,37 @@ const DRIVE = flag('--drive'), AI_FILL = flag('--ai-fill'), UNTIL_RESULTS = flag
 if (!(POLL_S > 0 && POLL_S < 50)) { console.error('--poll must be between 0 and 50 s (the rolling tick window keeps samples for at least 50 s)'); process.exit(2); }
 const wsUrl = base.replace(/^http/, 'ws') + '/ws';
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+// the protocol this checkout speaks (as scripts/build-server.mjs reads it)
+const PROTOCOL = Number(/PROTOCOL_VERSION = (\d+)/.exec(readFileSync(path.join(ROOT, 'src/net/protocol.ts'), 'utf8'))?.[1]);
 
-let drive = null;
+let drive = null, SnapDecoder = null;
 if (DRIVE) {
   // the same bot the server tests drive with, built like online-check.mjs builds its QA server (test tooling, never shipped)
   const { build } = await import('esbuild');
   const out = path.join(ROOT, '.qa/load-bot.mjs');
-  await build({ entryPoints: [path.join(ROOT, 'test/server/bot.ts')], outfile: out, bundle: true, platform: 'node', target: 'node22', format: 'esm', logLevel: 'warning' });
-  ({ drive } = await import(pathToFileURL(out).href));
+  // with the client's snapshot decoder: v2 states are keyframes and deltas (#67), and the bot reads whole snapshots
+  const entry = "export { drive } from './test/server/bot.ts'; export { SnapDecoder } from './src/net/snapwire.ts';";
+  await build({ stdin: { contents: entry, resolveDir: ROOT, loader: 'ts' }, outfile: out, bundle: true, platform: 'node', target: 'node22', format: 'esm', logLevel: 'warning' });
+  ({ drive, SnapDecoder } = await import(pathToFileURL(out).href));
 }
 
 function client() {
   return new Promise((res, rej) => {
     const ws = new WebSocket(wsUrl, { headers: { origin: ORIGIN } });
-    const c = { ws, msgs: 0, bytes: 0, waiters: [], seq: 0, act: 0, me: null, held: { up: false, down: false }, pace: PACE };
+    const c = { ws, msgs: 0, bytes: 0, waiters: [], seq: 0, act: 0, me: null, held: { up: false, down: false }, pace: PACE, dec: SnapDecoder ? new SnapDecoder() : null };
     ws.on('message', (d) => {
       c.msgs++; c.bytes += d.length;
       const m = JSON.parse(String(d));
       if (m.t === 'joined') c.me = m.you;
       if (m.t === 'result') c.envelope = m.envelope;
-      if (drive && m.t === 'state' && c.me && ws.readyState === WebSocket.OPEN) {
-        const o = drive(m.snap, c.me, c.pace);
+      const snap = drive && m.t === 'state' ? c.dec.decode(m) : null;
+      if (snap && c.me && ws.readyState === WebSocket.OPEN) {
+        const o = drive(snap, c.me, c.pace);
         if (o.up !== c.held.up || o.down !== c.held.down) { c.held = { up: o.up, down: o.down }; send(c, { t: 'ctl', seq: ++c.seq, ...c.held }); }
         if (o.pit) send(c, { t: 'act', seq: ++c.act, type: 'pit' });
         // --retire-on-finish: once a human in this room has finished, the humans still racing leave (their cars retire), so
         // every human is terminal while AI cars still race: the AI run-on, watched by the finishers, then its classification
-        if (RETIRE && !c.left && m.snap.cars.some((x) => x.control === 'human' && x.finished) && m.snap.cars.find((x) => x.id === c.me)?.status === 'running') { c.left = true; send(c, { t: 'leave' }); }
+        if (RETIRE && !c.left && snap.cars.some((x) => x.control === 'human' && x.finished) && snap.cars.find((x) => x.id === c.me)?.status === 'running') { c.left = true; send(c, { t: 'leave' }); }
       }
       for (const w of [...c.waiters]) if (w.p(m)) { c.waiters.splice(c.waiters.indexOf(w), 1); w.r(m); }
     });
@@ -83,7 +88,7 @@ const commit = opt('--commit', null) ?? tryRun(() => execFileSync('git', ['rev-p
 const all = [], groups = [];   // groups: each room's clients (any of them may be the one still there for the result)
 for (let r = 0; r < ROOMS; r++) {
   const host = await client(); all.push(host);
-  send(host, { t: 'hello', v: 1, proto: 'slotrush' }); await wait(host, (m) => m.t === 'welcome');
+  send(host, { t: 'hello', v: PROTOCOL, proto: 'slotrush' }); await wait(host, (m) => m.t === 'welcome');
   send(host, { t: 'create', name: `Load${r}`, mode: 'multiplayer', settings: { track: `circuit-${(r % 5) + 1}`, aiFill: AI_FILL } });
   const j = await wait(host, (m) => m.t === 'joined' || m.t === 'nack');
   if (j.t !== 'joined') { console.error('create refused', j, j.code === 'unavailable' || j.code === 'rate' ? '(one-address load: start the server with SLOTRUSH_ROOMS_PER_IP >= --rooms, see the header)' : ''); process.exit(1); }
@@ -91,7 +96,7 @@ for (let r = 0; r < ROOMS; r++) {
   for (let k = 1; k < HUMANS; k++) {
     const c = await client(); all.push(c); cs.push(c);
     c.pace = PACE - k * 0.03;
-    send(c, { t: 'hello', v: 1, proto: 'slotrush' }); await wait(c, (m) => m.t === 'welcome');
+    send(c, { t: 'hello', v: PROTOCOL, proto: 'slotrush' }); await wait(c, (m) => m.t === 'welcome');
     send(c, { t: 'join', code: j.room.code, name: `L${r}-${k}` }); await wait(c, (m) => m.t === 'joined');
     send(c, { t: 'ready', ready: true });
   }

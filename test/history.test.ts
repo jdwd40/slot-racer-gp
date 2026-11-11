@@ -7,6 +7,7 @@ import { NetSession } from '../src/net/session';
 import type { ServerMsg } from '../src/net/protocol';
 import { Race } from '../src/race';
 import { STEP } from '../src/timing';
+import { SnapEncoder } from '../src/net/snapwire';
 
 const SNAPSHOTS = 20_001;
 const REMATCHES = 3;
@@ -40,7 +41,15 @@ function snapshots() {
   const race = new Race({ roster, seed: 50, runOn: 'live' });
   const held = Object.fromEntries(roster.map((r) => [r.id, { up: true, down: false }]));
   let tick = 0;
-  return () => { for (let k = 0; k < 3; k++) race.step(STEP, held); tick += 3; return { t: 'state', tick, now: 0, lagMs: 0, snap: race.snapshot(), ev: [] }; };
+  // as the room server sends them (protocol v2, #67): a keyframe with the static fields, deltas, a keyframe every second.
+  // `fresh()` starts a new race's encoding (a rematch), whose first state carries the static fields again
+  let enc = new SnapEncoder('race0');
+  const next = () => {
+    for (let k = 0; k < 3; k++) race.step(STEP, held);
+    tick += 3;
+    return { t: 'state', tick, now: 0, lagMs: 0, ev: [], ...enc.next(race.snapshot(), tick, tick * STEP * 1000) };
+  };
+  return Object.assign(next, { fresh: (id: string) => { enc = new SnapEncoder(id); } });
 }
 
 /**
@@ -54,6 +63,7 @@ function feed(c: OnlineClient, sock: () => { deliver(m: unknown): void }, room: 
   for (let i = 0; i < SNAPSHOTS; i++) { const m = next(); lastTick = m.tick; sock().deliver(m); if (i % 1000 === 0) look(); }
   look();
   for (let r = 0; r < REMATCHES; r++) {
+    next.fresh(`race${r + 1}`);
     sock().deliver({ t: 'room', room: room('lobby') });
     sock().deliver({ t: 'room', room: room('race') });
     for (let i = 0; i < 2000; i++) { const m = next(); lastTick = m.tick; sock().deliver(m); }
