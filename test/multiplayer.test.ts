@@ -329,13 +329,14 @@ describe('finishing', () => {
   });
 
   it('the finish window terminally classifies everyone still running, once and in a fixed order: a latched breach is a DQ', () => {
-    const r = room([...humans(3), { id: 'bot', control: 'ai' }], { finishWindow: 5 });
+    // a window under STALL.grace: the humans left standing on the slot are still there when it closes (#69 would move them)
+    const r = room([...humans(3), { id: 'bot', control: 'ai' }], { finishWindow: 2.5 });
     const [a, b, c, bot] = r.cars;
     for (const x of r.cars) place(r, x, LAP * r.T.L + 60 + x.idx * 25, 1, 0);
     b.svcBreach = 'stopGo';
     flag(r, a);
     expect(r.firstFlagT).toBeGreaterThan(0);
-    const ev = step(r, {}, 5.2);
+    const ev = step(r, {}, 2.7);
     expect([a.status, b.status, c.status, bot.status]).toEqual(['finished', 'dq', 'dnf', 'dnf']);
     expect([b.dqReason, c.dnfReason, bot.dnfReason]).toEqual(['deadline', 'window', 'window']);
     const terminal = ev.filter((e) => e.type === 'dq' || e.type === 'dnf').map((e) => `${e.type}:${(e as { car: Car }).car.id}`);

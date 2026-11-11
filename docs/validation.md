@@ -37,6 +37,7 @@ Functional runs default to 480×270 at Low so SwiftShader can run them. Perf cap
 | `queue` | Scripted placement, then real keys and emulated touch at 844×390 | Shared pit queue: Queued behind the box on Throttle alone, Brake held through the hold, Waiting for bay, a latched bay exit, Waiting for clear exit at the pit exit, the same on the touch pad. See [pit queues](pit-queue.md) |
 | `service` | Scripted placement, then real keys and emulated touch at 360×640 and 640×360 | Service obligations: request, N and touch Defer, route release and re-arm, refused toggles, latched breach, DQ on the results screen and in a championship round, Defer layout, final lap with the box occupied. See [service obligations](penalties.md) |
 | `lastchance` | Scripted placement, then real keys at 1280×720 and emulated touch at 390×844 and 844×390 | Last-chance warning (#65): a fuel stop committed by the override, then `msg.pitThisLap` at the line, the `PIT THIS LAP — or DQ` chip first and clear of the pad, the Space warning, and the breach chip replacing it. See [service obligations](penalties.md#last-chance-warning) |
+| `stall` | Scripted placement, then real keys at 1280×720 and emulated touch at 844×390 and 390×844; the race is held still for each check and screenshot | Stopped-on-track recovery (#69): the `MOVE YOUR CAR · PITS IN n` chip first and the status line, clear of every pad control; Throttle cancelling it; a second stop counting 3, 2, 1 and moving the car to its own bay with "Stopped on track — moved to pits"; Throttle held through the recovery not leaving (Release Throttle, `lift off`); Ready, then a fresh press waiting for a blocked exit, then leaving and handed back past the pit exit. See [stopped-on-track recovery](auto-bay.md#stopped-on-track-recovery) |
 | `autobay` | Scripted placement, then real keys and emulated touch at 844×390 and 1024×768 | Automatic bay visits: bay paint for every livery, P and Throttle held into the car's own bay, Release Throttle, Ready, one tap to leave with refuelling stopped, a blocked bay merge with Esc and blur, a key held across a blur, a blocked pit exit, a combined visit, help text, the touch Throttle cue and chip clear of the pad. See [automatic bay visits](auto-bay.md) |
 | `autosg` | Scripted placement, then real keys and emulated touch at 844×390 | Automatic stop-and-go: Armed, Auto entry, Queued, Serving countdown, Leaving pits and the exit handover on Throttle alone or Brake held, no reverse after the handover, N and touch Defer, pause mid-service, help text, chip clear of the pad. See [automatic stop-and-go](auto-stop-go.md) |
 | `localslot` | Scripted session setup, then real keys at the default viewport | The local driver in grid slot 2: its number and bay, Throttle drives it, follow camera and full-view marker on it (not car 0), one HUD standings row marked You, HUD position and fuel from it, only its bay tagged You, full motor volume for it alone, P routes only it and shows its toast; slot 0 again restores the solo grid. See [multiplayer race core](multiplayer-core.md) |
@@ -186,6 +187,19 @@ Accept only if:
 4. `race` passes with renderer and preset recorded.
 
 Then add the results here, labelled as the user's own hardware or as reference-machine evidence. A different machine is reference-machine evidence only. By hand, also press Alt+Tab and switch tabs mid-race: each should pause and resume without a jump in race time.
+
+## Final multiplayer validation (#4): stopped on track
+
+The final integrated multiplayer validation on real devices (#4, with the owner's checks in [online client](online-client.md#after-activation-owner)) includes the stopped-on-track rule (#69). Use two or more real devices in one room, at least one a phone on the touch pad and one a desktop on the keyboard:
+
+1. On a straight away from the pits, one driver lifts off and stays stopped. That driver sees `⚠ MOVE YOUR CAR · PITS IN 3`, then 2, then 1, as the first chip and in the status line, with every driving control still visible and usable. The other devices show no countdown.
+2. Pressing Throttle and driving off before 1 clears the warning at once. Stopping again starts a fresh 3.
+3. Left stopped, the car disappears from the lane at the end of the count. It is in its own bay (its colour and number) on every device, with "Stopped on track — moved to pits" for its driver and "<name> stopped on track — moved to the pits" for the others. A car stopped right behind it gets no countdown until it is gone, then a fresh 3 if it still does not move.
+4. With Throttle held from before, the car stays in the bay (Release Throttle, `lift off` on touch). Release, wait for Ready, press once: it leaves only when the pit lane is clear and is handed back past the pit exit.
+5. Repeat step 3 with the stopped phone in flight mode for about 2 s mid-countdown. The car is still recovered 3 s after it stopped, not later, and the phone shows it in its bay after the reconnect.
+6. At the finish every device shows the same Final standings, with the recovered driver classified like any other.
+
+Record the devices, browsers and room code, the time of each step and anything that differed between devices. Until this is done on real devices it stays open: the automated and SwiftShader evidence is in [automatic bay visits](auto-bay.md#evidence).
 
 ## Online gate (#22)
 

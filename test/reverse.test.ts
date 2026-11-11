@@ -31,6 +31,11 @@ function run(r: Race, input: Input, sec: number, each?: (ev: RaceEvent[]) => voi
 function until(r: Race, input: Input, cond: () => boolean, each?: () => void, maxSec = 20): void {
   for (let i = 0; cond(); i++) { if (i > maxSec / DT) throw new Error('condition never ended'); stepEvents(r, 1, input); each?.(); }
 }
+/**
+ * These tests are about the gear itself and keep a car stopped on the racing lane for longer than STALL.grace, which the
+ * stopped-on-track rule (#69) would answer by moving it to its bay. The interaction is tested in test/stall.test.ts.
+ */
+function noStall(r: Race): void { r.stallUpdate = () => {}; }
 /** Rival cars hold their brakes where they are put (still AI-driven, so still forward-only). */
 function parkAI(r: Race): void { r.ai = () => ({ t: 0, b: 1 }); }
 function inPit(c: Car, s: number, v = 0): void {
@@ -84,6 +89,7 @@ describe('engagement', () => {
 
   it('releasing Brake cancels a pending engagement and brings a reversing car to rest, with nothing latched', () => {
     const { r, P } = solo();
+    noStall(r);
     place(P, 120, 1, 0);
     run(r, BRAKE, REV.engage * 0.7);
     run(r, NONE, DT);
@@ -121,6 +127,7 @@ describe('engagement', () => {
 
   it('with both pedals held, braking wins and reverse never arms', () => {
     const { r, P } = solo();
+    noStall(r);
     place(P, 120, 1, 8);
     run(r, BOTH, 3);
     expect(P.v).toBe(0);

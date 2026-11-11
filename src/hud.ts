@@ -1,5 +1,5 @@
 import * as T from './track';
-import { Race, LAPS, LOW_FUEL, Car, SERVICE_READY, DriverId, SOLO_ID } from './race';
+import { Race, LAPS, LOW_FUEL, Car, SERVICE_READY, DriverId, SOLO_ID, STALL } from './race';
 import { t } from './i18n';
 import { fmtMs } from './records';
 import { laneCue, pitCue } from './input';
@@ -199,6 +199,9 @@ export class Hud {
     if (live && p.svcBreach) chips.push(`<span class="chip red blink">✕ ${t('hud.breach')}</span>`);
     // last chance (#65): missing this lap's entrance means a DQ. Put first, so on a crowded phone HUD it is never the one wrapped last
     if (live && race.lastChance(p)) chips.unshift(`<span class="chip red blink last-chance">⚠ ${t('hud.lastChance')}</span>`);
+    // stopped on track (#69): the server's (or the local race's) count, shown as words and a number, ahead of everything
+    const stall = stallLeft(p);
+    if (stall) chips.unshift(`<span class="chip red blink stall" data-n="${stall}">⚠ ${t('hud.stallChip', { n: stall })}</span>`);
     const dueChip = (lap: number): string => { const d = race.dueState(p, lap); return d === 'none' ? '' : ` · ${t(`hud.dueChip.${d}`)}`; };
     const dueText = (lap: number): string => { const d = race.dueState(p, lap); return d === 'none' ? '' : t(`hud.due.${d}`); };
     if (p.sgOwed > 0 && !p.finished) chips.push(`<span class="chip red ${p.svcBreach ? '' : 'blink'}">■ ${t('hud.sgChip')}${dueChip(p.sgDue)}</span>`);
@@ -242,7 +245,11 @@ export class Hud {
     if (!inBay || p.towSvc) this.fuelVisit = false; else if (p.fuelDue > 0) this.fuelVisit = true;
     let st = '';
     const inPitLane = p.mode === 'pitlane' && !p.finished;
-    if (p.sgServing) {
+    if (stall) {
+      st = `<b class="red stall">⚠ ${t('hud.stallWarn', { n: stall })}</b>`;
+    } else if (p.stallHold && !p.finished) {
+      st = `<b class="org">${t('hud.stallHold', { b })}</b>`;
+    } else if (p.sgServing) {
       st = `<b class="red">${t('hud.sgServing', { n: Math.max(0, p.sgOwed - p.sgServed).toFixed(1) })}</b>`;
     } else if (sgp === 'leaving') {
       st = wait === 'exit' ? `<b class="org">${t('hud.qExitLine')}</b>` : `<b class="cyan">${t('hud.sgL.leaving')}</b>`;
@@ -351,6 +358,12 @@ export class Hud {
       }
     }
   }
+}
+
+/** Whole seconds left on a stopped-on-track warning (3, 2, 1), or 0 when none is running (#69). */
+export function stallLeft(c: { stallT: number; mode: string; finished: boolean }): number {
+  if (!(c.stallT > 0) || c.mode !== 'race' || c.finished) return 0;
+  return Math.max(1, Math.min(Math.ceil(STALL.grace), Math.ceil(STALL.grace - c.stallT - 1e-9)));
 }
 
 /** The player is in reverse gear, or still rolling backwards after leaving it. */

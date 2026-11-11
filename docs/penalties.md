@@ -76,7 +76,11 @@ What a deferral does:
 - Routing is released for this approach only (`routeHold`): no outside route, no entry, and the touch Pit button shows `⏭ next lap`. Once the car is past the entrance, routing re-arms for the next approach. Pressing Pit while the approach is held puts the route back ("stopping this lap") and changes no deadline.
 - Driving past a requested entrance after using the one-switch lane override on that approach counts as deferring the optional request (`msg.fuelOverride`). Missing it without an override, for example when a switch was blocked, leaves the request optional and armed.
 
-Repeated N or P presses, lane overrides, reversing, pauses, tows, re-slots and further offences cannot move a deadline later or give a deferral back.
+Repeated N or P presses, lane overrides, reversing, pauses, tows, re-slots, a [stopped-on-track recovery](auto-bay.md#stopped-on-track-recovery) and further offences cannot move a deadline later or give a deferral back.
+
+### Stopped-on-track recovery
+
+A human car left stopped on the racing lane for 3 s, when it is not queued, held or stuck behind another car, is moved back to its own bay (#69). This is recovery, not a pit visit and not a penalty. Every stop-and-go and fuel-stop debt, its deadline and deferral, and a latched breach are kept exactly. Standing in the bay afterwards does not serve a committed fuel stop (like a tow), and it cannot serve a stop-and-go, because the box is behind the bays. No time penalty is added and nothing escalates. The car loses the distance since it last passed its bay, and that lap is void. Details: [automatic bay visits](auto-bay.md#stopped-on-track-recovery).
 
 ### Occupied box
 

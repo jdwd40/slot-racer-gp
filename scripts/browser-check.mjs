@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Bounded browser validation of the real game. Procedure and results: docs/validation.md.
 //
-//   node scripts/browser-check.mjs [tracks race controlled routing practice championship touch responsive touchrace reverse service lastchance queue autosg autobay localslot online memory netbanner]   functional checks (default: all)
+//   node scripts/browser-check.mjs [tracks race controlled routing practice championship touch responsive touchrace reverse service lastchance stall queue autosg autobay localslot online memory netbanner]   functional checks (default: all)
 //   node scripts/browser-check.mjs perf --label updated --machine "<name>"          frame-time capture
 //   node scripts/browser-check.mjs compare <baseline.json> <updated.json>           like-for-like comparison
 //
@@ -1357,6 +1357,134 @@ async function lastchance(run, c) {
   return last;
 }
 
+/**
+ * Stopped-on-track recovery (#69): a car stopped on the racing lane gets the countdown, a drive-off cancels it, a second stop
+ * is moved to the car's own bay after 3 s, and it leaves only on a fresh Throttle press with the pit lane clear. Keyboard at
+ * 1280x720, the touch pad at 844x390 and 390x844. Scripted placement (rivals parked half a lap away), then real frames. Under
+ * SwiftShader a check and a screenshot take longer than the 3 s being tested, so the race is held still (its update skipped,
+ * frames still drawn) while each one is taken; every count and recovery itself happens in ordinary frames.
+ */
+async function stall(run, c) {
+  const st = (page) => read(page, () => {
+    const g = window.__game, r = g.race, p = r.car(g.localId), T = g.T, q = window.__qa;
+    const rect = (sel) => { const e = document.querySelector(sel); if (!e || !e.getClientRects().length) return null; const b = e.getBoundingClientRect(); return { x: b.x, y: b.y, r: b.right, b: b.bottom, vw: innerWidth, vh: innerHeight }; };
+    const bay = T.point3(T.BAYS[p.bayHome], T.BAY_D);
+    return { screen: g.screen, mode: p.mode, v: +p.v.toFixed(2), stallT: +p.stallT.toFixed(3), bay: p.bay, home: p.bayHome, phase: p.sgPhase, exitReq: p.exitReq, s: +T.wrapS(p.u).toFixed(2), lane: p.laneSide,
+      atBay: +Math.hypot(p.x - bay.x, p.y - bay.y).toFixed(3), throttle: g.input.held('throttle'), brake: g.input.held('brake'), revOn: p.revOn,
+      chips: document.getElementById('h-chips').textContent, first: document.querySelector('#h-chips .chip')?.textContent ?? '', status: document.getElementById('h-status').textContent,
+      chip: rect('#h-chips .stall'), line: rect('#h-status'), toast: document.getElementById('h-toast').textContent,
+      thrCue: document.getElementById('t-throttle').dataset.cue, thrText: document.getElementById('t-throttle-cue').textContent,
+      recovers: q.recovers, counts: [...q.stallSeen].sort().join(','), towPen: q.towPen };
+  });
+  /** lap 3 on the long straight of Clubman Park, at rest in the inside lane; rivals parked on the far side of the circuit */
+  const setup = (page) => read(page, () => {
+    const g = window.__game, T = g.T, L = 3;
+    if (g.race.phase === 'countdown') g.advance(7);
+    const r = g.race, p = r.car(g.localId), q = window.__qa;
+    window.__me = () => window.__game.race.car(window.__game.localId);
+    r.squeezeQ.length = 0;
+    const put = (car, s, side, v) => Object.assign(car, { u: (L - 1) * T.L + s, hiU: (L - 1) * T.L + s, laneSide: side, d: side * T.LANE_HALF, v, change: null, mode: 'race', throttle: 0, graceT: 0, recoverT: 0, cutT: 0, pushedT: 0, revMark: null, crossed: L, lapsDone: L - 1, sectors: 0, stallT: 0, stallRun: 0 });
+    r.cars.forEach((o, i) => { if (o !== p) put(o, 150 + T.L / 2 + i * 10, 1, 0); });
+    if (!r.__ai) { r.__ai = true; r.ai = () => ({ t: 0, b: 1 }); }
+    if (!r.__upd) { const u = r.update.bind(r); r.__upd = u; r.update = (dt, i) => { if (!window.__qa.freeze) u(dt, i); }; }
+    q.freeze = false;
+    put(p, 150, 1, 0); p.fuel = 0.7;
+    Object.assign(q, { recovers: 0, stallSeen: new Set(), towPen: false });
+    if (!r.__rec) { r.__rec = true; const f = r.stallRecover.bind(r); r.stallRecover = (car) => { const ok = f(car); if (ok && car.id === g.localId) window.__qa.recovers++; return ok; }; }
+    const pm = r.pmsg.bind(r); r.pmsg = (car, text, ...rest) => { if (text === 'msg.towPenalty') window.__qa.towPen = true; pm(car, text, ...rest); };
+    if (!q.stallObs) {
+      const el = document.getElementById('h-chips');
+      q.stallObs = new MutationObserver(() => { const e = el.querySelector('.stall'); if (e) window.__qa.stallSeen.add(e.dataset.n); });
+      q.stallObs.observe(el, { childList: true, subtree: true, characterData: true });
+    }
+  });
+  const until = (page, fn, ms = 30000) => waitFor(page, fn, null, ms);
+  /** hold the race still (frames keep drawing), or let it run */
+  const hold = (page, on) => read(page, (x) => { window.__qa.freeze = x; }, on);
+  /** let the race run in ordinary frames until fn holds, then hold it there */
+  const reach = async (page, fn, ms) => {
+    await read(page, (src) => { const q = window.__qa; q.stopWhen = new Function(`return (${src})()`); clearInterval(q.stopT); q.stopT = setInterval(() => { if (q.stopWhen()) { q.freeze = true; clearInterval(q.stopT); } }, 0); q.freeze = false; }, fn.toString());
+    await until(page, () => window.__qa.freeze, ms);
+    await frames(page, 2);
+  };
+  const views = [
+    { tag: 'desktop-1280x720', label: 'desktop 1280x720, keyboard', viewport: { width: 1280, height: 720 }, touch: false },
+    { tag: 'phone-844x390', label: 'phone landscape 844x390, touch', viewport: { width: 844, height: 390 }, touch: true },
+    { tag: 'phone-390x844', label: 'phone portrait 390x844, touch', viewport: { width: 390, height: 844 }, touch: true },
+  ];
+  let last = null;
+  for (const v of views) {
+    // one software-rendered page at a time: a previous view still racing behind would slow this one's load past its limit
+    if (last) { await last.context.close(); last = null; }
+    const s = await open(run, { viewport: v.viewport, dpr: v.touch ? 2 : 1, device: v.touch ? PHONE : {} });
+    const { page } = s;
+    if (v.touch) { s.keys = new PadKeys(new Fingers(page, await s.context.newCDPSession(page))); await page.click('[data-touch="on"]'); }
+    const shot = (name) => page.screenshot({ path: path.join(run.out, `stall-${v.tag}-${name}.png`) });
+    const layout = async (what, a) => {
+      if (!v.touch) return;
+      const m = await read(page, measureHud, CONTROLS);
+      const on = (x) => x && x.x >= 0 && x.y >= 0 && x.r <= x.vw && x.b <= x.vh;
+      c.ok(`${v.label}: ${what} fully on screen, and nothing in the HUD overlaps a driving control`, on(a.chip) && on(a.line) && m.pairs.length === 0 && m.pageX <= 0, { chip: a.chip, line: a.line, overlaps: m.pairs });
+    };
+    await pickRaceSetup(page);
+    await page.click('#o-start');
+    await waitFor(page, () => window.__game.screen === 'race');
+    await setup(page);
+    // ---- countdown: stopped on the lane, nothing pressed
+    await reach(page, () => window.__me().stallT > 0.3 && !!document.querySelector('#h-chips .stall'), 20000);
+    const a = await st(page);
+    c.ok(`${v.label}: stopped on the racing lane: "Move your car — pit recovery in n" with the countdown chip first in the row`, a.mode === 'race' && a.first.includes(text('hud.stallChip')) && a.status.includes(text('hud.stallWarn')) && a.recovers === 0, a);
+    await layout('the countdown chip and status line', a);
+    await shot('countdown');
+    // ---- cancellation: Throttle drives off before 3 s
+    await s.keys.set('KeyW', true);
+    await reach(page, () => window.__me().stallT === 0 || window.__me().mode !== 'race', 15000);
+    const b = await st(page);
+    await s.keys.set('KeyW', false);
+    c.ok(`${v.label}: Throttle before 3 s cancels it: the warning goes at once and the car stays on the track`, b.mode === 'race' && b.stallT === 0 && !b.chips.includes(text('hud.stallChip')) && !b.status.includes(text('hud.stallWarn')) && b.recovers === 0, b);
+    await shot('cancelled');
+    // ---- removal: stop again and hold Brake and Throttle together (Brake wins: no drive, no reverse), so Throttle is held through it
+    await read(page, () => window.__qa.stallSeen.clear());
+    await s.keys.set('KeyS', true);
+    await s.keys.set('KeyW', true);
+    await reach(page, () => window.__me().mode !== 'race', 30000);
+    await frames(page, 2);
+    const d = await st(page);
+    c.ok(`${v.label}: the countdown ran 3, 2, 1, then the car left the lane for its own bay, once, with "Stopped on track — moved to pits"`, d.counts === '1,2,3' && d.mode === 'service' && d.bay === d.home && d.atBay < 0.5 && d.recovers === 1 && d.toast.startsWith(STRINGS['msg.stallRecovered']) && !d.revOn && !d.towPen, d);
+    await shot('in-bay');
+    // ---- safe departure: Throttle still held never leaves; release, then a fresh press; the pit lane blocked, then clear
+    await s.keys.set('KeyS', false);
+    await hold(page, false);
+    await until(page, () => window.__me().sgPhase === 'release', 15000);
+    await sleep(1500);
+    const e = await st(page);
+    c.ok(`${v.label}: Throttle held through the recovery never leaves the bay: it asks to release it first`, e.mode === 'service' && !e.exitReq && e.phase === 'release' && e.chips.includes(text('hud.sgA.release')) && (!v.touch || e.thrCue === 'release'), e);
+    await s.keys.set('KeyW', false);
+    await until(page, () => window.__me().sgPhase === 'ready', 15000);
+    await frames(page, 2);
+    const f = await st(page);
+    c.ok(`${v.label}: released: Ready, Throttle to leave`, f.phase === 'ready' && f.chips.includes(text('hud.sgA.ready')) && (!v.touch || f.thrCue === 'ready'), f);
+    await shot('ready');
+    await read(page, () => { const g = window.__game, T = g.T, r = g.race, p = r.car(g.localId), x = r.cars.find((o) => o !== p); window.__qa.blocker = x.idx; Object.assign(x, { mode: 'pitlane', u: p.u - 1, d: T.PIT_D, v: 0, laneSide: -1, change: null }); });
+    await s.keys.set('KeyW', true); await frames(page, 2); await s.keys.set('KeyW', false);
+    await frames(page, 4);
+    await hold(page, true);
+    const g1 = await st(page);
+    c.ok(`${v.label}: a fresh press asks to leave; with a car beside the bay it waits for a clear exit`, g1.mode === 'service' && g1.exitReq && g1.phase === 'exit' && g1.chips.includes(text('hud.sgA.exit')), g1);
+    await shot('wait-exit');
+    await read(page, () => { const g = window.__game, T = g.T, x = g.race.cars.find((o) => o.idx === window.__qa.blocker); Object.assign(x, { mode: 'race', u: x.u + 140, laneSide: 1, d: T.LANE_HALF, v: 0 }); });
+    await reach(page, () => window.__me().mode === 'race', 60000);
+    const h = await st(page);
+    c.ok(`${v.label}: once clear it leaves without another press and is handed back past the pit exit, on the outside lane, with no second recovery`, h.mode === 'race' && h.lane === -1 && h.s > 31 && h.s < 60 && h.recovers === 1 && !h.towPen, h);
+    await shot('rejoined');
+    await s.keys.release();
+    await hold(page, false);
+    c.ok(`${v.label}: no page or console errors`, s.errors.length === 0, s.errors.slice(0, 5));
+    last = s;
+  }
+  return last;
+}
+
 // ------------------------------------------------------------ responsive layouts
 const LAYOUTS = [['phone portrait, small', 360, 640], ['phone portrait', 390, 844], ['phone landscape, small', 640, 360], ['phone landscape', 844, 390], ['tablet portrait', 768, 1024]];
 const CONTROLS = ['t-throttle', 't-brake', 't-lane', 't-pit', 't-pause'];
@@ -2533,8 +2661,8 @@ async function netbanner(run, c) {
   return s;
 }
 
-const SCENARIOS = { tracks, race, controlled, routing, practice, championship, touch, responsive, touchrace, reverse, service, lastchance, queue, autosg, autobay, localslot, online, memory, netbanner };
-const USAGE = 'usage: browser-check.mjs [tracks|race|controlled|routing|practice|championship|touch|responsive|touchrace|reverse|service|lastchance|queue|autosg|autobay|localslot|online|memory|netbanner ...] | perf | compare <a.json> <b.json>\n'
+const SCENARIOS = { tracks, race, controlled, routing, practice, championship, touch, responsive, touchrace, reverse, service, lastchance, stall, queue, autosg, autobay, localslot, online, memory, netbanner };
+const USAGE = 'usage: browser-check.mjs [tracks|race|controlled|routing|practice|championship|touch|responsive|touchrace|reverse|service|lastchance|stall|queue|autosg|autobay|localslot|online|memory|netbanner ...] | perf | compare <a.json> <b.json>\n'
   + 'options: --dist <dir> --url <url> --commit <sha> --machine <name> --label <name> --viewport WxH --dpr N --preset low|balanced|high\n'
   + '         --seconds N --headed --channel <chrome|msedge> --out <dir> --max-minutes N';
 

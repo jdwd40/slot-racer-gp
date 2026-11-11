@@ -17,6 +17,7 @@ An authoritative server for private rooms of up to four human drivers, plus serv
 - **The race core gained two things.** These are additive, and the browser game's behaviour is unchanged:
   - `RaceOpts.runOn: 'live'`: once every human is terminal, the AI field keeps stepping normally. There is no 240 s synchronous run-out (which measured 330 ms of blocked event loop). The server runs this run-on at 8 steps per tick.
   - `Race.retire(id)`: DNF `retired`, or DQ `deadline` if a service breach is latched, so leaving never escapes a DQ. Since rules `race-core-2026.11.2` (#44) the retired car also leaves the track; see *Disconnects, grace and retirement*.
+  - Since rules `race-core-2026.11.3` (#69) a human car stopped on the racing lane for 3 s of simulation time (not held by the pit queue, the squeeze or automatic control, and not trapped behind a car ahead) is moved back to its own bay: [stopped-on-track recovery](auto-bay.md#stopped-on-track-recovery). The server's race core owns the count and the recovery.
 - **Shared protocol and client.** `src/net/protocol.ts` holds the message types, limits and validator. `src/net/client.ts` is a client that takes either the browser `WebSocket` or the `ws` package. The headless test clients, the smoke check and the browser's online session (`src/net/session.ts`) use it.
 
 ## Rooms, seats and races
@@ -56,7 +57,7 @@ An authoritative server for private rooms of up to four human drivers, plus serv
   - When a connection closes, that seat's held controls are neutral from the next step.
   - A connected client must refresh its held controls (the client heartbeat is 250 ms). Controls not refreshed for `SLOTRUSH_INPUT_TIMEOUT_MS` (1000 ms) are neutralized.
   - The server pings every 25 s and terminates a peer that misses a pong.
-- **Grace.** A seat is held for `SLOTRUSH_RECONNECT_GRACE_S`: 20 s by default, bounded to 5–120 s. During the grace the car is neutral and coasts to a stop in its lane. Other drivers should avoid it, as with any stopped car. A `resume` with the private token returns the same seat.
+- **Grace.** A seat is held for `SLOTRUSH_RECONNECT_GRACE_S`: 20 s by default, bounded to 5–120 s. During the grace the car is neutral and coasts to a stop in its lane. Since #69 it gets no special immunity there: 3 s after it stops (unless it is held or trapped) it is moved to its own bay, as any stopped car is, so it does not block the lane for the rest of the grace. A `resume` with the private token returns the same seat, wherever the car is; the count is race state and carries on across the drop.
   - Lap progress, service debts, penalties and eligibility are race state, so a resume never resets them.
   - Control and action numbering continues: a replayed sequence number is refused.
   - A newer connection supersedes the old one, which is closed with code 4001.
@@ -88,7 +89,7 @@ The protocol is JSON text over WebSocket at `/ws`. The first client message must
 | `welcome` | Server build, rules version and server time |
 | `joined` | Public room, `you`, the **private reconnect token** (only here, only to that socket), current `ctlSeq`/`actSeq` |
 | `room` | Public room snapshot on every change (`rev` increases). It never contains a token |
-| `state` | `tick` (server simulation steps), `now` (server ms), `lagMs`, the race snapshot and the events since the last state. It is sent `SLOTRUSH_SNAPSHOT_HZ` times a second of wall time (see *Snapshot rate*), and at once on a resume |
+| `state` | `tick` (server simulation steps), `now` (server ms), `lagMs`, the race snapshot and the events since the last state. It is sent `SLOTRUSH_SNAPSHOT_HZ` times a second of wall time (see *Snapshot rate*), and at once on a resume. Since #69 each car in the snapshot also has `stallT` and `stallHold`, and the events can include `{ type: 'recover', car }` (see below) |
 | `result` | The race's result envelope, broadcast once when the race closes. A resume into `results` gets the same envelope again, after `joined` and `state`, so a driver whose link dropped at the finish still receives it |
 | `ack` / `nack` | `nack` carries `ref` (message type), `code` and optional `seq`/`detail` |
 | `bye` | `left`, `closed`, `shutdown`, `superseded` and so on, then the socket closes |
@@ -116,7 +117,14 @@ The protocol is JSON text over WebSocket at `/ws`. The first client message must
 - **Origin and connections.** The `Origin` header must exactly match `SLOTRUSH_ALLOWED_ORIGINS` for WebSocket upgrades (otherwise 403 before the upgrade) and for `/api` POSTs. The path must be `/ws` (otherwise 404). Connections are capped in total and per client address (otherwise 503). The client address is `X-Real-IP` only when the TCP peer is loopback (Nginx).
 - **Ordering.** Server ticks and server timestamps order everything. Over one connection (TCP), messages arrive in order. Across reconnects, the per-seat sequence numbers reject anything stale. All members of a room receive the same serialized bytes for every broadcast, so every client sees identical decisions (tested).
 
-Bump `PROTOCOL_VERSION` on any incompatible change. The browser enables online play only when `/api/health` reports exactly its protocol version. The rollout smoke check compares the server's protocol and rules with the build's `server-dist/protocol.json`. `RULES_VERSION` (`race-core-2026.11.2`) is recorded in every envelope. Bump it whenever a simulation change could change a result. History: `race-core-2026.11.1` first online rules; `race-core-2026.11.2` retired cars leave the track (#44). Personal bests are stored per rules version (`personal_bests` key, [career.md](career.md)), so a bump starts a new set of personal bests for races on the room server (multiplayer and every other online mode); laps set under an older version are kept apart.
+**Stopped-on-track recovery on the wire (#69).** These additions are backward compatible, so `PROTOCOL_VERSION` stays 1:
+
+- Each `CarSnapshot` gained two optional fields: `stallT`, the seconds counted towards recovery (0 when no countdown runs), and `stallHold`, recovered and waiting for its bay. The mirror copies them only when present, and a snapshot without them reads as no countdown.
+- The recovery is one ordinary race event in `state.ev`, `{ type: 'recover', car: <driver id> }`, with the driver's `msg.stallRecovered` message alongside. A client that does not know the event type ignores it.
+- No message type, field of a client message or message loop was added, and the snapshot rate and its cap are unchanged.
+- A client and server must still run the same rules: the existing rollout check compares `rules`.
+
+Bump `PROTOCOL_VERSION` on any incompatible change. The browser enables online play only when `/api/health` reports exactly its protocol version. The rollout smoke check compares the server's protocol and rules with the build's `server-dist/protocol.json`. `RULES_VERSION` (`race-core-2026.11.3`) is recorded in every envelope. Bump it whenever a simulation change could change a result. History: `race-core-2026.11.1` first online rules; `race-core-2026.11.2` retired cars leave the track (#44); `race-core-2026.11.3` a human car stopped on the racing lane for 3 s is moved back to its own bay (#69). Personal bests are stored per rules version (`personal_bests` key, [career.md](career.md)), so a bump starts a new set of personal bests for races on the room server (multiplayer and every other online mode); laps set under an older version are kept apart.
 
 ## Timing and overload policy
 

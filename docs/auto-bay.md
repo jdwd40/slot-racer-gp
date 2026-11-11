@@ -44,6 +44,91 @@ After Pit is selected, the car takes the outside route, enters, queues and stops
 - **Reverse.** While the controller has the car, `reverseBlock()` returns `assist`, and in a bay it returns `mode`. Either refusal latches the current Brake press, so Brake held through the approach, the bay, the wait and the exit never reverses, even after the handover. A fresh press after the handover reverses as usual. A car that gets past its own bay by hand is not controlled, can reverse back, and is captured by its own bay when it is released there. Backing over the pit entrance with a fuel visit owed brings the car into the 40 m window, so it is taken over and driven in. This is the same rule as for a stop-and-go.
 - Saved records, ghosts and championships are untouched. No storage keys or formats changed. `DRIVERS` gained `num` and `tag` (the race numbers 7, 11, 3 and 24 that were already painted on the cars).
 
+## Stopped-on-track recovery
+
+A human car must not park on the racing lane and trap the cars behind it (#69, rules `race-core-2026.11.3`). When an eligible car stops, its driver gets a three-second countdown. If it has not genuinely driven off when the count runs out, it is taken off the racing lane and put in its own bay. The driver stays in the race and leaves the bay like after any stop. There is no DQ, retirement or extra penalty; the cost is the distance lost (below).
+
+The rule is part of the shared race core (`Race.stallUpdate()` and the methods next to it in `src/race.ts`). It runs in simulation time, so the room server owns the count online, a paused offline race does not count, and frame rate and snapshot rate change nothing.
+
+### Who it applies to
+
+`Race.stallBlock()` decides each step, for every car, from where the field is after all cars have moved and touched. All cars are judged before any is recovered, so array order never decides who was blocking whom.
+
+- **Off (no count at all):** practice, AI cars, the grid and the lights, a terminal result (finished, DQ, DNF), a retired car, and anything but the racing lane (`mode` `race`): the pit lane, bays, the box, tow and de-slot all count as off. The rule starts at the green: a car that has not moved off by then gets its countdown from the green.
+- **Held (a legitimate wait; the count is reset to zero):**
+  - held by the shared pit queue, on the approach or behind it (`pitHold`), or at the pit exit (`exitHold`, `yielding`)
+  - the squeeze priority hold (`squeezeHold`)
+  - automatic pit control has the pedals (`sgCtl`)
+  - the marshal has just re-slotted the car after a de-slot (`recoverT`, 1 s)
+  - an empty tank, because the out-of-fuel tow recovers that car, so it is never recovered twice
+  - **trapped**: a car slower than `STALL.goV` stands within `STALL.blockGap` of clear slot ahead on the car's own path (`Race.stallTrapped()`). This is judged along the slot, so a car on the other lane, on another level of a bridge, or out of traffic (de-slotted, towed, in a bay) is no exemption.
+
+  Selecting Pit, holding Brake or Throttle, or asking for lane changes is none of these. An actual hold or a car ahead must exist.
+
+### Thresholds (`STALL`)
+
+| Constant | Value | Meaning |
+| --- | --- | --- |
+| `grace` | 3 s | Simulation time stopped before the car is recovered, at the first step at or after it |
+| `stopV` | 1 m/s | Below this speed (by magnitude) a car has **stopped**: an episode starts, unless the driver is pressing Throttle alone (pulling away) |
+| `goV` | 3 m/s | A **resumption** must be driven at this speed or faster, under the car's own Throttle (Throttle without Brake)... |
+| `goDist` | 4 m | ...for this distance without a break, about three car lengths |
+| `blockGap` | 6 m | Clear slot to a slow car ahead within which a stopped car is trapped, not blocking |
+
+The stop and resume thresholds are far apart on purpose. One frame of Throttle, a nudge forward, tiny back-and-forth or a push from behind never covers 4 m under the car's own power at 3 m/s, so none of them ends an episode. A pushed car has no Throttle in it, so a push never resumes it. From a standstill a real pull-away takes about 0.6 s to resume. The test boundaries are exact: `stopV` itself does not start an episode, and `goDist` ends it on the step it is reached.
+
+### The state machine
+
+Per car: `stallT` (seconds counted, 0 when no episode), `stallRun` (the unbroken run towards resumption) and `stallHold` (recovered and waiting for the bay).
+
+1. **No episode.** Eligible, not held, slower than `stopV` and the driver is not pressing Throttle alone: an episode starts and counts this step.
+2. **Counting.** Every step adds its time, except while the car rolls backwards at `stopV` or more. Reverse is the legitimate recovery manoeuvre ([reverse](reverse.md)), so it pauses the count without resetting it; the standstill that engages reverse still counts. Moving forward slowly, being pushed, flickering a pedal or nudging all still count.
+3. **Resumed.** `stallRun` reaches `goDist`: the episode ends and the warning goes at once. A later stop starts a fresh three seconds.
+4. **Held or off.** The episode ends (reset to 0). A car trapped in a queue that stays put after the queue clears gets a fresh three seconds of its own, never the time it spent waiting.
+5. **Due.** `stallT` reaches `grace`: the car is recovered on that step. One case waits: a car already pulling away under its own Throttle at that moment is let finish that pull-away. Lifting, braking or stopping during it recovers the car on that step, so a last-moment nudge buys nothing.
+
+In a three-car queue only the front car counts; the two behind it are trapped. If nobody moves, the front car is recovered at 3 s, the second at 6 s and the third at 9 s. If they drive off once the front car is gone, nobody else is recovered. Independent blockers (one in each lane, two levels of a bridge) are each recovered on their own count, in the same step when they stopped together.
+
+### The recovery
+
+`Race.stallRecover()` is a new recovery, not the out-of-fuel tow. It emits one `recover` event (for every client) and `msg.stallRecovered` ("Stopped on track — moved to pits") to its driver. It returns false and changes nothing for a car no longer on the racing lane with a running result. So a car towed, de-slotted, retired or finished on the same step is never recovered too, and a recovered car is never recovered again.
+
+- **Off the lane at once.** The car leaves the squeeze queue. Any pit reservation is released (`recover`). A lane change in progress is completed, routing intent is cleared (as entering the pit lane clears it) and contact state is cleared. Speed, pedals, slip, reverse and every automatic hold are reset.
+- **Into its own bay.** The car is placed at rest in `service` in `bayHome`, holding that bay, as if it had just turned in. It is not counted as a pit stop and no penalty runs. `towSvc` is set, so standing in the bay **does not serve** a committed fuel stop, and the stop-and-go box is behind it, so a stop-and-go is not served either.
+- **Bay not free.** No other car ever uses a car's bay, so this only arises in a scripted set-up. If the bay is taken anyway, the car waits in mode `tow` with `stallHold`: out of collisions and traffic, and drawn as gone (`towT` past the tow blink). It is placed the first step the bay is free. That step emits no second event, takes no second reservation and leaves no permanent limbo.
+- **Kept:** the driver, car, livery, number, `status: running`, laps, lap times and best lap, offences, `timePen`, the fuel in the tank at the moment of transfer, every stop-and-go and fuel-stop debt, deadline and deferral, a latched breach, `hiU` (approach numbering) and the sector bits.
+- **Leaving.** The usual bay rules apply ([departure](#departure)): `upPrev` is set, so a Throttle held through the stop and the recovery must be released and pressed again once Ready. The car refuels at the normal rate while it stands there (a tank is never filled at once). It leaves when the merge is clear and is driven to the pit exit, with the start grace there as usual. Out-of-fuel tows keep their own rules and their own time penalty; this recovery adds none.
+
+### No shortcut
+
+The car is moved **back** to the last place it passed its own bay (`u` falls by the distance from the bay to where it stopped), never forward. Progress (`u`) only falls, and `order()` ranks running cars by it, so a recovery can only lose distance and places. The bays are just before the timing line. So:
+
+- Stopped anywhere from the line round to just before its bay, the car moves back over the line it last crossed. `crossed` never decreases and `laps()` counts only new crossings, so driving over that line again counts nothing. The lap is completed only at the real next crossing, and it is void (`lapValid` false), so it cannot be a best lap, a board entry or a career best. This covers the start-line wrap on lap 1 and the final lap: a car recovered mid-way round its final lap must drive the whole lap again and finishes at the real flag.
+- Stopped between its bay and the line, it moves back a few metres and crosses the line once, from the pit lane, as after any stop.
+- The pit entrance is never in the stretch moved over (it lies before the bays), and approaches count from `hiU`, so no deadline or approach moves.
+
+The loss is the distance driven since the car last passed its bay, from a few metres up to about a lap. It never pays to stop.
+
+### Player feedback
+
+- While the count runs, the driver's HUD shows a red blinking chip, first in the row, `⚠ MOVE YOUR CAR · PITS IN n`, and the status line `⚠ Move your car — pit recovery in n…` with n going 3, 2, 1 (`stallLeft()` in `src/hud.ts`). Both are words and a number, not colour alone. They sit where the other service chips and status lines sit, which the responsive checks keep clear of the touch pad. Both clear the moment the car resumes, is held or is recovered.
+- On recovery: `Stopped on track — moved to pits` to the driver, and `<name> stopped on track — moved to the pits` to everyone else. In the bay, the usual `IN BAY n`, Release Throttle and Ready prompts follow. Waiting for a taken bay shows `Stopped on track — moved to pits · waiting for bay n`.
+- The pause help (`ctl.rules`) states the rule.
+
+### Online
+
+The server's race core counts, decides and recovers. Snapshots carry `stallT` and `stallHold` per car; both are additive, and the mirror copies them, so the HUD reads the server's count. The recovery goes out once as the ordinary race event `{ type: 'recover', car }`, with the personal message alongside. There is no new message type and no extra message loop. A disconnected car has no immunity: its controls are neutral and its count runs like anyone's. A reconnect gets the current state, with no events replayed, so the count is neither reset nor extended and a recovery is never repeated.
+
+### Evidence (#69)
+
+Automated simulation and network evidence, on Node 26.7.0 (Node 22, the `.nvmrc` pin, is not on the build host; typecheck also passed on Node 24.21.0):
+
+- `test/stall.test.ts` (54 tests, the shared race core): the boundary on both lanes at 30, 60 and 144 fps (nothing before 3.0 s, one recovery at the first step at or after it, frame size never moving it by more than one 1/120 s sub-step); pause; exact `stopV`, `goV` and `goDist` boundaries; Throttle flickers, micro-nudges, reverse back-and-forth and pushes from behind; 2- and 3-car queues (front first, fresh three seconds after); the `blockGap` boundary; the other lane, the circuit-4 bridge and two independent blockers in the same step, in any roster order; the grid, the pit queue and approach holds, the squeeze, the box, refuelling, a blocked merge, the pit exit, a de-slot, out of fuel (the tow only, also when both fall on the same step), terminal, retired, practice and AI cars, a terminal result on the same step, and Pit, both pedals or lane requests being no exemption; the reverse recovery of an overshot entrance; kept state and debts with no tow penalty and no served visit; the lane clear at once; a taken bay (held out of traffic, placed once, no duplicate reservation); recovery once; release, then a fresh press, then a clear merge; moved back from either side of the line and the bay, the lap-1 start-line wrap and the final lap (one void lap, finishing only at the real flag, never a better position); the mirror and the wire; determinism; and AI and a never-stopping human unchanged with the rule switched off.
+- `test/server/stall.test.ts` (6 tests): the real `RoomManager` with 2 and 4 clients, a reconnect during the countdown (recovered at the same simulation time as without the drop, no events replayed, same classification) and after the recovery, 5 Hz against 60 Hz publication (same recovery time and result, each within its snapshot cap), and two browser `NetSession`s over real WebSockets (one recovery on both mirrors, 3, 2, 1 counted from the server's snapshots, no message history kept).
+- Cross-commit regression: 40 seeded races to the flag (5 circuits × 4 seeds, all-AI and a bot human) on `0d7ef98` and on this change gave identical classifications, finish times, stops, offences, fuel, laps and best laps, with no recovery.
+- Mutation checks, each reverted: the deadline 50 ms early (18 tests fail), one step late (11 fail), no follower exemption (5 fail), no recovery-once guard (1 fails).
+- `stall` browser scenario: 27 of 27 on headless Chromium 156.0.8078.4 with SwiftShader and emulated touch. These are diagnostics only. **No physical keyboard, phone, tablet or GPU was used; the physical-device steps are in [validation](validation.md#final-multiplayer-validation-4-stopped-on-track) and remain to be done.**
+
 ## Evidence
 
 **The build host has no GPU.** Browser runs used SwiftShader (ANGLE on Vulkan, software), and touch was Chromium CDP emulation. **They are diagnostics only. They say nothing about behaviour or smoothness on a real phone, tablet or GPU. No physical device was tested.** Every browser scenario was set up by scripted placement, so this is functional coverage, not play-testing. Setup: headless Chromium 156.0.8078.4, Linux 7.0.0-42-generic x64, 480×270 at Low unless a scenario sets its own size.

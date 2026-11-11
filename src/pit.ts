@@ -7,7 +7,7 @@ import type { Car, Race } from './race';
 /** What an assisted car is waiting for, or null when it is not being held. */
 export type PitWait = 'queued' | 'bay' | 'exit' | null;
 export type Zone = 'box' | 'exit' | `bay${number}` | `merge${number}`;
-export type ReleaseWhy = 'done' | 'defer' | 'route' | 'passed' | 'terminal' | 'moved' | 'reorder';
+export type ReleaseWhy = 'done' | 'defer' | 'route' | 'passed' | 'terminal' | 'moved' | 'reorder' | 'recover';
 export interface ResEntry { t: number; car: number; zone: Zone; op: 'grant' | 'release'; why?: ReleaseWhy }
 
 export const PIT_Q = {

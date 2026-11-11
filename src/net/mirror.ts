@@ -20,7 +20,7 @@ const CAR_FIELDS = [
   'throttle', 'brake', 'fuel', 'crossed', 'lapsDone', 'lastLap', 'bestLap', 'lapStartT', 'lapValid', 'finishTime', 'pitStops',
   'offences', 'sgOwed', 'sgServed', 'sgServing', 'timePen', 'svcBreach', 'laneReq', 'pitReq', 'fuelReq', 'fuelDue', 'sgDue', 'sgDeferred',
   'routeHold', 'laneOverride', 'revOn', 'sgPhase', 'sgCtl', 'pitWait', 'exitReq', 'serviceT', 'penalty', 'towT', 'recoverT', 'bumpT',
-  'hiU', 'squeezeHold', 'pitHold', 'towSvc', 'pitFuel', 'serviced', 'upPrev',
+  'hiU', 'squeezeHold', 'pitHold', 'towSvc', 'pitFuel', 'serviced', 'upPrev', 'stallT', 'stallHold',
 ] as const satisfies readonly (keyof CarSnapshot & keyof Car)[];
 
 /**

@@ -799,6 +799,8 @@ function handle(e: RaceEvent): void {
       break;
     }
     case 'served': if (!isMe(e.car)) hud.toast(t('pen.aiServed', { name: e.car.name }), 'info'); break;
+    // the recovered driver gets its own message (msg.stallRecovered); everyone else is told whose car left the track
+    case 'recover': if (!isMe(e.car)) hud.toast(t('msg.stallOther', { name: e.car.name }), 'info'); break;
     case 'dq':
       if (e.car === p) { sfx.bad(); hud.goFlash(t('res.dq')); } else hud.toast(t('pen.aiDq', { name: e.car.name }), 'info');
       break;
