@@ -384,8 +384,10 @@ Before declaring a release ready:
 2. **Compatibility of client, server and database.** The client and server of one commit are built from the same `src/net/protocol.ts` (`PROTOCOL_VERSION`, `RULES_VERSION`) and `server/migrations.ts` (`SCHEMA_VERSION`, the last migration id). Against the server version that is live (`version` from `/api/version`), check what changed:
 
    ```bash
-   git diff <live server version> <sha> -- src/net/protocol.ts server/migrations.ts server/
+   git diff --stat <live server version> <sha> -- server/ src/
    ```
+
+   The server bundle includes shared client code (`src/net/protocol.ts` and the race core: `src/race.ts`, `track.ts`, `timing.ts`, `records.ts`, `pit.ts` and what they import), so diff all of `src/`, not only `src/net/`. A change confined to UI files the server never imports can be confirmed with `npm run build:server` on both commits and comparing `server-dist/` bundles.
 
    - Nothing under `server/`, `src/net/` or the shared race core changed: the live server may stay. Its `protocol`, `rules` and `schema` must still equal this commit's.
    - Server code changed: upgrade it from this commit's `slotrush-server-<sha>` artifact (*Upgrades*). Its `server-dist/VERSION` must be `<sha>`, and `server-dist/protocol.json` must hold this commit's protocol and rules.
