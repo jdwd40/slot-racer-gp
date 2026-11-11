@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Bounded browser validation of the real game. Procedure and results: docs/validation.md.
 //
-//   node scripts/browser-check.mjs [tracks race controlled routing practice championship touch responsive touchrace reverse service queue autosg autobay localslot online memory]   functional checks (default: all)
+//   node scripts/browser-check.mjs [tracks race controlled routing practice championship touch responsive touchrace reverse service queue autosg autobay localslot online memory netbanner]   functional checks (default: all)
 //   node scripts/browser-check.mjs perf --label updated --machine "<name>"          frame-time capture
 //   node scripts/browser-check.mjs compare <baseline.json> <updated.json>           like-for-like comparison
 //
@@ -2407,8 +2407,53 @@ async function memory(run, c) {
   return s;
 }
 
-const SCENARIOS = { tracks, race, controlled, routing, practice, championship, touch, responsive, touchrace, reverse, service, queue, autosg, autobay, localslot, online, memory };
-const USAGE = 'usage: browser-check.mjs [tracks|race|controlled|routing|practice|championship|touch|responsive|touchrace|reverse|service|queue|autosg|autobay|localslot|online|memory ...] | perf | compare <a.json> <b.json>\n'
+/**
+ * The reconnect banner on the lobby (#64). A dropped link in the lobby showed the race banner, "your car is held", over the
+ * room heading and Copy code at phone sizes. With a socketless lobby from `__game.qaNetLobby` (the default build has online
+ * off, and this is layout, not networking), each size forces Reconnecting and checks the seat wording and that the banner's
+ * rectangle meets neither the heading, #l-code nor #l-copy; back to Connected, the banner and the room it made are gone.
+ */
+async function netbanner(run, c) {
+  const part = (id, num, name, extra = {}) => ({ id, name, slot: num - 1, num, bay: num - 1, livery: ['yellow', 'orange', 'white', 'purple'][num - 1], color: [0xffd23f, 0xfb923c, 0xf4f4f5, 0xa855f7][num - 1], liveryRequested: null, ready: false, connected: true, host: num === 1, guest: true, joinOrder: num, left: false, ...extra });
+  // a joiner's view of a full four-driver room, as in the playtest that found it
+  const room = { id: 'qa-room', code: 'S8AJ37', mode: 'multiplayer', state: 'lobby', rev: 1, hostId: 'p1', settings: { track: TRACK, aiFill: false }, championship: null, participants: [part('p1', 1, 'Host'), part('p2', 2, 'Joiner', { ready: true }), part('p3', 3, 'Third'), part('p4', 4, 'Fourth')], ai: [], raceId: null, maxHumans: 4, minHumans: 2, graceS: 20 };
+  const want = STRINGS['net.reconnectingLobby'].replace('{n}', '20');
+  const measure = () => {
+    const box = (sel) => { const e = document.querySelector(sel); if (!e) return null; const b = e.getBoundingClientRect(); return { x: b.x, y: b.y, w: b.width, h: b.height }; };
+    const b = document.getElementById('net-banner');
+    return { screen: window.__game.screen, conn: window.__game.net?.conn ?? null, shown: getComputedStyle(b).display !== 'none', text: b.textContent, banner: box('#net-banner'), heading: box('.lobby h2'), code: box('#l-code'), copy: box('#l-copy'), card: box('.lobby'), cardScroll: document.querySelector('.lobby')?.scrollTop ?? null, onCard: document.getElementById('app').classList.contains('banner-card') };
+  };
+  const meets = (a, b) => !!a && !!b && a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h;
+  let s = null;
+  for (const vp of [{ width: 640, height: 400 }, { width: 360, height: 640 }, { width: 844, height: 390 }, { width: 1280, height: 800 }]) {
+    if (s) await s.context.close();
+    const phone = vp.width < 1000;
+    s = await open(run, { viewport: vp, ...(phone ? { dpr: 2, device: PHONE } : {}) });
+    const { page } = s;
+    const name = `${vp.width}x${vp.height}`;
+    await read(page, (r) => window.__game.qaNetLobby(r, 'p2', 'connected'), room);
+    await waitFor(page, () => window.__game.screen === 'lobby');
+    await frames(page, 3);
+    const before = await read(page, measure);
+    c.ok(`${name}: connected lobby shows the room code and no banner`, before.screen === 'lobby' && !before.shown && !before.onCard && !!before.code && !!before.copy, before);
+    await read(page, (r) => window.__game.qaNetLobby(r, 'p2', 'reconnecting'), room);
+    await frames(page, 3);
+    const rec = await read(page, measure);
+    c.ok(`${name}: Reconnecting in the lobby says the seat is held for 20 s`, rec.shown && rec.conn === 'reconnecting' && rec.text === want, { text: rec.text });
+    c.ok(`${name}: the banner meets neither the room heading, #l-code nor #l-copy`, rec.shown && !meets(rec.banner, rec.heading) && !meets(rec.banner, rec.code) && !meets(rec.banner, rec.copy), rec);
+    // the card scrolls inside itself on a short screen: it starting below the banner keeps every part of it clear
+    c.ok(`${name}: the card starts below the banner`, rec.onCard && rec.card.y >= rec.banner.y + rec.banner.h, { banner: rec.banner, card: rec.card });
+    await page.screenshot({ path: path.join(run.out, `netbanner-${name}.png`) });
+    await read(page, (r) => window.__game.qaNetLobby(r, 'p2', 'connected'), room);
+    await frames(page, 3);
+    const after = await read(page, measure);
+    c.ok(`${name}: back to connected, the banner and the room made for it are gone`, !after.shown && !after.onCard && Math.abs(after.card.y - before.card.y) < 1, { before: before.card, after: after.card });
+  }
+  return s;
+}
+
+const SCENARIOS = { tracks, race, controlled, routing, practice, championship, touch, responsive, touchrace, reverse, service, queue, autosg, autobay, localslot, online, memory, netbanner };
+const USAGE = 'usage: browser-check.mjs [tracks|race|controlled|routing|practice|championship|touch|responsive|touchrace|reverse|service|queue|autosg|autobay|localslot|online|memory|netbanner ...] | perf | compare <a.json> <b.json>\n'
   + 'options: --dist <dir> --url <url> --commit <sha> --machine <name> --label <name> --viewport WxH --dpr N --preset low|balanced|high\n'
   + '         --seconds N --headed --channel <chrome|msedge> --out <dir> --max-minutes N';
 

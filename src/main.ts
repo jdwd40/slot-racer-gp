@@ -13,13 +13,14 @@ import * as R from './records';
 import { GhostRecorder, GhostPlayer } from './ghost';
 import { FixedStepper, STEP, MAX_GAP, Pose, blendPose } from './timing';
 import { PRESETS, PresetId, pixelRatioFor, savedPreset, savePreset } from './graphics';
-import { NetSession, loadSeat, refusalText, type ResultView, type Seat, type EndReason } from './net/session';
+import { NetSession, loadSeat, refusalText, type Conn, type ResultView, type Seat, type EndReason } from './net/session';
 import { AccountClient, accountKey, type AuthError, type AuthState } from './net/account';
 import { SnapBuffer, applySnapshot, localEvent, mirrorRace } from './net/mirror';
 import { LIVERIES as NET_LIVERIES, LIMITS, type AwardsView, type CareerStats, type ChampionshipTag, type LiveryId, type PublicRoom, type ServerMsg } from './net/protocol';
 import type { RaceSnapshot, WireEvent } from './race';
 import type { SocketCtor } from './net/client';
 import { NetWaitGuard, type NetWaitView } from './net/netwait';
+import { bannerOnCard, reconnectTextId } from './net/banner';
 import { COARSE_QUERY, ControlsAnchor, DrivingInput, KEY_HOLDS, KEY_TAPS, PadButton, TOUCH_MODES, TouchMode, TouchPad, savedTouchMode, saveTouchMode, touchActive } from './input';
 
 const TRACK_KEY = 'srgp.track';
@@ -1603,7 +1604,20 @@ const banner = document.createElement('div');
 banner.id = 'net-banner';
 banner.setAttribute('role', 'status');
 app.appendChild(banner);
-let bannerKey = '';
+let bannerKey = '', bannerMemo = '';
+/**
+ * On a menu card the banner sits at the top of the screen and the card is pushed down by its height (#64): at phone sizes
+ * the card fills the screen, so a floating banner covered the room heading and Copy code. The height is measured, not
+ * assumed, because the text wraps to two or three lines on a narrow phone; a resize observer keeps it right as it rewraps.
+ */
+function placeBanner(): void {
+  const onCard = !!bannerKey && bannerOnCard(screen);
+  app.classList.toggle('banner-card', onCard);
+  // the card's top padding clears the banner's bottom edge plus a small gap; 0 when there is nothing to clear
+  app.style.setProperty('--banner-clear', onCard ? `${Math.ceil(banner.getBoundingClientRect().bottom) + 8}px` : '0px');
+}
+if (typeof ResizeObserver === 'function') new ResizeObserver(() => placeBanner()).observe(banner);
+window.addEventListener('resize', placeBanner);
 /** This browser's held pedals for its own seat: sent the moment they change (and checked every frame), never another seat's. */
 function sendHeld(): void {
   if (!net || !netRaceId) return;
@@ -1614,17 +1628,23 @@ input.onChange = sendHeld;
 
 function syncBanner(): void {
   let key = '', text = '';
-  if (net && net.conn === 'reconnecting') { key = 'rec'; text = t('net.reconnecting', { n: net.room?.graceS ?? 20 }); }
+  // a race holds the car; the lobby, online menu and final standings hold the seat (no car is on track there)
+  if (net && net.conn === 'reconnecting') { key = 'rec'; text = t(reconnectTextId(screen), { n: net.room?.graceS ?? 20 }); }
   else if (net && net.conn === 'connecting') { key = 'con'; text = t('net.connecting'); }
   else if (net && netRaceId && (screen === 'race' || screen === 'netwait')) {
     const p = me();
     if (p.status === 'dnf' && p.dnfReason === 'retired') { key = 'ret'; text = t('net.retired'); }
     else if (netLag > 500) { key = 'lag'; text = t('net.lagging'); }
   }
-  if (key === bannerKey) return;
+  // runs every frame: the DOM is touched only when the text, its kind or the card placement changes
+  const card = bannerOnCard(screen);
+  const memo = `${key}|${card}|${text}`;
+  if (memo === bannerMemo) return;
+  bannerMemo = memo;
   bannerKey = key;
   banner.textContent = text;
   banner.className = key ? `show ${key}` : '';
+  placeBanner();
 }
 
 // mobile backgrounding and page teardown: controls were already released (suspend); the socket may be dropped by the browser,
@@ -1698,5 +1718,20 @@ if (ONLINE_ENABLED) {
 }
 
 // debug/test hooks
+/**
+ * Diagnostics only (scripts/browser-check.mjs `netbanner`, #64): show the lobby of a given room in a given connection state
+ * without a server, so the banner layout can be checked in the default build, where online play is off. The session has no
+ * socket and never opens one (its constructor throws); calling again with another state re-renders the same room.
+ */
+function qaNetLobby(room: PublicRoom, meId: string, conn: Conn): void {
+  if (!net) {
+    const NoSocket = function () { throw new Error('qa lobby: no socket'); } as unknown as SocketCtor;
+    net = new NetSession('', NoSocket, {}, null);
+    mode = 'online';
+  }
+  net.room = room; net.me = meId; net.conn = conn;
+  showLobby();
+  syncBanner();
+}
 
-(window as unknown as { __game: unknown }).__game = { get online() { return online; }, get auth() { return { state: accounts.auth.state, busy: accounts.busy, displayName: accounts.account?.displayName ?? null }; }, showAccount, get net() { return net && { conn: net.conn, me: net.me, room: net.room, result: net.result, reconnects: net.reconnects, tick: netTick, lagMs: netLag, buf: netBuf.stats, raceId: netRaceId, held: net.client.held, ctlSeq: net.client.ctlSeq, actSeq: net.client.actSeq }; }, netDrop: () => net?.client.ws?.close(4000, 'qa drop'), get race() { return race; }, T, R, PEN, DEF, PERSONAS, startRace, applyTrack, startSession, showTitle, showBoards, get mode() { return mode; }, get preset() { return preset; }, get touchMode() { return touchMode; }, setTouchMode, input, get audio() { return sfx.ctx?.state ?? null; }, get muted() { return sfx.muted; }, suspendAudio: () => sfx.ctx?.suspend(), get champ() { return champ; }, get bays() { return bayPaint; }, get ghost() { return ghost; }, get recorder() { return recorder; }, get pbMs() { return pbMs; }, get screen() { return screen; }, get view() { return camMode; }, get aspect() { return camera.aspect; }, get mini() { return { w: hud.mW, h: hud.mH }; }, stepper, advance: (sec: number) => { for (let t = 0; t < sec && simulating(); t += STEP) tick(STEP); }, setView: (m: 'follow' | 'full') => { camMode = m; }, zoom: (span: number) => { camMode = 'follow'; followSpan = span; curSpan = span; }, snapCam: () => { const p = me(); camLead.set(0, 0); camTarget.set(p.x, 0, -p.y); }, get marker() { return playerMarker; }, get localId() { return localId; }, get localSlot() { return localSlot; }, setLocalSlot: (n: number) => { localSlot = Math.max(0, Math.min(DRIVERS.length - 1, Math.floor(n))); }, get camTarget() { return { x: camTarget.x, z: camTarget.z }; }, get motorMix() { return motorMix; }, arrows: { lane: laneArrow, pit: pitArrow }, info: () => ({ calls: renderer.info.render.calls, tris: renderer.info.render.triangles, objects: world.root.children.length, frames: renderer.info.render.frame, geometries: renderer.info.memory.geometries, textures: renderer.info.memory.textures }) };
+(window as unknown as { __game: unknown }).__game = { get online() { return online; }, get auth() { return { state: accounts.auth.state, busy: accounts.busy, displayName: accounts.account?.displayName ?? null }; }, showAccount, get net() { return net && { conn: net.conn, me: net.me, room: net.room, result: net.result, reconnects: net.reconnects, tick: netTick, lagMs: netLag, buf: netBuf.stats, raceId: netRaceId, held: net.client.held, ctlSeq: net.client.ctlSeq, actSeq: net.client.actSeq }; }, netDrop: () => net?.client.ws?.close(4000, 'qa drop'), qaNetLobby, get race() { return race; }, T, R, PEN, DEF, PERSONAS, startRace, applyTrack, startSession, showTitle, showBoards, get mode() { return mode; }, get preset() { return preset; }, get touchMode() { return touchMode; }, setTouchMode, input, get audio() { return sfx.ctx?.state ?? null; }, get muted() { return sfx.muted; }, suspendAudio: () => sfx.ctx?.suspend(), get champ() { return champ; }, get bays() { return bayPaint; }, get ghost() { return ghost; }, get recorder() { return recorder; }, get pbMs() { return pbMs; }, get screen() { return screen; }, get view() { return camMode; }, get aspect() { return camera.aspect; }, get mini() { return { w: hud.mW, h: hud.mH }; }, stepper, advance: (sec: number) => { for (let t = 0; t < sec && simulating(); t += STEP) tick(STEP); }, setView: (m: 'follow' | 'full') => { camMode = m; }, zoom: (span: number) => { camMode = 'follow'; followSpan = span; curSpan = span; }, snapCam: () => { const p = me(); camLead.set(0, 0); camTarget.set(p.x, 0, -p.y); }, get marker() { return playerMarker; }, get localId() { return localId; }, get localSlot() { return localSlot; }, setLocalSlot: (n: number) => { localSlot = Math.max(0, Math.min(DRIVERS.length - 1, Math.floor(n))); }, get camTarget() { return { x: camTarget.x, z: camTarget.z }; }, get motorMix() { return motorMix; }, arrows: { lane: laneArrow, pit: pitArrow }, info: () => ({ calls: renderer.info.render.calls, tris: renderer.info.render.triangles, objects: world.root.children.length, frames: renderer.info.render.frame, geometries: renderer.info.memory.geometries, textures: renderer.info.memory.textures }) };
