@@ -398,6 +398,7 @@
     { "id": "net.rematch", "text": "Rematch" },
     { "id": "net.waitRematch", "text": "Waiting for the host to call a rematch." },
     { "id": "net.reconnecting", "text": "Connection lost. Reconnecting… your car is held for up to {n} s." },
+    { "id": "net.reconnectingLobby", "text": "Connection lost. Reconnecting… your seat is held for up to {n} s." },
     { "id": "net.retired", "text": "Your car has retired." },
     { "id": "net.lagging", "text": "The game server is catching up." },
     { "id": "acct.title", "text": "Driver account" },

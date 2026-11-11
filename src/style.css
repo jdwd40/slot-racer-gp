@@ -282,6 +282,11 @@ small { color: #9ca3af; font-weight: 500; }
 #net-banner.show { display: block; }
 #net-banner.ret { border-left-color: #ef4444; color: #fecaca; }
 #net-banner.lag { border-left-color: #60a5fa; color: #dbeafe; }
+/* on a menu card (online menu, lobby, final standings) there is no HUD to clear, so the banner goes to the top edge and the
+   card starts below it (#64): --banner-clear is the banner's measured bottom edge plus a gap (main.ts placeBanner). A card
+   taller than what is left scrolls inside itself as before, so its heading and Copy code are never under the banner. */
+#app.banner-card #net-banner { top: var(--eT); }
+#app.banner-card .overlay { padding-top: max(var(--banner-clear, 0px), 3vh, var(--sat)); }
 .lobby .tab { min-height: 40px; }
 
 /* ---- accounts: sign-in, create account and driver profile (docs/accounts.md). 16px+ inputs so iOS does not zoom on focus. */

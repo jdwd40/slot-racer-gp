@@ -66,6 +66,7 @@ The title screen names them separately:
   - Returning restores no key or finger: whatever is still down needs a fresh press. The same applies after a reconnect.
   - The menu offers **Resume** and **Leave race (retire)**. R (restart) does nothing online.
 - **Connection states.** A banner shows **Connecting**, **Reconnecting… your car is held for up to N s**, **Your car has retired** and **The game server is catching up** (`lagMs` > 500).
+  - **On the menu cards (#64).** On the online menu, the lobby and the final standings no car is on track, so a dropped link says **Connection lost. Reconnecting… your seat is held for up to N s.** (`net.reconnectingLobby`). Races and the pending card keep the car wording. These cards fill a phone screen, and the banner used to float at the race HUD's height over the room heading and **Copy code**. There it now sits at the top edge and the card is pushed down by the banner's measured height (it wraps to more lines on a narrow phone), so the card, which scrolls inside itself when short of room, never runs under it. The per-screen choice is `src/net/banner.ts`; the browser check's `netbanner` scenario checks the layout at 640×400, 360×640, 844×390 and 1280×800.
   - On an unexpected close, the session resumes the same seat with its private token, with backoff, until the grace period plus 3 s has passed. The car, obligations, laps and results are the server's, so the same car carries on.
   - **Dead sockets without a close (#42).** A socket can die silently (half-open TCP behind a proxy, a sleeping phone, a Wi-Fi change, a NAT timeout): the server terminates it after a missed keepalive pong, but no close reaches the browser. So the client keeps its own keepalive while any socket is open, in the lobby, race and results:
     - An app-level `{t:'ping', id}` goes out every 5 s; the server answers `pong` (protocol v1, no change). The 250 ms `ctl` heartbeat still runs only while racing.
@@ -96,6 +97,8 @@ The title screen names them separately:
 | `src/main.ts` | Online menu, lobby, race wiring, race menu, pending and final standings, banner |
 | `src/input.ts` | `DrivingInput.onChange`, so online pedals are sent without waiting for a frame |
 | `test/server/netsession.test.ts` | Mirror equivalence, interpolation, a 4-browser-module race over real WebSockets, fifth refused, reconnect, reload, expiry, duplicate result, rematch, connected solo, release |
+| `src/net/banner.ts` | The banner's per-screen wording and whether the card makes room for it (no DOM) |
+| `test/netbanner.test.ts` | Reconnecting wording per screen: seat on the menu cards, car in races |
 | `src/net/netwait.ts` | `NetWaitGuard`: the pending card's 30 s no-news timeout, lost-contact and room-closed views (no DOM) |
 | `test/watchdog.test.ts` | Keepalive and watchdog with fake timers and a socket that goes silent without closing: lobby and race thresholds, resume, slow resume from a race, expiry, timers cleared, own suspension, the pending card's timeout over a real session |
 | `test/history.test.ts` | Message history policy (#50): nothing recorded by default or by `NetSession`, opt-in cap, overflow, clamp and reset, over 20,001 four-car snapshots and three rematches |
