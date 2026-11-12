@@ -23,6 +23,8 @@
     { "id": "hud.fuel", "text": "FUEL" },
     { "id": "hud.throttle", "text": "THROTTLE" },
     { "id": "hud.lowFuel", "text": "LOW FUEL" },
+    { "id": "hud.fuelLaps", "text": "≈ {n} laps" },
+    { "id": "hud.fuelLapsShort", "text": "≈{n}" },
     { "id": "hud.laneArmed", "text": "LANE CHANGE READY" },
     { "id": "hud.routeOutsideMove", "text": "PIT ROUTE · MOVING OUTSIDE AT NEXT SWITCH" },
     { "id": "hud.routeOutsideStay", "text": "PIT ROUTE · STAYING OUTSIDE" },
