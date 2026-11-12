@@ -248,3 +248,105 @@ describe('online', () => {
     expect(ev.some((e) => e.type === 'msg' && e.to === P.id && e.text === 'msg.pitThisLap')).toBe(true);
   });
 });
+
+describe('the chip once the car is in the pits to serve the debt (#81)', () => {
+  interface Sample { mode: string; lap: number; chip: boolean; fuelDue: number; sgOwed: number; mirror?: boolean }
+  /** Drive on from the line that starts the due lap, sampling the chip every step with the car's mode. */
+  function sampled(r: Race, P: Car, laps: number[], dueLap: number): { tl: Mark[]; s: Sample[] } {
+    const s: Sample[] = [];
+    const over = overrideOn(laps);
+    const tl = drive(r, P, (r2, P2) => {
+      over(r2, P2);
+      if (P2.crossed !== dueLap || P2.svcBreach) return;
+      const x: Sample = { mode: P2.mode, lap: P2.crossed, chip: r2.lastChance(P2), fuelDue: P2.fuelDue, sgOwed: P2.sgOwed };
+      // the mirror reads the same from a snapshot, in every mode (sampled once per mode change to keep this quick)
+      if (!s.length || s[s.length - 1].mode !== x.mode) { const m = mirrorRace(r2.snapshot()); x.mirror = m.lastChance(m.car(P2.id)!); }
+      s.push(x);
+    });
+    return { tl, s };
+  }
+  const modes = (s: Sample[]): string[] => s.map((x) => x.mode).filter((m, i, a) => m !== a[i - 1]);
+
+  /** A committed fuel stop due on lap 10 (driven past lap 9's entrance on an override), from the line that starts lap 10. */
+  function fuelDueOn10(): { r: Race; P: Car } {
+    const { r, P } = solo(9);
+    P.fuel = 0.5; r.requestPit(P.id);
+    drive(r, P, overrideOn([9]), 60, () => P.crossed >= 10);
+    expect([P.crossed, P.fuelDue, r.lastChance(P)]).toEqual([10, 10, true]);
+    return { r, P };
+  }
+  /** A stop-and-go due on lap 9 whose deferral is used at the line, so it is due on lap 10 with no deferral left. */
+  function sgDueOn10(): { r: Race; P: Car } {
+    const { r, P, rival } = solo(9);
+    P.offences = 2; r.offence(P, rival, 'rear');
+    drive(r, P, overrideOn([9]), 60, () => P.crossed >= 10);
+    expect([P.crossed, P.sgDue, P.sgDeferred, P.sgOwed > 0, r.lastChance(P)]).toEqual([10, 10, true, true, true]);
+    return { r, P };
+  }
+
+  it('a fuel stop due this lap: on in the racing lane, off from the pit lane through bayIn and service, served, no DQ', () => {
+    const { r, P } = fuelDueOn10();
+    const { s } = sampled(r, P, [], 10);
+    expect(modes(s)).toEqual(['race', 'pitlane', 'bayIn', 'service', 'bayOut', 'pitlane']);
+    const owed = s.filter((x) => x.fuelDue > 0);
+    // racing lane while the stop is due: on; once in the pit lane on the visit: off, and it stays off while the debt is still open
+    for (const x of owed) expect(x.chip, `chip in ${x.mode}`).toBe(x.mode === 'race');
+    for (const m of ['pitlane', 'bayIn', 'service']) expect(owed.some((x) => x.mode === m), `still owed in ${m}`).toBe(true);
+    for (const x of s) if (x.mirror !== undefined) expect(x.mirror, `mirror in ${x.mode}`).toBe(x.chip);
+    expect([P.status, P.svcBreach, P.fuelDue]).toEqual(['finished', null, 0]);
+  });
+
+  it('the same fuel stop driven past the entrance on the racing lane: on all the way to the breach, then a deadline DQ', () => {
+    const { r, P } = fuelDueOn10();
+    const { tl, s } = sampled(r, P, [10], 10);
+    expect(modes(s)).toEqual(['race']);
+    for (const x of s) expect(x.chip).toBe(true);
+    expect(at(tl, 'breach:fuel')).toBeGreaterThan(at(tl, 'entrance 10'));
+    expect(P.dqReason).toBe('deadline');
+  });
+
+  it('a stop-and-go due this lap: on in the racing lane, off in the pit lane up to the box, served, no DQ', () => {
+    const { r, P } = sgDueOn10();
+    const { s } = sampled(r, P, [], 10);
+    expect(modes(s)).toEqual(['race', 'pitlane']);
+    const owed = s.filter((x) => x.sgOwed > 0);
+    for (const x of owed) expect(x.chip, `chip in ${x.mode}`).toBe(x.mode === 'race');
+    expect(owed.some((x) => x.mode === 'pitlane')).toBe(true);
+    for (const x of s) if (x.mirror !== undefined) expect(x.mirror, `mirror in ${x.mode}`).toBe(x.chip);
+    expect([P.status, P.svcBreach, P.sgOwed]).toEqual(['finished', null, 0]);
+  });
+
+  it('the same stop-and-go driven past the entrance on the racing lane: on all the way to the breach, then a deadline DQ', () => {
+    const { r, P } = sgDueOn10();
+    const { tl, s } = sampled(r, P, [10], 10);
+    expect(modes(s)).toEqual(['race']);
+    for (const x of s) expect(x.chip).toBe(true);
+    expect(at(tl, 'breach:stopGo')).toBeGreaterThan(at(tl, 'entrance 10'));
+    expect(P.dqReason).toBe('deadline');
+  });
+
+  it('a visit that cannot serve the debt keeps it on: a tow or recovery in the bay, a car past its bay or the box or about to run dry', () => {
+    const { r, P } = fuelDueOn10();
+    P.mode = 'service'; P.towSvc = true;
+    expect(r.lastChance(P)).toBe(true);
+    P.towSvc = false;
+    expect(r.lastChance(P)).toBe(false);
+    P.mode = 'bayOut';                                     // leaving with the stop still open: it was not served
+    expect(r.lastChance(P)).toBe(true);
+    P.mode = 'pitlane'; P.pitFuel = true; P.serviced = false;
+    place(P, r.T.BAYS[P.bayHome] - 2 + 9 * r.T.L, -1, 0); P.mode = 'pitlane';
+    expect(r.lastChance(P)).toBe(false);
+    place(P, r.T.BAYS[P.bayHome] + r.T.BAY_HALF + 0.3 + 9 * r.T.L, -1, 0); P.mode = 'pitlane';
+    expect(r.lastChance(P)).toBe(true);                    // rolled past its bay: it would have to reverse to be served
+    place(P, r.T.BAYS[P.bayHome] - 2 + 9 * r.T.L, -1, 0); P.mode = 'pitlane'; P.fuel = 0.0001;
+    expect(r.lastChance(P)).toBe(true);                    // about to run dry: it will be towed, and a tow serves nothing
+    P.fuel = 0.5;
+    const { r: r2, P: Q } = sgDueOn10();
+    place(Q, r2.T.PEN_S - 2 + 9 * r2.T.L, -1, 0); Q.mode = 'pitlane';
+    expect(r2.lastChance(Q)).toBe(false);
+    place(Q, r2.T.PEN_S + r2.T.PEN_HALF + 0.3 + 9 * r2.T.L, -1, 0); Q.mode = 'pitlane';
+    expect(r2.lastChance(Q)).toBe(true);
+    place(Q, r2.T.PEN_S - 2 + 9 * r2.T.L, -1, 0); Q.mode = 'pitlane'; Q.fuel = 0;
+    expect(r2.lastChance(Q)).toBe(true);
+  });
+});
