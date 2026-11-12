@@ -1495,6 +1495,111 @@ describe('a car held for an away driver (#74)', () => {
     expect(within).toEqual([]);
   });
 
+  // ---- #77: after maxWait the closing-car wait waives only the reaction time and margin, and a second cap bounds it
+  /** AWAY_REJOIN's clear slot after maxWait: pure braking distance (plus the throttle-lag margin), nose to tail */
+  const brakeNeed = (rel: number): number => (rel * rel) / (2 * BRAKE_DECEL) + AWAY_REJOIN.brakeMargin;
+  /**
+   * A scripted stream through a held car's spot: the AI cars x, y, z run at `v` m/s on its lane and never brake while it is
+   * held; a car 4 m past it is moved to the back of the stream, `spacing(k)` m (centre to centre) behind the last one. From
+   * the rejoin on the cars drive themselves, as `after` says: 'throttle' never brakes, 'brake' brakes at once and holds it.
+   * Steps at the core's own 1/120 s, so each record is the state the rejoin was decided on. Returns, per step from the
+   * return: whether it was still held, whether a car was inside it, and the clear slot and closing speed of every car
+   * closing on it from behind.
+   */
+  const SUB = 1 / 120;   // the race core's own step (Race.update runs 1/60 as two of these), so every rejoin step is seen
+  function stream(v: number, spacing: (k: number) => number, after: 'throttle' | 'brake', sec: number) {
+    const r = race([human('a', 0), ai('x', 1), ai('y', 2), ai('z', 3)]);
+    const a = r.car('a')!;
+    const cars = ['x', 'y', 'z'].map((id) => r.car(id)!);
+    place(r, a, U(r, STRAIGHT), 1, 0);
+    let k = 0;
+    cars.forEach((c, i) => place(r, c, i === 0 ? a.u - 4 : cars[i - 1].u - spacing(k++), 1, v));
+    let rejoinedAt = -1;
+    r.ai = (c: Car) => (rejoinedAt < 0 || after === 'throttle' ? { t: c.v < v ? 1 : 0, b: 0 } : { t: 0, b: 1 });
+    const script = () => {
+      for (const c of cars) {
+        c.v = v; c.throttle = 1;
+        if (r.T.gapS(r.s(a), r.s(c)) > 4) place(r, c, Math.min(...cars.map((o) => o.u)) - spacing(k++), 1, v);
+      }
+    };
+    run(r, { a: AWAY }, DT);
+    expect(a.away).toBe(true);
+    let valid: boolean[] = [];
+    const t0 = r.raceTime;
+    const steps: { t: number; held: boolean; inside: boolean; closing: { gap: number; rel: number }[] }[] = [];
+    const ev = run(r, { a: NONE }, sec, () => {
+      // (lap validity from the rejoin on: the scripted moves back to the end of the stream void the stream cars' laps)
+      if (rejoinedAt < 0 && !a.away) { rejoinedAt = r.raceTime - t0; valid = [a, ...cars].map((c) => c.lapValid); }
+      const closing = cars.map((c) => ({ g: r.T.gapS(r.s(c), r.s(a)), rel: c.v - a.v }))
+        .filter((o) => o.g > 0 && o.rel > 0).map((o) => ({ gap: o.g - r.T.CAR_LEN, rel: o.rel }));
+      const inside = cars.some((c) => c.mode === 'race' && Math.abs(r.T.gapS(r.s(c), r.s(a))) < r.T.CAR_LEN - 1e-6);
+      steps.push({ t: r.raceTime - t0, held: a.away, inside, closing });
+      if (rejoinedAt < 0) script();
+    }, SUB);
+    return { r, a, cars, ev, steps, rejoinedAt, valid };
+  }
+  /** the held car is never out of the hold while a closing car is inside the clear slot the rule asks for at that point */
+  function expectSafeRejoin(q: ReturnType<typeof stream>, tag: string): void {
+    const at = q.steps.findIndex((s) => !s.held);
+    expect(at, tag).toBeGreaterThanOrEqual(0);
+    const s = q.steps[at];
+    const need = s.t <= AWAY_REJOIN.maxWait + 1e-9 ? stopNeed : s.t <= AWAY_REJOIN.hardWait + 1e-9 ? brakeNeed : () => 0;
+    for (const c of s.closing) expect(c.gap, `${tag}: rejoined at ${s.t.toFixed(3)} s with a car ${c.gap.toFixed(2)} m back at ${c.rel.toFixed(1)} m/s`).toBeGreaterThanOrEqual(need(c.rel));
+    // no contact on the rejoin itself: no car is inside it when it turns solid
+    expect(s.inside, tag).toBe(false);
+  }
+
+  it('after maxWait it still never rejoins inside a closing car\'s braking distance: a stream of cars that never brake (#77)', () => {
+    // 16 m/s, 6.5 m apart (centre to centre): a car is always inside it or inside its pure braking distance (4.3 m), so
+    // the stream holds it past maxWait, until one 20 m gap reaches it at about 2.9 s, well before hardWait. Before #77 it
+    // rejoined at the first step after maxWait, 4.0 m in front of a car at 16 m/s needing 4.3 m to stop.
+    for (const after of ['brake', 'throttle'] as const) {
+      const q = stream(16, (k) => (k === 6 ? 20 : 6.5), after, 6);
+      const tag = after;
+      expect(q.rejoinedAt, tag).toBeGreaterThan(AWAY_REJOIN.maxWait + 0.5);
+      expect(q.rejoinedAt, tag).toBeLessThan(AWAY_REJOIN.hardWait - 0.5);
+      expectSafeRejoin(q, tag);
+      if (after === 'brake') {
+        // braking the moment it is back in traffic, with no reaction time at all, the stream stops short: no contact at all
+        expect(contacts(q.ev, 'a'), tag).toEqual([]);
+        expect(q.ev.filter((e) => e.type === 'bump' || e.type === 'offence'), tag).toEqual([]);
+      } else {
+        // never braking, the first car hits it inside the rejoin grace: judged against nobody
+        expect(contacts(q.ev, 'a').filter((e) => e.type === 'bump').length, tag).toBeGreaterThan(0);
+        expect(offencesOf(q.ev, 'a'), tag).toEqual([]);
+        expect(q.ev.filter((e) => e.type === 'offence' && (e as { other?: string }).other === 'a'), tag).toEqual([]);
+      }
+    }
+  });
+
+  it('the closing-car wait is bounded by AWAY_REJOIN.hardWait: a stream that never clears holds it to the second cap, never longer (#77)', () => {
+    // never clear of its braking distance: spacing below 2 car lengths + the pure braking distance, at 10 and 16 m/s
+    for (const [v, gap] of [[10, 4], [16, 6.5]] as const) for (const after of ['brake', 'throttle'] as const) {
+      const q = stream(v, () => gap, after, AWAY_REJOIN.hardWait + 2);
+      const tag = `${v} m/s ${after}`;
+      // held through both caps: up to maxWait for the stopping distance, then up to hardWait for the braking distance
+      expect(q.steps.filter((s) => s.t <= AWAY_REJOIN.hardWait + 1e-9).every((s) => s.held), tag).toBe(true);
+      // then out as soon as the car inside it is through (its two car lengths of overlap at v), never later
+      expect(q.rejoinedAt, tag).toBeGreaterThan(AWAY_REJOIN.hardWait);
+      expect(q.rejoinedAt, tag).toBeLessThanOrEqual(AWAY_REJOIN.hardWait + (2 * q.r.T.CAR_LEN) / v + 2 * DT);
+      // turning solid inside nothing
+      expect(q.steps.find((s) => !s.held)!.inside, tag).toBe(false);
+      // the forced rejoin: whatever runs into it inside the grace is judged against nobody, and the car it shoves is not
+      // blamed onward (#76), so it costs nobody an offence. A car that then runs into the back of the car that hit it, never
+      // braking, is an ordinary rear-end of its own (as at any rejoin, and as with no held car at all)
+      const hitA = q.ev.filter((e) => e.type === 'offence' && ((e as { car: string }).car === 'a' || (e as { other?: string }).other === 'a'));
+      expect(hitA, tag).toEqual([]);
+      // the second cap really is what let it out: a car was closing inside its pure braking distance
+      expect(q.steps.find((s) => !s.held)!.closing.some((c) => c.gap < brakeNeed(c.rel)), tag).toBe(true);
+      // never braking, that car does hit it (braking at once, the real deceleration, BRAKE + COAST, may still stop it short)
+      if (after === 'throttle') expect(contacts(q.ev, 'a').filter((e) => e.type === 'bump').length, tag).toBeGreaterThan(0);
+      if (after === 'brake') {
+        expect(q.ev.filter((e) => e.type === 'offence'), tag).toEqual([]);
+        expect([q.a, ...q.cars].map((c) => c.lapValid), tag).toEqual(q.valid);   // no lap voided by it either
+      }
+    }
+  });
+
   it('a held car is no part of the road queue behind a held pit queue: it gets no hold or cap from it', () => {
     const r = race([human('h', 0), ai('x', 1), ai('y', 2)]);
     parkAI(r);

@@ -176,17 +176,30 @@ export const STALL = {
   blockGap: 6,         // a stopped car with a slow car this close ahead (clear slot) on its own path is trapped, not blocking
 };
 /**
- * When a car held for an away driver (#74) may rejoin traffic: never while a car is inside it, and not while a car closing
- * from behind (on its lane, or changing lanes into it) could not stop short of it. With `rel` the closing car's speed above
- * the held car's, that car needs a clear slot of more than
- *     rel * react + rel² / (2 * BRAKE) + margin
- * (reaction at `react` seconds, then full braking at the race's own BRAKE deceleration, 30 m/s², with `margin` m to spare).
- * At 25 m/s that is about 12.5 + 10.4 + 1 = 24 m. The closing-car wait is capped at `maxWait` seconds of the driver being
- * back, so a stream of traffic cannot keep it out for ever; whatever then reaches it is covered by the rejoin's contact
- * grace (PEN.grace, as for a re-slotted car), so nobody is judged for the contact. A car inside it is never capped: that
- * car is in traffic and drives on, or its own stopped-on-track count recovers it.
+ * When a car held for an away driver (#74) may rejoin traffic, counted from the moment the driver is back (`awayWaitT`):
+ * - never while a car is inside it (less than CAR_LEN of slot apart, in the same slot). That is never capped: the car inside
+ *   is in traffic and drives on, or its own stopped-on-track count recovers it.
+ * - for the first `maxWait` s, not while a car closing from behind (on its lane, or changing lanes into it) could not stop
+ *   short of it with time to react. With `rel` the closing car's speed above the held car's and `gap` the clear slot between
+ *   the closing car's nose and the held car's tail (centre gap - CAR_LEN), it needs
+ *       gap >= rel * react + rel² / (2 * BRAKE) + margin
+ *   (reaction at `react` seconds, then full braking at the race's own BRAKE deceleration, 30 m/s², with `margin` m to spare).
+ *   At 25 m/s that is about 12.5 + 10.4 + 1 = 24 m.
+ * - from `maxWait` to `hardWait` s (#77), only the reaction time and the margin are waived: not while a closing car is inside
+ *   its pure braking distance,
+ *       gap >= rel² / (2 * BRAKE) + brakeMargin
+ *   so a car that brakes (Brake without Throttle, as a human's Brake always is) from the step the held car is back in traffic
+ *   always stops short of it. `brakeMargin` (0.25 m) is the one thing the pure formula misses: a car braking from full
+ *   Throttle keeps some drive while the throttle falls (9/s), so below about 9 m/s its real stop runs up to 0.10 m past
+ *   rel² / (2 * BRAKE) (worst case about 4.75 m/s, at any step of 1/20 s or less); above that, the coasting drag it gets
+ *   on top of BRAKE more than makes up. The gap is nose to tail, so gap = 0 is bumper contact, which is not an impact.
+ * - after `hardWait` s only a car inside it delays the return. A closing car cannot be shown to clear in bounded time (a
+ *   stream of cars that never brake drives through the held car's spot, and a driver can approach, brake, back off and come
+ *   again), so this second, deterministic cap in simulation time keeps the closing-car wait bounded by `hardWait`. Whatever
+ *   then reaches it is covered by the rejoin's contact grace (PEN.grace, as for a re-slotted car): nobody is judged for the
+ *   contact, and a car it shoves is not blamed for the onward contact either (#76).
  */
-export const AWAY_REJOIN = { react: 0.5, margin: 1, maxWait: 2 };
+export const AWAY_REJOIN = { react: 0.5, margin: 1, maxWait: 2, brakeMargin: 0.25, hardWait: 5 };
 
 export interface OffState { x: number; y: number; vx: number; vy: number; yaw: number; spin: number; t: number; z: number; vz: number; u0: number; lane: number; }
 
@@ -1660,16 +1673,18 @@ export class Race {
    *   length of the reconnect hold. A coasting car that slips through another would gain; a standing one cannot.
    * - While held it stands on the brakes, whoever would drive it (stepCar), and its stopped count is held at 0 (stallBlock).
    *   Its lap, lap validity, fuel, debts and deadlines run on as usual.
-   * - When its driver is back it rejoins traffic as soon as no car really penetrates it and none closing on it could not stop
-   *   (`penetrated`, AWAY_REJOIN), and gets its pedals back only then, so the driver can never drive it through anything. A
-   *   car merely touching it (bumper to bumper, as after any contact) does not delay the return. It rejoins with the same
-   *   contact grace as a re-slotted car (graceT = PEN.grace): a contact involving it in that time is resolved but judged
-   *   against neither car (judge()), so the driver who was told to drive through a held car is never penalised for it, and
-   *   a car it shoves is not blamed for the onward contact either (#76).
-   * - It cannot be held for ever: the penetrating car is in traffic and not trapped by a held car (stallTrapped), so it either
-   *   drives on or, a stopped human car, is recovered by its own stopped-on-track count within 3 s; an AI never follows a held
-   *   car and drives on. Two held cars inside each other ignore each other here, so both rejoin when both drivers are back
-   *   and collide() then separates them in their order on the slot (front stays front), as with any overlap.
+   * - When its driver is back it rejoins traffic as soon as no car really penetrates it and none closing on it could not
+   *   stop (`penetrated`, AWAY_REJOIN: with time to react for maxWait s, then by braking at once until hardWait s), and
+   *   gets its pedals back only then, so the driver can never drive it through anything. A car merely touching it (bumper
+   *   to bumper, as after any contact) does not delay the return. It rejoins with the same contact grace as a re-slotted
+   *   car (graceT = PEN.grace): a contact involving it in that time is resolved but judged against neither car (judge()),
+   *   so the driver who was told to drive through a held car is never penalised for it, and a car it shoves is not blamed
+   *   for the onward contact either (#76).
+   * - It cannot be held for ever: the closing-car wait ends at AWAY_REJOIN.hardWait at the latest, and the penetrating car
+   *   is in traffic and not trapped by a held car (stallTrapped), so it either drives on or, a stopped human car, is
+   *   recovered by its own stopped-on-track count within 3 s; an AI never follows a held car and drives on. Two held cars
+   *   inside each other ignore each other here, so both rejoin when both drivers are back and collide() then separates them
+   *   in their order on the slot (front stays front), as with any overlap.
    * In the pit lane, a bay or a service nothing changes. Leaving the racing lane (a de-slot, a tow, parking) ends the hold,
    * and a retired car (the hold expired) rejoins like a returned one, then parks once it stands. Runs on c.linkAway, which
    * stepCar has just set from this step's input.
@@ -1688,7 +1703,10 @@ export class Race {
       }
       if (!c.away) continue;
       c.awayWaitT += dt;
-      if (this.penetrated(c, held, c.awayWaitT <= AWAY_REJOIN.maxWait + 1e-9)) continue;
+      // the closing-car test for this point of the wait (AWAY_REJOIN): stopping distance, then pure braking distance, then none
+      const w = c.awayWaitT;
+      const closing = w <= AWAY_REJOIN.maxWait + 1e-9 ? 'stop' : w <= AWAY_REJOIN.hardWait + 1e-9 ? 'brake' : null;
+      if (this.penetrated(c, held, closing)) continue;
       // back in traffic, with the re-slot path's contact grace (judge() exempts both cars of a contact during it)
       c.away = false; c.awayWaitT = 0; c.graceT = PEN.grace;
       this.rejoinSqueeze(c);
@@ -1711,14 +1729,15 @@ export class Race {
 
   /**
    * Whether a held car must stay out of traffic for now: a car on the road or in the pit lane is inside it in the same slot
-   * (less than a car length of slot between them, beyond a float's tolerance: bumper-to-bumper contact is not inside), or,
-   * with `closing`, one behind it could not stop short of it (AWAY_REJOIN). A car changing lanes into the held car's lane
-   * counts as in that lane, wherever it is in the change. A change that starts after the rejoin needs laneClear(), which
-   * sees the rejoined car, so only changes already under way can arrive unannounced. Cars held at the start of this step
-   * (`held`) do not count: they are out of collisions, and two of them rejoining together are separated by collide() like
-   * any overlap, front car in front.
+   * (less than a car length of slot between them, beyond a float's tolerance: bumper-to-bumper contact is not inside), or
+   * one behind it is closing inside the clear slot `closing` asks for (AWAY_REJOIN): 'stop', its stopping distance with
+   * reaction time and margin; 'brake', its pure braking distance (#77); null, no closing-car test at all. A car changing
+   * lanes into the held car's lane counts as in that lane, wherever it is in the change. A change that starts after the
+   * rejoin needs laneClear(), which sees the rejoined car, so only changes already under way can arrive unannounced. Cars
+   * held at the start of this step (`held`) do not count: they are out of collisions, and two of them rejoining together
+   * are separated by collide() like any overlap, front car in front.
    */
-  penetrated(c: Car, held: ReadonlySet<Car>, closing: boolean): boolean {
+  penetrated(c: Car, held: ReadonlySet<Car>, closing: 'stop' | 'brake' | null): boolean {
     const s = this.s(c);
     const lane = c.change ? c.change.to : Math.sign(c.laneSide);
     return this.cars.some((o) => {
@@ -1728,8 +1747,10 @@ export class Race {
       const g = this.T.gapS(this.s(o), s);   // > 0: o is behind c by g
       if (Math.abs(g) < this.T.CAR_LEN - 1e-6) return true;
       const rel = o.v - c.v;
-      if (!closing || g <= 0 || rel <= 0) return false;
-      return g - this.T.CAR_LEN < rel * AWAY_REJOIN.react + (rel * rel) / (2 * BRAKE) + AWAY_REJOIN.margin;
+      if (closing === null || g <= 0 || rel <= 0) return false;
+      const brake = (rel * rel) / (2 * BRAKE);
+      const need = closing === 'stop' ? rel * AWAY_REJOIN.react + brake + AWAY_REJOIN.margin : brake + AWAY_REJOIN.brakeMargin;
+      return g - this.T.CAR_LEN < need;   // the clear slot, nose to tail
     });
   }
 

@@ -13,7 +13,7 @@ export const PROTOCOL_NAME = 'slotrush';
  * Race rules version recorded in every result envelope. Bump whenever a change to the simulation (physics, timing, service,
  * penalties, classification) could change a result, so stored results from different rules are never compared as equal.
  */
-export const RULES_VERSION = 'race-core-2026.11.5';
+export const RULES_VERSION = 'race-core-2026.11.6';
 
 /** Hard limits a client must respect. The server enforces every one of them. */
 export const LIMITS = Object.freeze({
