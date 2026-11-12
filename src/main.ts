@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { ONLINE_ENABLED, outdatedHtml, probeOnline, type OnlineStatus } from './online';
+import { ONLINE_ENABLED, afterProtocolRefusal, afterRetry, behindHtml, outdatedHtml, probeOnline, startRecheck, type OnlineStatus } from './online';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 import * as T from './track';
 import { Race, Car, LAPS, RaceEvent, DRIVERS, PERSONAS, PEN, DEF, SOLO_ID, DriverId, RosterEntry } from './race';
@@ -369,8 +369,14 @@ function showTitle(): void {
     <p class="modes"><small>${t('net.localNote')}</small></p>
     ${onlineEntryHtml()}
   </div>`;
+  syncRecheck();
   overlay.querySelector('#o-online')?.addEventListener('click', () => { sfx.init(); showOnline(); });
   overlay.querySelector('#o-reload')?.addEventListener('click', () => location.reload());
+  overlay.querySelector<HTMLButtonElement>('#o-retry')?.addEventListener('click', (e) => {
+    const b = e.currentTarget as HTMLButtonElement;
+    b.disabled = true;
+    void probeHealth().then((st) => applyOnline(afterRetry(st), true));
+  });
   overlay.querySelector('#o-account')?.addEventListener('click', () => { sfx.init(); showAccount(); });
   overlay.querySelector('#o-rejoin')?.addEventListener('click', () => { sfx.init(); const st = loadSeat(seatStore()); if (st) void netBegin((n) => n.resume(st)); });
   overlay.querySelectorAll<HTMLElement>('.track').forEach((b) => b.addEventListener('click', () => {
@@ -962,7 +968,41 @@ function onlineEntryHtml(): string {
   }
   if (online.state === 'unavailable') return `<p class="modes net-off"><small>${t('net.unavailable')}</small></p>`;
   if (online.state === 'outdated') return outdatedHtml();
+  if (online.state === 'behind') return behindHtml();
   return '';
+}
+
+/** The same-origin health probe (src/online.ts), for the first check, Retry and the title's re-check. */
+function probeHealth(): Promise<OnlineStatus> { return probeOnline(true, fetch.bind(window), location.origin, 10000); }
+
+/**
+ * Take a health answer. The title is redrawn when it is shown and the answer changed what it offers (or `redraw`: a Retry
+ * press, whose button must come back); a periodic re-check that still says `behind` leaves the title alone, so a name being
+ * typed is not lost. Becoming available with accounts restores the sign-in, as the first probe does.
+ */
+function applyOnline(st: OnlineStatus, redraw = false): void {
+  const was = online;
+  online = st;
+  if (screen === 'title' && (redraw || JSON.stringify(was) !== JSON.stringify(st))) showTitle();
+  if (st.state === 'available' && st.accounts && was.state !== 'available') void accounts.restore();
+}
+
+/** While the title shows the older-server notice, re-probe health now and then so the page recovers without a reload (#80). */
+let recheckStop: (() => void) | null = null;
+function syncRecheck(): void {
+  if (recheckStop || screen !== 'title' || online.state !== 'behind') return;
+  recheckStop = startRecheck(() => probeHealth().then(afterRetry), (st) => applyOnline(st), () => screen === 'title' && online.state === 'behind', () => { recheckStop = null; });
+}
+
+/**
+ * A hello refused for its protocol: the refusal does not carry the server's protocol, so ask /api/health which side is
+ * newer. Only a newer server makes this page outdated (Reload); an older one (a rollback) is the Retry notice (#80).
+ */
+function onProtocolRefused(): void {
+  online = { state: 'checking' };
+  netNotice = '';
+  showTitle();
+  void probeHealth().then((st) => applyOnline(afterProtocolRefusal(st), true));
 }
 
 /** The online menu: create a multiplayer room, join one by code, or start a connected solo race with AI. */
@@ -1266,8 +1306,8 @@ async function netBegin(req: (s: NetSession) => Promise<{ ok: true } | { ok: fal
   if (!r.ok) {
     net = null;
     mode = 'race';
-    // the server refused this page's protocol (it was upgraded after this page loaded): say so and offer a reload (#67)
-    if (r.code === 'protocol') { online = { state: 'outdated', server: null }; netNotice = ''; showTitle(); return; }
+    // the server refused this page's protocol: newer (upgraded after this page loaded) → Reload (#67); older → Retry (#80)
+    if (r.code === 'protocol') { onProtocolRefused(); return; }
     // the sign-in this page shows is not the browser's any more (expired, signed out elsewhere, reset, switched in another
     // tab): nothing was entered; find out who this browser is now and let the driver choose again
     const session = r.code === 'expired' && r.detail === 'session';
@@ -1447,8 +1487,8 @@ function onNetEnd(why: EndReason, detail?: string): void {
   setRace(newRace());
   // on the pending card a refused resume means no result is coming: that card says so itself, with its way back (#43)
   if (netGuard.ended(why)) { netNotice = ''; return; }
-  // a reconnect refused for its protocol: the server was upgraded mid-session; this page cannot play online until reloaded
-  if (why === 'outdated') { online = { state: 'outdated', server: null }; netNotice = ''; showTitle(); return; }
+  // a reconnect refused for its protocol: the server changed mid-session (upgraded → Reload, rolled back → Retry)
+  if (why === 'outdated') { onProtocolRefused(); return; }
   netNotice = why === 'left' ? '' : code ? t(retired ? 'net.end.disconnectedRace' : 'net.end.disconnected', { code }) : t(`net.end.${why}`);
   if (why === 'left' || online.state !== 'available') showTitle(); else showOnline();
 }
@@ -1748,12 +1788,8 @@ requestAnimationFrame(frame);
 // probed once the page has loaded, so scene building on a slow device cannot eat the probe's time budget
 if (ONLINE_ENABLED) {
   const probe = (): void => {
-    void probeOnline(true, fetch.bind(window), location.origin, 10000).then((st) => {
-      online = st;
-      if (screen === 'title') showTitle();
-      // session restoration only against a healthy server with accounts: a static or guest-only deploy never asks
-      if (st.state === 'available' && st.accounts) void accounts.restore();
-    });
+    // session restoration only against a healthy server with accounts: a static or guest-only deploy never asks
+    void probeHealth().then((st) => applyOnline(st, true));
   };
   if (document.readyState === 'complete') setTimeout(probe, 0); else window.addEventListener('load', () => setTimeout(probe, 0), { once: true });
 }

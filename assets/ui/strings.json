@@ -314,6 +314,8 @@
     { "id": "net.unavailable", "text": "Online play is unavailable right now. Local play works as usual." },
     { "id": "net.outdated", "text": "A new version of Slot Rush is available. Reload to play online." },
     { "id": "net.reload", "text": "Reload" },
+    { "id": "net.behind", "text": "Online play is temporarily unavailable — try again shortly." },
+    { "id": "net.retry", "text": "Retry" },
     { "id": "net.name", "text": "Driver name" },
     { "id": "net.namePh", "text": "Your name" },
     { "id": "net.livery", "text": "Colour" },
