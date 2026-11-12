@@ -77,6 +77,13 @@ const RACE_TIME_LIMIT = 1200;
  * first `ctl` arrives, or the hold expires and the car retires (docs/online-server.md, docs/auto-bay.md).
  */
 export const LINK_AWAY_MS = 1500;
+/**
+ * A gap between two pumps of this room longer than this is the server's own stall (GC, an overloaded event loop), not the
+ * clients': the room is normally pumped every 10 ms, and controls that arrived during the stall are only read after it. The
+ * time beyond this is not counted against any seat's control clock (`ctlAt`), so a server stall never makes every driver
+ * away at once, nor brings a silent seat's hold expiry closer. Controls that were already late before the stall still count.
+ */
+export const PUMP_STALL_MS = 250;
 
 export type JoinOk = { ok: true; participant: string; token: string };
 export type Fail = { ok: false; code: ErrorCode; detail?: string };
@@ -99,6 +106,8 @@ export class Room {
   /** the latest wall time the room was given (by pump, handle, join...), for work done outside those calls */
   private clock: number;
   private resultsAt = 0;
+  /** wall time of the previous pump (null before the first): see PUMP_STALL_MS */
+  private lastPumpAt: number | null = null;
   // ---- the current race (state 'race'); everything here is reset on start
   race: Race | null = null;
   raceId: string | null = null;
@@ -362,7 +371,8 @@ export class Room {
     });
     this.raceId = randomUUID();
     this.enc = new SnapEncoder(this.raceId);
-    for (const p of this.parts) { p.inRace = !p.left; p.held = neutral(); p.ready = false; }
+    // the control clock starts with the race: no controls are sent in the lobby, so lobby time is never silence (#74)
+    for (const p of this.parts) { p.inRace = !p.left; p.held = neutral(); p.ready = false; p.ctlAt = now; }
     this.state = 'race';
     this.baseWall = now; this.stepsDone = 0; this.lagSteps = 0; this.startedAt = now; this.greenAt = null;
     this.laps = []; this.evBuf = []; this.result = null; this.snapSlot = 0; this.snapTick = -1;
@@ -376,6 +386,12 @@ export class Room {
   pump(now: number): void {
     if (this.state === 'closed') return;
     this.clock = Math.max(this.clock, now);
+    // a server stall is not a client's silence (PUMP_STALL_MS): only staleness that built up while the room was pumped counts
+    if (this.lastPumpAt !== null) {
+      const late = now - this.lastPumpAt - PUMP_STALL_MS;
+      if (late > 0) for (const p of this.parts) if (p.peer) p.ctlAt = Math.min(now, p.ctlAt + late);
+    }
+    this.lastPumpAt = now;
     this.timers(now);
     if (this.state === 'race' && this.race) this.stepRace(now);
   }
@@ -390,6 +406,18 @@ export class Room {
         this.log.info('room.grace_expired', { room: this.id, participant: p.id, state: this.state });
         this.dropSeat(p, now);
         if (this.state === 'closed') return;
+      }
+      // a half-open link (#74): the socket is still there but the race has had no controls from it for the whole reconnect
+      // grace. Its car has been held as away all that time; the hold window is the same as for a closed socket, so it ends
+      // the same way: the socket is closed (the page, if it is alive at all, reconnects and is told its seat expired) and the
+      // seat is dropped, which retires the car (DNF retired, DQ on a latched breach) and parks it
+      else if (!p.left && p.peer && p.inRace && this.state === 'race' && now - p.ctlAt > this.cfg.graceS * 1000) {
+        this.log.info('room.grace_expired', { room: this.id, participant: p.id, state: this.state, silent: true });
+        const peer = p.peer;
+        p.peer = null; p.held = neutral();
+        try { peer.close(4000, 'no controls'); } catch { /* already closing */ }
+        this.dropSeat(p, now);
+        if ((this.state as RoomState) === 'closed') return;   // (dropSeat may close the room)
       }
     }
     if (now - this.createdAt > this.cfg.roomMaxS * 1000) { this.abortAndClose('lifetime', now); return; }

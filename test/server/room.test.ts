@@ -28,9 +28,22 @@ function start(h: H, room: Room, ids: string[]): void {
   expect(room.handle(ids[0], { t: 'start' }, h.now)).toBe(null);
   expect(room.state).toBe('race');
 }
+/**
+ * A live client's heartbeat: neutral controls from every connected seat, as the browser repeats its held pedals every 250 ms.
+ * Since #74 a connected seat silent for longer than the reconnect grace is a dead link and its car is retired, so a test that
+ * keeps seats in a long race without driving them must send this (pass it as `each` to h.advance).
+ */
+const beat = (h: H, room: Room, ids: string[]) => () => {
+  for (const id of ids) {
+    const p = room.participant(id);
+    if (p?.peer && !p.left && room.state === 'race') room.handle(id, { t: 'ctl', seq: p.ctlSeq + 1, up: false, down: false }, h.now);
+  }
+};
 /** Drive every seat with a headless bot that reads only its own peer's snapshots, until the room leaves the race. */
 function drive(h: H, room: Room, peers: FakePeer[], ids: string[], maxMs = 900_000, skip: Set<string> = new Set()): BotClient[] {
   const bots = ids.map((id, k) => new BotClient(peers[k], id, 1 - k * 0.03));
+  // control numbering carries on from whatever the seat sent before (a heartbeat, say)
+  for (const b of bots) b.ctl = room.participant(b.id)?.ctlSeq ?? 0;
   h.advance(maxMs, 50, () => {
     if (room.state !== 'race') return;
     for (const b of bots) {
@@ -180,10 +193,10 @@ describe('leaving, host control and cleanup', () => {
     const t0 = room.race!.raceTime;
     room.disconnect(ids[0], peers[0], h.now);
     expect(room.hostId).toBe(ids[0]);                      // nothing in a race waits on the host
-    h.advance(3000);
+    h.advance(3000, 50, beat(h, room, ids));
     expect(room.race!.raceTime).toBeGreaterThan(t0 + 2.9);
     expect(h.mgr.join(new FakePeer(), '9', { code: room.code, name: 'Swap', accountId: null })).toMatchObject({ ok: false, code: 'started' });
-    h.advance(h.cfg.graceS * 1000);
+    h.advance(h.cfg.graceS * 1000, 50, beat(h, room, ids));
     expect(carOf(room, ids[0])).toMatchObject({ status: 'dnf', dnfReason: 'retired' });
     expect(room.publicRoom().participants.find((p) => p.id === ids[0])).toMatchObject({ left: true, connected: false });
     expect(h.mgr.resume(new FakePeer(), '9', room.id, ids[0], 'whatever', null)).toMatchObject({ ok: false, code: 'expired' });
@@ -213,7 +226,7 @@ describe('leaving, host control and cleanup', () => {
     const a = lobby(h, 1), b = lobby(h, 2, { track: 'circuit-5' });
     expect(h.mgr.create(new FakePeer(), { name: 'x', accountId: null, mode: 'multiplayer', settings: {} })).toMatchObject({ ok: false, code: 'unavailable' });
     start(h, b.room, b.ids);
-    h.advance(61_000);
+    h.advance(61_000, 50, beat(h, b.room, b.ids));
     expect(a.room.state).toBe('closed');
     expect(a.peers[0].of('bye').at(-1)).toMatchObject({ code: 'closed', detail: 'idle' });
     expect(b.room.state).toBe('race');                     // a racing room is not idle
@@ -225,7 +238,7 @@ describe('leaving, host control and cleanup', () => {
     const h = harness({ roomMaxS: 120 });
     const { room, peers, ids } = lobby(h, 2);
     start(h, room, ids);
-    h.advance(121_000);
+    h.advance(121_000, 50, beat(h, room, ids));
     expect(room.state).toBe('closed');
     expect(room.results).toHaveLength(1);
     expect(room.results[0]).toMatchObject({ outcome: 'aborted', abortReason: 'lifetime', classification: null });

@@ -926,6 +926,9 @@ export class Race {
     c.graceT = Math.max(0, c.graceT - dt); c.pushedT = Math.max(0, c.pushedT - dt); c.cutT = Math.max(0, c.cutT - dt);
     c.defendCooldown = Math.max(0, c.defendCooldown - dt);
     c.linkAway = c.human && input.away === true;
+    // a car held out of traffic (#74) has no pedals until it is back in traffic, even once its driver is back: nothing it
+    // could do while it overlaps another car may move it (no driving through anyone), and reverse gear is let go
+    if (c.away) input = NEUTRAL;
     if (c.human) { this.sgUpdate(c); this.reverseControl(c, dt, input); }
     if (c.retire === 'parked') { c.v = 0; c.throttle = 0; c.brake = 0; return; }
     if (c.retire) c.retireT += dt;
@@ -938,8 +941,11 @@ export class Race {
     let thrIn = 0, brkIn = 0;
     let autoV: number | null = null;
     if (c.mode !== 'grid' || c.human) {
+      // held out of traffic (#74): it stands still on the brakes, whoever would drive it (its driver, automatic stop-and-go
+      // control, or the AI that drives a finished car), so it never moves while others pass through its spot
+      if (c.away) brkIn = 1;
       // braking takes priority: with both held, Throttle does nothing
-      if (c.human && !c.finished && c.sgCtl) {
+      else if (c.human && !c.finished && c.sgCtl) {
         // automatic stop-and-go: the controller owns the pedals, so a held Throttle or Brake changes nothing
         autoV = this.sgTarget(c);
         const err = autoV - c.v;
@@ -1572,9 +1578,10 @@ export class Race {
    */
   stallBlock(c: Car): 'off' | 'held' | null {
     if (this.practice || this.phase !== 'racing' || !c.human || c.status !== 'running' || c.finished || c.retire || c.mode !== 'race') return 'off';
-    // the driver's link is down and the seat is held for a reconnect (#74): the car is held where it stopped, out of traffic,
-    // so it blocks nobody. Held, so the count is reset: the driver who comes back gets a fresh three seconds, never the rest
-    if (c.linkAway) return 'held';
+    // the driver's link is down (#74): the seat is held for a reconnect, and the car coasts to a stop and is then held out of
+    // traffic, so it blocks nobody. Also while it is held after the driver is back, waiting to rejoin: its pedals are not
+    // its own then. Held, so the count is reset: the driver who comes back gets a fresh three seconds, never the rest
+    if (c.linkAway || c.away) return 'held';
     if (c.pitHold || c.exitHold || c.squeezeHold || c.yielding || c.sgCtl || c.recoverT > 0 || c.fuel <= 0) return 'held';
     return this.stallTrapped(c) ? 'held' : null;
   }
@@ -1633,35 +1640,48 @@ export class Race {
   }
 
   /**
-   * Hold the cars of away drivers out of traffic (#74). A car whose driver's link is down (Input.away) and that is on the
-   * racing lane is held where it is: out of collisions and everyone's traffic checks, so the field drives through its spot and
-   * nobody is trapped behind it for the length of the reconnect hold. It gains nothing: its pedals are neutral, so it only
-   * coasts to a stop, and its lap, lap validity, fuel, debts and deadlines run on as usual. In the pit lane, a bay or a
-   * service it is already off the racing lane and the usual queue rules apply. Once the driver is back (or the car retires
-   * when the hold runs out) it rejoins traffic only when no other car overlaps it, so the return is never a shunt; until then
-   * it stays out of collisions while its driver drives it clear. Leaving the racing lane (a de-slot, a tow, parking) ends it.
-   * Runs on c.linkAway, which stepCar has just set from this step's input.
+   * Hold the cars of away drivers out of traffic (#74). It must never gain anything, above all never track position through
+   * another car, so:
+   * - A car whose driver's link is down (Input.away) stays in traffic while it is still moving: neutral pedals, it can be
+   *   bumped and bumps like any car. Only once it has stopped (slower than STALL.stopV) on the racing lane is it held: out of
+   *   collisions and everyone's traffic checks, so the field drives through its spot and nobody is trapped behind it for the
+   *   length of the reconnect hold. A coasting car that slips through another would gain; a standing one cannot.
+   * - While held it stands on the brakes, whoever would drive it (stepCar), and its stopped count is held at 0 (stallBlock).
+   *   Its lap, lap validity, fuel, debts and deadlines run on as usual.
+   * - When its driver is back it rejoins traffic as soon as no car really penetrates it (`penetrated`), and gets its pedals
+   *   back only then, so the driver can never drive it through anything. A car merely touching it (bumper to bumper, as after
+   *   any contact) does not delay the return.
+   * - It cannot be held for ever: the penetrating car is in traffic and not trapped by a held car (stallTrapped), so it either
+   *   drives on or, a stopped human car, is recovered by its own stopped-on-track count within 3 s; an AI never follows a held
+   *   car and drives on. Two held cars inside each other ignore each other here, so both rejoin when both drivers are back
+   *   and collide() then separates them in their order on the slot (front stays front), as with any overlap.
+   * In the pit lane, a bay or a service nothing changes. Leaving the racing lane (a de-slot, a tow, parking) ends the hold,
+   * and a retired car (the hold expired) rejoins like a returned one, then parks once it stands. Runs on c.linkAway, which
+   * stepCar has just set from this step's input.
    */
   awayUpdate(): void {
+    // judged from who was held before this pass, so array order never decides which of two held cars rejoins first
+    const held = new Set(this.cars.filter((c) => c.away));
     for (const c of this.cars) {
       if (c.mode !== 'race') { c.away = false; continue; }
-      if (c.linkAway && !c.retire) { c.away = true; continue; }
-      if (c.away && !this.overlapsAny(c)) c.away = false;
+      if (c.linkAway && !c.retire) { if (!c.away && Math.abs(c.v) < STALL.stopV) c.away = true; continue; }
+      if (c.away && !this.penetrated(c, held)) c.away = false;
     }
   }
 
   /**
-   * Another car on the road or in the pit lane touches this one: within contact distance in the same slot (the test collide()
-   * clears contact with), or about to be, closing from behind fast enough to reach it within AWAY_REJOIN_S. The second part is
-   * what makes a return safe for the car that was driving through the held car's spot: it is never handed a stopped car a
-   * bumper's length ahead of it at racing speed, which it could not avoid.
+   * A car in traffic on the road or in the pit lane is inside this one in the same slot (less than a car length of slot
+   * between them, beyond a float's tolerance: bumper-to-bumper contact is not inside), or is closing from behind fast enough
+   * to reach it within AWAY_REJOIN_S, so a car driving through the held car's spot is never handed a stopped car it cannot
+   * avoid. Cars held at the start of this step (`held`) do not count: they are out of collisions, and two of them rejoining
+   * together are separated by collide() like any overlap.
    */
-  overlapsAny(c: Car): boolean {
+  penetrated(c: Car, held: ReadonlySet<Car>): boolean {
     const s = this.s(c);
     return this.cars.some((o) => {
-      if (o === c || (o.mode !== 'race' && o.mode !== 'pitlane') || Math.abs(o.d - c.d) >= this.T.CAR_W) return false;
+      if (o === c || held.has(o) || (o.mode !== 'race' && o.mode !== 'pitlane') || Math.abs(o.d - c.d) >= this.T.CAR_W) return false;
       const g = this.T.gapS(this.s(o), s);   // > 0: o is behind c by g
-      if (Math.abs(g) < this.T.CAR_LEN + PEN.separateGap) return true;
+      if (Math.abs(g) < this.T.CAR_LEN - 1e-6) return true;
       return g > 0 && o.v > c.v && g - this.T.CAR_LEN < (o.v - c.v) * AWAY_REJOIN_S;
     });
   }

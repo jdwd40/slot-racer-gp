@@ -1121,32 +1121,158 @@ describe('a car held for an away driver (#74)', () => {
     expect(Math.abs(t - 3)).toBeLessThanOrEqual(1 / 120 + 1e-9);
   });
 
-  it('collisions come back only once no car overlaps it: no shunt on the return, and contact is resolved again after', () => {
+  it('collisions come back only once no car is inside it; until then its pedals are not its own, so it cannot drive through', () => {
     const r = race([human('p'), human('f')]);
     const p = r.car('p')!, f = r.car('f')!;
     place(r, p, U(r, STRAIGHT), 1, 0);
-    place(r, f, U(r, STRAIGHT) - 0.3, 1, 0);   // f stands inside p's spot (it drove into it while p was away)
+    place(r, f, U(r, STRAIGHT) - 0.3, 1, 0);   // f stands inside p's spot (it drove into it while p was held)
     const pu = p.u, fu = f.u;
     run(r, { p: AWAY, f: NONE }, 1);
-    expect([p.u, f.u]).toEqual([pu, fu]);      // overlapping, and nobody is pushed apart
-    // p is back while f still overlaps it: still out of collisions, nobody is moved
-    const ev = run(r, { p: NONE, f: NONE }, 0.5);
+    expect(p.away).toBe(true);
+    expect([p.u, f.u]).toEqual([pu, fu]);      // inside each other, and nobody is pushed apart
+    // p is back, on full Throttle, while f is still inside it: still held, it does not move, and it does not count
+    const ev = run(r, { p: UP, f: NONE }, 0.5);
     expect(p.away).toBe(true);
     expect([p.u, f.u]).toEqual([pu, fu]);
+    expect(p.throttle).toBe(0);
+    expect(p.stallT).toBe(0);
     expect(contacts(ev, 'p')).toEqual([]);
-    expect(p.stallT).toBeGreaterThan(0);       // its driver is back: the ordinary rule runs (fresh count) wherever it stands
-    // f drives clear ahead: p rejoins traffic on the first step with clear slot between them, never earlier
+    // f drives on, through and out ahead: p rejoins traffic on the first step nothing is inside it, never earlier, and only
+    // then drives, behind f
     let clearedGap = -1;
-    ev.push(...run(r, { p: NONE, f: UP }, 3, () => {
-      if (clearedGap < 0 && !p.away) { clearedGap = Math.abs(r.T.gapS(r.s(p), r.s(f))); return true; }
+    ev.push(...run(r, { p: UP, f: UP }, 3, () => {
+      if (clearedGap < 0 && !p.away) clearedGap = r.T.gapS(r.s(p), r.s(f));
+      if (p.away) expect(p.u).toBe(pu);
+      expect(r.T.gapS(r.s(p), r.s(f))).toBeGreaterThan(-r.T.CAR_LEN);   // p never gets in front of f
     }));
-    expect(clearedGap).toBeGreaterThanOrEqual(r.T.CAR_LEN + PEN.separateGap);
+    expect(clearedGap).toBeGreaterThanOrEqual(r.T.CAR_LEN - 1e-6);
     expect(contacts(ev, 'p')).toEqual([]);
+    expect(p.away).toBe(false);
     expect(r.snapshot().cars.find((c) => c.id === 'p')!.away).toBeUndefined();
     // and it is in traffic again: an overlap now is resolved like any other contact
     place(r, f, p.u + r.T.CAR_LEN - 0.3, 1, 0);
     r.update(DT, { p: NONE, f: NONE });
     expect(r.T.gapS(r.s(p), r.s(f))).toBeGreaterThanOrEqual(r.T.CAR_LEN - 1e-6);
+  });
+
+  // ---- review of #75, finding 1: an away car must never gain track position through another car
+  /** p's slot distance behind f (> 0 while p is behind), wrapped like everything on the slot */
+  const behind = (r: Race, p: Car, f: Car): number => r.T.gapS(r.s(p), r.s(f));
+
+  it('nose to tail behind a stopped car: one away step and then Throttle never takes it through (it stays behind)', () => {
+    for (const awaySteps of [1, 30, 120]) {
+      const r = race([human('p'), ai('f')]);
+      parkAI(r);                                // f stands on its brakes for the whole run
+      const p = r.car('p')!, f = r.car('f')!;
+      place(r, f, U(r, STRAIGHT), 1, 0);
+      place(r, p, U(r, STRAIGHT) - r.T.CAR_LEN, 1, 0);
+      let i = 0, minGap = Infinity;
+      run(r, () => ({ p: i++ < awaySteps ? AWAY : UP }), 1.5 + awaySteps * DT, () => { minGap = Math.min(minGap, behind(r, p, f)); });
+      expect(minGap).toBeGreaterThan(r.T.CAR_LEN - 0.05);
+      expect(behind(r, p, f)).toBeGreaterThan(0);
+      expect(p.laneSide).toBe(f.laneSide);
+    }
+  });
+
+  it('rolling contact: 12 m/s into a car holding 4 m/s, with the away step during the contact, never passes it', () => {
+    for (const awayAt of [0, 3, 10]) {
+      const r = race([human('p'), ai('f')]);
+      const p = r.car('p')!, f = r.car('f')!;
+      place(r, f, U(r, STRAIGHT - 30), 1, 4);
+      place(r, p, U(r, STRAIGHT - 30) - r.T.CAR_LEN - 0.05, 1, 12);
+      r.ai = (c: Car) => ({ t: c.v < 4 ? 0.6 : 0, b: c.v > 4.3 ? 1 : 0 });
+      // the server's realistic sequence: Throttle, then neutral pedals (input timeout), then one away step, then Throttle
+      let i = 0;
+      run(r, () => { const k = i++; return { p: k === awayAt ? AWAY : k < awayAt ? NONE : UP }; }, 2, () => {
+        expect(behind(r, p, f)).toBeGreaterThan(0);
+      });
+      expect(behind(r, p, f)).toBeGreaterThan(r.T.CAR_LEN - 0.05);
+      expect(p.away).toBe(false);
+    }
+  });
+
+  it('a coasting away car stays in traffic: it runs into the stopped car ahead and stays behind it, and is held only once stopped', () => {
+    const r = race([human('p'), human('f')]);
+    const p = r.car('p')!, f = r.car('f')!;
+    place(r, f, U(r, STRAIGHT), 1, 0);
+    place(r, p, U(r, STRAIGHT) - r.T.CAR_LEN - 1, 1, 6);
+    let heldWhileMoving = false, bumped = false;
+    const ev = run(r, { p: AWAY, f: NONE }, 2, (e) => {
+      if (p.away && Math.abs(p.v) >= STALL.stopV) heldWhileMoving = true;
+      bumped ||= e.some((x) => x.type === 'bump' && x.car === 'p');
+      expect(behind(r, p, f)).toBeGreaterThan(0);
+    });
+    expect(heldWhileMoving).toBe(false);
+    expect(bumped).toBe(true);
+    expect(p.away).toBe(true);
+    expect(recov(ev)).toEqual([]);
+  });
+
+  it('a stopped queue on the racing lane cannot be jumped by going away and coming back', () => {
+    const r = race([ai('a', 1), human('b', 0), human('c', 2)]);
+    parkAI(r);
+    const [a, b, c] = ['a', 'b', 'c'].map((id) => r.car(id)!);
+    const u0 = U(r, STRAIGHT);
+    place(r, a, u0, 1, 0); place(r, b, u0 - r.T.CAR_LEN - 0.2, 1, 0); place(r, c, u0 - 2 * r.T.CAR_LEN - 0.4, 1, 0);
+    let i = 0;
+    run(r, () => { const k = i++; return { b: k === 5 ? AWAY : UP, c: k === 2 || k === 40 ? AWAY : UP }; }, 2, () => {
+      expect(behind(r, b, a)).toBeGreaterThan(0);
+      expect(behind(r, c, b)).toBeGreaterThan(0);
+    });
+    expect(behind(r, b, a)).toBeGreaterThan(r.T.CAR_LEN - 0.05);
+    expect(behind(r, c, b)).toBeGreaterThan(r.T.CAR_LEN - 0.05);
+  });
+
+  it('under automatic stop-and-go control a held car is not driven: the controller cannot take it through the car ahead', () => {
+    const go = (awayStep: boolean) => {
+      const r = race([human('p'), human('f')]);
+      const p = r.car('p')!, f = r.car('f')!;
+      place(r, f, U(r, STRAIGHT), 1, 0);
+      place(r, p, U(r, STRAIGHT) - r.T.CAR_LEN, 1, 0);
+      // the controller owns p's pedals and wants 10 m/s (as on an automatic pit approach), whatever is ahead
+      const sg = r.sgUpdate.bind(r);
+      r.sgUpdate = (c: Car) => { sg(c); if (c === p) c.sgCtl = true; };
+      r.sgTarget = () => 10;
+      let i = 0, minGap = Infinity;
+      run(r, () => ({ p: awayStep && i++ === 0 ? AWAY : NONE, f: NONE }), 1.5, () => { minGap = Math.min(minGap, behind(r, p, f)); });
+      return { minGap, end: behind(r, p, f), len: r.T.CAR_LEN };
+    };
+    for (const x of [go(false), go(true)]) {
+      expect(x.minGap).toBeGreaterThan(x.len - 0.05);
+      expect(x.end).toBeGreaterThan(0);
+    }
+  });
+
+  it('two held cars inside each other both rejoin when both drivers are back, in their order on the slot, without a pass', () => {
+    const r = race([human('a'), human('b')]);
+    const a = r.car('a')!, b = r.car('b')!;
+    place(r, a, U(r, STRAIGHT), 1, 0);
+    place(r, b, U(r, STRAIGHT) - 0.5, 1, 0);   // b came to rest inside a
+    run(r, { a: AWAY, b: AWAY }, 1);
+    expect([a.away, b.away]).toEqual([true, true]);
+    let steps = 0;
+    run(r, { a: NONE, b: NONE }, 1, () => { steps++; return !a.away && !b.away; });
+    expect([a.away, b.away]).toEqual([false, false]);
+    expect(steps).toBeLessThanOrEqual(2);
+    // collide() separates them as any overlap: b behind a, a car length apart, and then both drive on in that order
+    run(r, { a: UP, b: UP }, 2, () => { expect(behind(r, b, a)).toBeGreaterThan(0); });
+    expect(behind(r, b, a)).toBeGreaterThanOrEqual(r.T.CAR_LEN - 1e-6);
+  });
+
+  it('no deadlock: a connected car stopped inside a held car is not trapped by it, so its own rule recovers it, and the held car then rejoins', () => {
+    const r = race([human('p'), human('x')]);
+    const p = r.car('p')!, x = r.car('x')!;
+    place(r, p, U(r, STRAIGHT), 1, 0);
+    run(r, { p: AWAY }, 0.2);
+    place(r, x, U(r, STRAIGHT) - 0.4, 1, 0); x.stallT = 0;   // x drove into p's spot and has just stopped there
+    expect(r.stallTrapped(x)).toBe(false);
+    const t0 = r.raceTime;
+    let rejoinedAt = -1;
+    const ev = run(r, { p: NONE, x: NONE }, 4, () => { if (rejoinedAt < 0 && !p.away) rejoinedAt = r.raceTime - t0; });
+    expect(recov(ev)).toEqual([{ type: 'recover', car: 'x' }]);
+    expect(rejoinedAt).toBeGreaterThan(2.9);
+    expect(rejoinedAt).toBeLessThan(3.1);
+    expect(p).toMatchObject({ mode: 'race', away: false });
   });
 
   it('a car closing fast from behind keeps it out of traffic until it is past: the return never hands it a stopped car', () => {

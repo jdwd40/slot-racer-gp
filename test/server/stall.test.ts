@@ -6,7 +6,7 @@
 // (harness.ts), plus runs over real WebSockets with the browser's NetSession, which keeps no message history.
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import WebSocket from 'ws';
-import type { Car, RaceSnapshot, WireEvent } from '../../src/race';
+import { STALL, type Car, type RaceSnapshot, type WireEvent } from '../../src/race';
 import type { Config } from '../../server/config';
 import { LINK_AWAY_MS, type Room } from '../../server/room';
 import type { ServerMsg } from '../../src/net/protocol';
@@ -201,7 +201,7 @@ function awayScenario(outage: Outage, holdMs: number, over: Partial<Config> = {}
   const at = (): At => { const x = me(); return { u: x.u, crossed: x.crossed, lapsDone: x.lapsDone, lapValid: x.lapValid, mode: x.mode, raceTime: race.raceTime }; };
   let phase: 'drive' | 'lift' | 'out' | 'back' = 'drive';
   let cut = null as At | null, back = null as At | null, cutAt = -1, backAt = -1;
-  const during: { wall: number; away: boolean; snapAway: boolean; mirrorAway: boolean; stallT: number; u: number }[] = [];
+  const during: { wall: number; away: boolean; snapAway: boolean; mirrorAway: boolean; stallT: number; u: number; v: number }[] = [];
   let maxStallBefore = 0;
   h.advance(900_000, 50, () => {
     if (room.state !== 'race') return;
@@ -226,7 +226,7 @@ function awayScenario(outage: Outage, holdMs: number, over: Partial<Config> = {}
       const s = peers[1].lastSnap()!;
       during.push({
         wall: h.now - cutAt, away: room.isAway(ids[0], h.now), snapAway: s.cars.find((x) => x.id === ids[0])!.away === true,
-        mirrorAway: c0.away, stallT: c0.stallT, u: c0.u,
+        mirrorAway: c0.away, stallT: c0.stallT, u: c0.u, v: c0.v,
       });
     }
     if (phase === 'lift') maxStallBefore = Math.max(maxStallBefore, c0.stallT);
@@ -260,8 +260,13 @@ describe('a driver whose link is down is held, not recovered (#74)', () => {
     expect(during.length).toBeGreaterThan(150);
     expect(during.every((x) => x.away)).toBe(true);
     // (the race core reads it from the next step on: the first sample is taken before the tick that follows the drop)
-    expect(during.slice(1).every((x) => x.mirrorAway && x.stallT === 0)).toBe(true);
-    expect(during.slice(2).every((x) => x.snapAway)).toBe(true);
+    expect(during.slice(1).every((x) => x.stallT === 0)).toBe(true);
+    // it stays in traffic while it rolls, and is held out of traffic from the moment it has stopped, for the rest of the outage
+    const heldFrom = during.findIndex((x) => x.mirrorAway);
+    expect(heldFrom).toBeGreaterThan(0);
+    expect(during.slice(0, heldFrom).every((x) => x.v >= STALL.stopV - 0.2)).toBe(true);
+    expect(during.slice(heldFrom).every((x) => x.mirrorAway && Math.abs(x.v) < STALL.stopV)).toBe(true);
+    expect(during.slice(heldFrom + 2).every((x) => x.snapAway)).toBe(true);
     // the race core did not move it back: it only rolled to a stop, forward, on the same lap
     expect(back!.mode).toBe('race');
     expect(back!.u).toBeGreaterThanOrEqual(cut.u);
@@ -311,7 +316,10 @@ describe('a driver whose link is down is held, not recovered (#74)', () => {
     // held until the grace ran out, then the seat was dropped: retired from that moment on
     const held = during.filter((x) => x.wall <= graceMs);
     expect(held.every((x) => x.away)).toBe(true);
-    expect(held.slice(1).every((x) => x.mirrorAway && x.stallT === 0)).toBe(true);
+    expect(held.slice(1).every((x) => x.stallT === 0)).toBe(true);
+    const heldFrom = held.findIndex((x) => x.mirrorAway);
+    expect(heldFrom).toBeGreaterThan(0);
+    expect(held.slice(heldFrom).every((x) => x.mirrorAway)).toBe(true);
     const r = room.race!;
     const car = r.car(ids[0])!;
     expect(car).toMatchObject({ status: 'dnf', dnfReason: 'retired', retire: 'parked', mode: 'off', away: false });
@@ -321,6 +329,81 @@ describe('a driver whose link is down is held, not recovered (#74)', () => {
     const after = during.filter((x) => x.wall > graceMs + 100);
     expect(after.length).toBeGreaterThan(0);
     expect(after.every((x) => !x.away)).toBe(true);
+  });
+
+  it('a half-open link silent for longer than graceS ends like a closed one: the socket is closed, the car retired (DNF) and parked', () => {
+    const s = awayScenario('silent', Infinity);
+    const { room, ids, during } = s;
+    const graceMs = s.h.cfg.graceS * 1000;
+    expect(s.rec).toEqual([]);
+    expect(s.peers[0].closed).toEqual({ code: 4000, reason: 'no controls' });
+    const r = room.race!;
+    expect(r.car(ids[0])!).toMatchObject({ status: 'dnf', dnfReason: 'retired', retire: 'parked', mode: 'off', away: false });
+    expect(room.result!.classification!.find((x) => x.id === ids[0])).toMatchObject({ status: 'dnf', dnfReason: 'retired' });
+    // held as away until the window ran out, then gone; the seat cannot be resumed
+    expect(during.filter((x) => x.wall > LINK_AWAY_MS + 100 && x.wall <= graceMs - 100).every((x) => x.away)).toBe(true);
+    expect(during.filter((x) => x.wall > graceMs + 100).every((x) => !x.away)).toBe(true);
+    expect(s.h.mgr.resume(new FakePeer(), '9', room.id, ids[0], 'x', null)).toMatchObject({ ok: false, code: 'expired' });
+    expect(s.h.log.lines.some((l) => l.includes('room.grace_expired') && l.includes('"silent":true'))).toBe(true);
+  });
+
+  it('the half-open window boundary, on the server clock: kept at exactly graceS of silence, retired 1 tick later; a latched breach is a DQ', () => {
+    for (const breach of [false, true]) {
+      const h = harness({ graceS: 20 }, 4242);
+      const p0 = new FakePeer(), p1 = new FakePeer();
+      const c = h.mgr.create(p0, { name: 'P0', accountId: null, mode: 'multiplayer', settings: { track: 'circuit-1' } });
+      if (!c.ok) throw new Error(c.code);
+      const j = h.mgr.join(p1, '10.0.0.1', { code: c.room.code, name: 'P1', accountId: null });
+      if (!j.ok) throw new Error(j.code);
+      const room = c.room, ids = [c.participant, j.participant];
+      room.handle(ids[1], { t: 'ready', ready: true }, h.now); room.handle(ids[0], { t: 'start' }, h.now);
+      let n = 0;
+      const beat = (who: string[]) => () => { n++; for (const id of who) room.handle(id, { t: 'ctl', seq: n, up: false, down: false }, h.now); };
+      h.advance(2000, 50, beat(ids));
+      if (breach) room.race!.car(ids[0])!.svcBreach = 'fuel';
+      beat(ids)();
+      const lastCtl = h.now;
+      h.advance(h.cfg.graceS * 1000, 50, beat([ids[1]]));
+      expect(h.now - lastCtl).toBe(h.cfg.graceS * 1000);
+      expect(room.participant(ids[0])).toMatchObject({ left: false });
+      expect(p0.closed).toBe(null);
+      expect(room.isAway(ids[0])).toBe(true);
+      h.advance(50, 50, beat([ids[1]]));
+      expect(room.participant(ids[0])).toMatchObject({ left: true, peer: null });
+      expect(p0.closed).toMatchObject({ code: 4000 });
+      expect(room.race!.car(ids[0])!).toMatchObject(breach ? { status: 'dq', dqReason: 'deadline' } : { status: 'dnf', dnfReason: 'retired' });
+      // the connected seat that keeps sending is untouched
+      expect(room.participant(ids[1])).toMatchObject({ left: false });
+      expect(room.race!.car(ids[1])!.status).toBe('running');
+    }
+  });
+
+  it('a server stall is not a client silence: a pump 3 s late marks no live seat away, while one already silent before it still is', () => {
+    const h = harness({ graceS: 20 }, 4242);
+    const peers = [new FakePeer(), new FakePeer(), new FakePeer()];
+    const c = h.mgr.create(peers[0], { name: 'P0', accountId: null, mode: 'multiplayer', settings: { track: 'circuit-1' } });
+    if (!c.ok) throw new Error(c.code);
+    const ids = [c.participant];
+    for (const k of [1, 2]) { const j = h.mgr.join(peers[k], `10.0.0.${k}`, { code: c.room.code, name: `P${k}`, accountId: null }); if (!j.ok) throw new Error(j.code); ids.push(j.participant); }
+    const room = c.room;
+    for (const id of ids.slice(1)) room.handle(id, { t: 'ready', ready: true }, h.now);
+    room.handle(ids[0], { t: 'start' }, h.now);
+    let n = 0;
+    const beat = (who: string[]) => () => { n++; for (const id of who) room.handle(id, { t: 'ctl', seq: n, up: false, down: false }, h.now); };
+    h.advance(6000, 50, beat(ids));
+    // seat 2 goes quiet 1.4 s before the stall: late, but not yet away
+    h.advance(1400, 50, beat([ids[0], ids[1]]));
+    expect(ids.map((id) => room.isAway(id))).toEqual([false, false, false]);
+    // the server's event loop stalls for 3 s: the next pump comes late, before any queued controls are read
+    h.set(h.now + 3000);
+    h.mgr.tick();
+    expect(room.isAway(ids[0])).toBe(false);
+    expect(room.isAway(ids[1])).toBe(false);
+    expect(room.isAway(ids[2])).toBe(true);    // its own 1.4 s of silence plus the allowed pump gap: over LINK_AWAY_MS
+    // the same 3 s of real client silence with the server running normally is away
+    h.advance(3000, 50, beat([ids[1]]));
+    expect(room.isAway(ids[0])).toBe(true);
+    expect(room.isAway(ids[1])).toBe(false);
   });
 
   it('the publication rate never changes it: 5 Hz and 60 Hz hold the same car the same way, with the same race and result', () => {
