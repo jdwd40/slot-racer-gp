@@ -32,7 +32,7 @@ The title screen names them separately:
 | `not_found` | No open room has that code |
 | `started` | That race has already started and its grid is locked |
 | `expired` | That seat has expired and cannot be taken back |
-| `protocol` (or a health-check mismatch) | This page is out of date for the game server: reload |
+| `protocol` (or a health-check mismatch) | A newer server: a new version is available, Reload. An older server (#80): online play is temporarily unavailable, Retry |
 | `unavailable`, `overloaded`, `rate` | Busy / too many attempts: try again in a minute |
 | no connection | Could not reach the game server. Local play still works |
 
@@ -79,7 +79,8 @@ The title screen names them separately:
     - While reconnecting, the lobby shows this seat as Reconnecting and Not ready, and Ready / Start wait for the resume.
     - The page's own suspension is not counted against the socket. A keepalive tick that runs more than 3 s late (a backgrounded tab's throttled timers, a frozen iOS page, a stalled machine), or the page becoming visible again, restarts the silence window and sends a ping at once. A socket that is really dead is then caught one window later and resumed as usual.
   - After expiry the browser says the seat expired and forgets it. A resume refused after a dropped link (`expired`, `not_found`) shows *You were disconnected from room CODE* on the online menu, and adds *Your car was retired from that race* when the car was still racing. A join with the code is then refused by the server (`started`), so an expired seat can never come back as a new driver.
-  - **Outdated page (#67).** When `/api/health` reports a newer protocol than this page's, the title says *A new version of Slot Rush is available. Reload to play online.* (`net.outdated`) with a **Reload** button, instead of hiding online play. The same notice replaces the online menu when a create, join or resume is refused with `protocol`, and when a reconnect is refused that way because the server was upgraded mid-session (the session ends `outdated` after one attempt). An older server (the static client released first) shows the ordinary *unavailable* note, since reloading would not help. Tests: `test/outdated.test.ts`.
+  - **Outdated page (#67).** When `/api/health` reports a newer protocol than this page's, the title says *A new version of Slot Rush is available. Reload to play online.* (`net.outdated`) with a **Reload** button, instead of hiding online play. The same notice replaces the online menu when a create, join or resume is refused with `protocol`, and when a reconnect is refused that way because the server was upgraded mid-session (the session ends `outdated` after one attempt). Tests: `test/outdated.test.ts`.
+  - **Older server (#80).** When the server speaks an *older* protocol (it was rolled back after a protocol bump, or the static client was released before the server was upgraded), reloading would not help: the title says *Online play is temporarily unavailable — try again shortly.* (`net.behind`) with a **Retry** button (`#o-retry`) that re-probes `/api/health` and, once the server matches again, shows **Online** as usual without a page reload. While the title shows this notice it also re-probes on its own every 45 s (`RECHECK_MS`), at most 20 times per visit (`RECHECK_MAX`), one probe at a time, and stops when the title is left or the answer changes; a re-check that still says older does not redraw the title. A refused hello (create, join, resume) or a refused reconnect (session end `outdated`) does not tell the page the server's protocol, so the page re-probes `/api/health` to decide: only a server reporting a *newer* protocol gives the Reload notice; an older one, a failing probe or a matching one (the server changed again meanwhile) gives the Retry notice. The page never says *a new version is available* when the server is older. Client only: no protocol or server change. Tests: `test/outdated.test.ts` (fake timers for the re-check).
   - **Reload.** The seat (room, participant, token, code) is kept in `sessionStorage` for this tab only, so after a reload the title offers **Rejoin room CODE** within the grace period. The token never goes into a URL, log or the page.
 - **Results.**
   - When this driver is done and others are still racing, a **Classification pending** card lists each car as finished (time), still racing (lap) or DQ / DNF. It gives no positions and no estimated times. **Watch the race** returns to the live view.
@@ -100,7 +101,7 @@ The title screen names them separately:
 | `src/net/mirror.ts` | `mirrorRace`, `applySnapshot`, `localEvent`, `SnapBuffer` |
 | `src/net/snapwire.ts` | Snapshot wire format (#67): field tables with precision, `SnapEncoder` (server), `SnapDecoder` (client) |
 | `test/server/snapwire.test.ts` | Whole-race round trip, mirror agreement, sizes, keyframe and resume recovery, pinned result digest, protocol version |
-| `test/outdated.test.ts` | Outdated page: newer health protocol, refused hello, refused reconnect, notice and Reload button |
+| `test/outdated.test.ts` | Outdated page: newer health protocol, refused hello, refused reconnect, notice and Reload button; older server (#80): Retry notice, Retry recovers, refused hello/reconnect re-probes health, bounded title re-check |
 | `src/net/client.ts` | Protocol client. It ignores a replaced socket's late close or messages, which could otherwise reject a reconnect's request, and runs the keepalive ping and receive watchdog |
 | `src/main.ts` | Online menu, lobby, race wiring, race menu, pending and final standings, banner |
 | `src/input.ts` | `DrivingInput.onChange`, so online pedals are sent without waiting for a frame |
@@ -130,4 +131,4 @@ After step 11 of the [runbook](online-server.md#production-activation-runbook-ow
 
 Real phone and tablet play has not been tested by this work (see the evidence). These steps are the first physical-device check.
 
-**Rollback** is unchanged: remove `VITE_ONLINE` from the build (the title shows local play only), and/or follow the server rollback in the runbook.
+**Rollback** is unchanged: remove `VITE_ONLINE` from the build (the title shows local play only), and/or follow the server rollback in the runbook. After a server rollback across a protocol bump, pages on the newer bundle show *Online play is temporarily unavailable — try again shortly.* with **Retry**, and recover by themselves once the server and static site agree again (*Older server (#80)* above).

@@ -8,7 +8,8 @@ import type { ActionType, DriverId, Standing } from '../race';
 export type Conn = 'offline' | 'connecting' | 'connected' | 'reconnecting';
 /**
  * Why a session ended for good. `expired`: the seat can no longer be resumed (it is never re-claimed as a new driver).
- * `outdated`: a reconnect's hello was refused for its protocol (the server was upgraded meanwhile): this page must reload.
+ * `outdated`: a reconnect's hello was refused for its protocol (the server was upgraded or rolled back meanwhile; the page
+ * asks /api/health which, #80).
  */
 export type EndReason = 'left' | 'expired' | 'closed' | 'shutdown' | 'superseded' | 'lost' | 'outdated';
 
