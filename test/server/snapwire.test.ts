@@ -8,7 +8,7 @@ import { Race, type CarSnapshot, type RaceSnapshot } from '../../src/race';
 import { STEP } from '../../src/timing';
 import { applySnapshot, mirrorRace } from '../../src/net/mirror';
 import { PROTOCOL_VERSION, RULES_VERSION, type ServerMsg } from '../../src/net/protocol';
-import { CAR_DYNAMIC, CAR_STATIC, DELETED, KEYFRAME_MS, RACE_FIELDS, SnapDecoder, SnapEncoder, wireRounded, type Precision, type WireStateMsg } from '../../src/net/snapwire';
+import { CAR_DYNAMIC, CAR_STATIC, DELETED, KEYFRAME_MS, RACE_FIELDS, SnapDecoder, SnapEncoder, decimalsOf, wireRounded, type Precision, type WireStateMsg } from '../../src/net/snapwire';
 import { drive } from './bot';
 import { BotClient, FakePeer, harness } from './harness';
 
@@ -41,13 +41,22 @@ function recordRace(seed = 11, track = 'circuit-3') {
 }
 
 const wire = (tick: number, frame: object, ev: unknown[] = []): WireStateMsg & { ev: unknown[] } => JSON.parse(JSON.stringify({ t: 'state', tick, now: 0, lagMs: 0, ev, ...frame })) as WireStateMsg & { ev: unknown[] };
-/** within the declared rounding of each field: half a unit of the last kept decimal (exact fields equal) */
+/**
+ * within the declared rounding of each field: half a unit of the last kept decimal (exact fields equal); a keepPositive
+ * field (#79) may also be raised to one whole unit when the full value is above 0 but under half a unit
+ */
 function close(full: unknown, got: unknown, p: Precision, path: string): void {
   if (p === 'exact' || typeof full !== 'number') {
     if (full !== null && typeof full === 'object') { for (const k of Object.keys(full)) close((full as Record<string, unknown>)[k], (got as Record<string, unknown>)[k], p, `${path}.${k}`); return; }
     if (p === 'exact') { expect(got, path).toEqual(full); return; }
   }
-  if (typeof full === 'number') expect(Math.abs((got as number) - full), path).toBeLessThanOrEqual(0.5 * 10 ** -(p as number) + 1e-9);
+  if (typeof full === 'number') {
+    const unit = 10 ** -decimalsOf(p)!;
+    const raised = typeof p === 'object' && p.keepPositive && full > 0 && full < unit / 2;
+    if (raised) expect(got, path).toBe(unit);
+    else expect(Math.abs((got as number) - full), path).toBeLessThanOrEqual(0.5 * unit + 1e-9);
+    if (typeof p === 'object' && p.keepPositive) expect((got as number) > 0, path).toBe(full > 0);
+  }
   else expect(got, path).toEqual(full);
 }
 
@@ -209,6 +218,81 @@ describe('snapshot wire format v2 (#67)', () => {
     const avg1 = v1 / frames.length, avg2 = v2 / frames.length;
     expect(avg2).toBeLessThan(1500);
     expect(avg2 / avg1).toBeLessThan(0.3);   // at least 70% smaller
+  });
+});
+
+describe('a non-empty tank is never sent as empty (#79)', () => {
+  const base = recordRace(23, 'circuit-1')[300].snap;
+  const withFuel = (fuel: number, k = 0): RaceSnapshot => { const s = JSON.parse(JSON.stringify(base)) as RaceSnapshot; s.cars[1].fuel = fuel; s.t += k; return s; };
+  /** main's (and protocol 2's) plain 3-decimal rounding, as the encoder applied it to fuel before #79 */
+  const plain3 = (x: number): number => Math.round(x * 1000) / 1000 || 0;
+
+  it('fuel above 0 decodes above 0 (0.0003, 1e-9, just under half a step); exactly 0 decodes as 0', () => {
+    for (const fuel of [0.0003, 1e-9, Number.MIN_VALUE, 0.00049999]) {
+      const got = new SnapDecoder().decode(wire(1, new SnapEncoder('r').next(withFuel(fuel), 1, 0)))!;
+      expect(got.cars[1].fuel, String(fuel)).toBe(0.001);
+      expect(wireRounded(withFuel(fuel)).cars[1].fuel).toBe(0.001);
+    }
+    const empty = new SnapDecoder().decode(wire(1, new SnapEncoder('r').next(withFuel(0), 1, 0)))!;
+    expect(empty.cars[1].fuel).toBe(0);
+    expect(Object.is(empty.cars[1].fuel, 0)).toBe(true);
+    expect(CAR_DYNAMIC.fuel).toEqual({ dp: 3, keepPositive: true });
+  });
+
+  it('every value of at least half a step travels exactly as before #79 (plain 3-decimal rounding)', () => {
+    const xs = [0.0005, 0.00050001, 0.0009, 0.0011, 0.0014999, 0.0015, 0.123456, 0.2, 0.5004999, 0.9994, 0.9995, 0.99999, 1];
+    for (let i = 0; i <= 20_000; i++) xs.push(0.0005 + (i / 20_000) * 0.9995);
+    for (const x of xs) {
+      const got = wireRounded(withFuel(x)).cars[1].fuel;
+      expect(got, String(x)).toBe(plain3(x));
+      expect(got).toBeGreaterThan(0);
+    }
+    // the other 3-decimal fields keep plain rounding: a tiny positive speed or pedal still goes as 0
+    const s = withFuel(0.5); s.cars[1].throttle = 0.0003; s.cars[1].v = 0.0002;
+    expect(wireRounded(s).cars[1]).toMatchObject({ throttle: 0, v: 0, fuel: 0.5 });
+  });
+
+  it('wire-compatible: the frame for 0.0003 is byte for byte the frame protocol 2 has always sent for 0.001, and decodes as one', () => {
+    // the encoder only picks a different number; the decoder (SnapDecoder, unchanged by #79) reads plain JSON numbers, so a
+    // page loaded before #79 decodes the new server's frames exactly as it decodes an ordinary 0.1% tank
+    const fNew = new SnapEncoder('r').next(withFuel(0.0003), 1, 0);
+    const fOld = new SnapEncoder('r').next(withFuel(0.001), 1, 0);   // 0.001 is unchanged by #79: what main sent too
+    expect(JSON.stringify(fNew)).toBe(JSON.stringify(fOld));
+    expect((fNew.snap.cars[1] as { fuel: number }).fuel).toBe(plain3(0.001));
+    // and as a delta: the same bytes as a delta to 0.001
+    const encN = new SnapEncoder('r'), encO = new SnapEncoder('r');
+    encN.next(withFuel(0.01), 1, 0); encO.next(withFuel(0.01), 1, 0);
+    const dNew = encN.next(withFuel(0.0003, 1), 2, 50), dOld = encO.next(withFuel(0.001, 1), 2, 50);
+    expect(JSON.stringify(dNew)).toBe(JSON.stringify(dOld));
+    expect(dNew.snap.cars[1]).toEqual({ fuel: 0.001 });
+    expect(PROTOCOL_VERSION).toBe(2);
+  });
+
+  it('a car running dry over consecutive deltas: no flapping, above 0 until the tank is empty, then 0 on the mirror', () => {
+    const enc = new SnapEncoder('r', 1e9), dec = new SnapDecoder();   // no keyframe after the first: deltas only
+    const fuels = [0.0031, 0.0024, 0.0016, 0.0012, 0.0008, 0.00051, 0.0005, 0.00049, 0.0003, 0.0001, 1e-7, 0, 0, 0];
+    const m = mirrorRace(JSON.parse(JSON.stringify(wireRounded(withFuel(fuels[0])))) as RaceSnapshot);
+    const id = base.cars[1].id;
+    const sent: (number | undefined)[] = [], seen: number[] = [];
+    fuels.forEach((fuel, i) => {
+      const s = withFuel(fuel, i * 0.05);
+      const f = enc.next(s, i + 1, i * 50);
+      if (i > 0) expect(f.key).toBeUndefined();
+      sent.push((f.snap.cars[1] as { fuel?: number }).fuel);
+      const got = dec.decode(wire(i + 1, f))!;
+      expect(got).toEqual(JSON.parse(JSON.stringify(wireRounded(s))));
+      applySnapshot(m, got);
+      const c = m.car(id)!;
+      seen.push(c.fuel);
+      expect(c.fuel > 0, `fuel ${fuel}`).toBe(fuel > 0);
+      // the mirror's own empty-tank rules agree with the server's car while there is fuel left
+      expect([m.phase, c.mode, c.change, c.pitHold, c.sgCtl]).toEqual(['racing', 'race', null, false, false]);
+      expect(m.reverseBlock(c) === 'fuel', `fuel ${fuel}`).toBe(fuel === 0);
+    });
+    expect(seen).toEqual([0.003, 0.002, 0.002, 0.001, 0.001, 0.001, 0.001, 0.001, 0.001, 0.001, 0.001, 0, 0, 0]);
+    // a delta names fuel only when its wire value changes: it falls monotonically, never back up, and 0 is sent once
+    expect(sent).toEqual([0.003, 0.002, undefined, 0.001, undefined, undefined, undefined, undefined, undefined, undefined, undefined, 0, undefined, undefined]);
+    expect(dec.stats).toMatchObject({ gaps: 0, noStatic: 0 });
   });
 });
 

@@ -5,7 +5,9 @@
 // - Every other field is listed in RACE_FIELDS / CAR_DYNAMIC with its wire precision. A keyframe carries all of them; a
 //   delta carries only the keys whose encoded value changed since the previous broadcast, which it names by tick (`base`).
 // - Continuously changing floats are rounded on the wire (see the tables); everything else travels exactly. Rounding is
-//   applied to a copy made for the wire, after the step: the simulation never reads it, so results cannot change.
+//   applied to a copy made for the wire, after the step: the simulation never reads it, so results cannot change. `fuel`
+//   keeps a non-empty tank non-empty (#79): a value above 0 that would round to 0 goes as the smallest step (0.001), so
+//   only a truly empty tank decodes as 0. That is a choice of number, not of format: any v2 decoder reads it unchanged.
 // - A keyframe goes out at least every KEYFRAME_MS, so a client that lost a delta recovers within a second.
 // The decoder rebuilds the full RaceSnapshot (rounded as declared), so mirror.ts and every consumer see the same shape as
 // before. Plain data only: the browser bundle, the server and headless tools all import this. docs/online-server.md.
@@ -15,8 +17,14 @@ import type { CarSnapshot, RaceSnapshot } from '../race';
  * How a field travels. 'exact': as the snapshot has it (strings, enums, booleans, integers, and floats that change only now
  * and then, such as lap times, so the HUD shows exactly the server's value). A number: decimals kept on the wire for that
  * float, or for every number inside that object. Rounded values are within half a unit of the last kept decimal.
+ * `{ dp, keepPositive: true }` (#79): the same rounding, except that a value above 0 that would round to 0 is sent as the
+ * smallest step (10^-dp), so "above 0" survives the wire (a non-empty tank is never read as empty); exactly 0 stays 0 and
+ * every value of at least half a step rounds as plain `dp`. Within one step of the full value, never half a step off in
+ * the other direction. Only the number chosen differs: the wire form is a plain number either way.
  */
-export type Precision = 'exact' | number;
+export type Precision = 'exact' | number | { readonly dp: number; readonly keepPositive: true };
+/** Decimals a rounded precision keeps (null for 'exact'). */
+export const decimalsOf = (p: Precision): number | null => (p === 'exact' ? null : typeof p === 'number' ? p : p.dp);
 
 /** Per-car fields fixed for the whole race: sent once per race (first state, resume state). */
 export const CAR_STATIC = ['id', 'slot', 'control', 'name', 'color', 'num', 'bay'] as const satisfies readonly (keyof CarSnapshot)[];
@@ -27,13 +35,14 @@ export type StaticCar = Pick<CarSnapshot, StaticKey>;
  * Every other per-car field, in snapshot order, with its wire precision. `satisfies` makes a field added to CarSnapshot a
  * type error here until it is listed: adding a dynamic field (optional or not) is this one line plus mirror.ts's CAR_FIELDS.
  * 3 decimals: 1 mm of position, distance and lateral offset (track units are metres), 1 mm/s of speed, 1 mrad of angle,
- * 0.1% of pedal and of the fuel tank. These change nearly every step; the rest change a few times a lap.
+ * 0.1% of pedal and of the fuel tank. These change nearly every step; the rest change a few times a lap. `fuel` keeps a
+ * non-empty tank above 0 (#79): a tank under 0.05% goes as 0.1%, not as an empty 0.
  */
 export const CAR_DYNAMIC = {
   status: 'exact', dqReason: 'exact', dnfReason: 'exact', finished: 'exact',
   mode: 'exact', u: 3, v: 3, d: 3, laneSide: 3, change: 'exact',
   x: 3, y: 3, z: 3, h: 3, roll: 3, pitch: 3, yawOff: 3, wobble: 3, off: 3,
-  throttle: 3, brake: 3, fuel: 3,
+  throttle: 3, brake: 3, fuel: { dp: 3, keepPositive: true },
   crossed: 'exact', lapsDone: 'exact', lastLap: 'exact', bestLap: 'exact', lapStartT: 'exact', lapValid: 'exact', finishTime: 'exact', pitStops: 'exact',
   offences: 'exact', sgOwed: 'exact', sgServed: 'exact', sgServing: 'exact', timePen: 'exact', svcBreach: 'exact',
   laneReq: 'exact', pitReq: 'exact', fuelReq: 'exact', fuelDue: 'exact', sgDue: 'exact', sgDeferred: 'exact', routeHold: 'exact', laneOverride: 'exact',
@@ -82,9 +91,18 @@ const roundTo = (x: number, dp: number): number => {
   // `|| 0` turns -0 into 0: JSON writes both as 0, so the encoder's baseline must not keep a sign the client never sees
   return Math.round(x * f) / f || 0;
 };
+/**
+ * keepPositive (#79): a value above 0 that rounds to 0 goes as the smallest step instead. A monotone function of the value,
+ * like roundTo, so a steadily falling value never flaps on the wire, and exactly 0 (or anything not above 0) is untouched,
+ * so a tank that really runs dry is sent as 0 in the next state.
+ */
+const roundKeepPositive = (x: number, dp: number): number => {
+  const r = roundTo(x, dp);
+  return r === 0 && x > 0 ? 10 ** -dp : r;
+};
 /** A value as it goes on the wire: numbers rounded per the precision, objects copied (never shared with the race). */
 function wireValue(v: unknown, p: Precision): unknown {
-  if (typeof v === 'number') return p === 'exact' ? v : roundTo(v, p);
+  if (typeof v === 'number') return p === 'exact' ? v : typeof p === 'number' ? roundTo(v, p) : p.keepPositive ? roundKeepPositive(v, p.dp) : roundTo(v, p.dp);
   if (v === null || typeof v !== 'object') return v;
   if (Array.isArray(v)) return v.map((x) => wireValue(x, p));
   const out: Fields = {};
