@@ -334,6 +334,8 @@ describe('the room server streams v2 states', () => {
     // digest covers the whole envelope except its random ids and the protocol number; pinned on main before #67 (1b2f865, rules
     // race-core-2026.11.3: 00ce7abd…acfc0). Re-pinned for #74, whose only change here is the rules version string inside the
     // envelope: both seats send controls every tick, so neither is ever away, and with 11.3 in place the old digest still results
+    // (44a65380…5b591 for 11.4). Re-pinned for #76 (rules race-core-2026.11.5) on the same grounds: with 11.4 in place and #76's
+    // race core the 11.4 digest still results, so the version string is the only change
     const run = () => {
       const h = harness({}, 4242);
       const peers = [new FakePeer(), new FakePeer()];
@@ -352,7 +354,7 @@ describe('the room server streams v2 states', () => {
     };
     const a = run(), b = run();
     expect(b).toEqual(a);
-    expect(a).toEqual({ digest: '44a653808750b6fadd9275fe6e0d30dc185f7dfdea1870927cd914803765b591', outcome: 'completed', ticks: 18031 });
+    expect(a).toEqual({ digest: 'ff72491715431e3d8610393c39164f7b8ec5c421b764eb590cca650eebfebca6', outcome: 'completed', ticks: 18031 });
   });
 });
 
