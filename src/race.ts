@@ -737,13 +737,37 @@ export class Race {
    * Last chance (#65): a compulsory stop is due on the lap being raced and missing this lap's entrance would latch the breach
    * (a DQ at the flag): a committed fuel stop, or a stop-and-go whose one deferral is used or that is due on the final lap.
    * Read-only, from fields every online snapshot carries, so the mirror's HUD shows the same chip offline and online.
+   * Off while the car is already in the pits on a visit that will pay that debt (#81): it is no longer about to miss it.
    */
   lastChance(c: Car): boolean {
     // a retired (dnf) or disqualified car is out of the race: nothing is due any more, so no chip and no message
     if (this.practice || c.finished || c.status !== 'running' || c.svcBreach) return false;
     const lap = Math.max(1, c.crossed);
-    if (c.fuelDue > 0 && c.fuelDue === lap) return true;
-    return c.sgOwed > 0 && c.sgDue === lap && (c.sgDeferred || lap >= LAPS);
+    if (c.fuelDue > 0 && c.fuelDue === lap && !this.fuelVisit(c)) return true;
+    return c.sgOwed > 0 && c.sgDue === lap && (c.sgDeferred || lap >= LAPS) && !this.sgVisit(c);
+  }
+
+  /**
+   * The car is in the pits on a visit that will serve its committed fuel stop (#81): turning into a bay, standing in one on a
+   * real visit (a tow or a stopped-on-track recovery serves no fuel stop), or a fuel visit in the pit lane that is still short
+   * of its own bay's turn-in window with the fuel to get there (one that runs dry is towed, and a tow serves nothing).
+   * Read by the HUD's last-chance state only; it decides nothing.
+   */
+  fuelVisit(c: Car): boolean {
+    if (c.mode === 'bayIn') return true;
+    if (c.mode === 'service') return !c.towSvc;
+    return c.mode === 'pitlane' && c.pitFuel && !c.serviced && this.pitReach(c, this.T.BAYS[c.bayHome], this.T.BAY_HALF);
+  }
+
+  /** The car is in the pit lane on a visit that will serve its stop-and-go (#81): short of the end of the box, fuel to reach it. */
+  sgVisit(c: Car): boolean {
+    return c.mode === 'pitlane' && this.pitReach(c, SG_STOP, this.T.PEN_HALF);
+  }
+
+  /** A pit-lane car is not past `at` by more than `half` and its tank covers the way there at the highest burn (#81). */
+  private pitReach(c: Car, at: number, half: number): boolean {
+    const gap = this.T.gapS(this.s(c), at);
+    return gap > -half && c.fuel > Math.max(0, gap) * this.fuelRate() * 1.2;
   }
 
   /** Another car is standing in (or rolling through) the stop-and-go box. */

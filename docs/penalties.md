@@ -40,6 +40,8 @@ A compulsory stop is on its **last chance** (`Race.lastChance()`) when it is due
 
 While it holds, the HUD shows a red blinking `⚠ PIT THIS LAP — or DQ` chip (its blink never fades below 80 % opacity, unlike other blinking chips, so it stays readable on phones), first in the chip row, on the keyboard and touch HUDs alike. It goes as soon as the stop is served, and is replaced by `DEADLINE MISSED · DQ AT FLAG` if the breach is latched.
 
+It also clears once the car is in the pits on a visit that will serve the debt (#81): for a fuel stop, in the pit lane short of its own bay with the fuel to reach it, turning in, or standing in a bay (not after a tow or a stopped-on-track recovery); for a stop-and-go, in the pit lane short of the end of the penalty box with the fuel to reach it. It comes back if the car leaves that visit with the debt still due, and DQ timing is unchanged.
+
 Every path to a missed-deadline DQ gets a warning that names the DQ on the due lap, at the timing line, before the entrance that decides it. That is the length of the lap minus 20 m, about 13 s at race pace on Clubman Park:
 
 | Path | Before the due lap | At the line starting the due lap | Space on the due lap | At the line ending it, if missed |
