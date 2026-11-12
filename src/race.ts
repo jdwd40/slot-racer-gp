@@ -266,6 +266,8 @@ export interface Car {
   offences: number; sgOwed: number; sgServed: number; sgServing: boolean; timePen: number;
   /** immunity timers: fresh respawn/pit exit/start, recently hit from behind, recently changed lane */
   graceT: number; pushedT: number; cutT: number;
+  /** the hit that set pushedT was itself waived (grace / re-slot, #76): the onward contact it causes is waived the same way */
+  pushedFree: boolean;
   // AI defending state
   threatIdx: number; reactT: number; defendOk: boolean; defendCooldown: number; defendPending: boolean; defendSw: number;
   // render pose (x, y on the mat; z height; roll/pitch from banking and ramps)
@@ -552,7 +554,7 @@ export class Race {
         skill: P.skill, lapse: 0, mistakeT: this.rnd(P.mistakeEvery[0], P.mistakeEvery[1]), pitPlan: false, refuelTarget: 1, changeCooldown: 0,
         lowFuelWarned: false, serviced: false, persona: P,
         offences: 0, sgOwed: 0, sgServed: 0, sgServing: false, timePen: 0,
-        graceT: 0, pushedT: 0, cutT: 0,
+        graceT: 0, pushedT: 0, pushedFree: false, cutT: 0,
         threatIdx: -1, reactT: 0, defendOk: false, defendCooldown: 0, defendPending: false, defendSw: -1,
         x: 0, y: 0, h: 0, z: 0, roll: 0, pitch: 0, bumpT: 0,
         revOn: false, revHoldT: 0, revLatch: false, revMark: null,
@@ -1662,7 +1664,8 @@ export class Race {
    *   (`penetrated`, AWAY_REJOIN), and gets its pedals back only then, so the driver can never drive it through anything. A
    *   car merely touching it (bumper to bumper, as after any contact) does not delay the return. It rejoins with the same
    *   contact grace as a re-slotted car (graceT = PEN.grace): a contact involving it in that time is resolved but judged
-   *   against neither car (judge()), so the driver who was told to drive through a held car is never penalised for it.
+   *   against neither car (judge()), so the driver who was told to drive through a held car is never penalised for it, and
+   *   a car it shoves is not blamed for the onward contact either (#76).
    * - It cannot be held for ever: the penetrating car is in traffic and not trapped by a held car (stallTrapped), so it either
    *   drives on or, a stopped human car, is recovered by its own stopped-on-track count within 3 s; an AI never follows a held
    *   car and drives on. Two held cars inside each other ignore each other here, so both rejoin when both drivers are back
@@ -2020,10 +2023,17 @@ export class Race {
     if (rear.retire || front.retire) return;                               // nobody is driving a retired car, so no one is to blame
     if (Math.abs(rear.z - front.z) > 1) return;                            // different bridge levels (cannot touch anyway)
     if (rear.v < PEN.minSpeed) return;                                     // crawling / grid contact
-    if (rear.graceT > 0 || front.graceT > 0 || rear.recoverT > 0 || front.recoverT > 0) return; // respawn / pit exit / start overlaps
-    rear.lapValid = false; front.lapValid = false;                         // collision-affected laps never set records
     const pushed = rear.pushedT > 0;                                       // we were just hit from behind ourselves
-    front.pushedT = PEN.chainWindow;                                       // front may now be shoved into the next car
+    // Contact grace (respawn / re-slot, pit exit, start, an away car's rejoin #74) waives the contact for BOTH cars, as it
+    // always has: a car merging or re-slotting is never blamed for touching the car ahead, nor anyone for running into it.
+    // #76: the car it shoves is still marked as pushed, and since the shove itself was waived, so is the contact that shove
+    // causes with the next car (no offence, no voided lap), along the whole chain. Without this the shoved car carried the
+    // blame onward and the car with grace could aim it. Grace stays symmetric (not only for a car hit from behind) so the
+    // existing re-slot / pit-exit / start rules are unchanged; only the chain behind such a contact is new.
+    const free = rear.graceT > 0 || front.graceT > 0 || rear.recoverT > 0 || front.recoverT > 0 || (pushed && rear.pushedFree);
+    front.pushedT = PEN.chainWindow; front.pushedFree = free;             // front may now be shoved into the next car
+    if (free) return;
+    rear.lapValid = false; front.lapValid = false;                         // collision-affected laps never set records
     if (pushed) return;
     const cutIn = front.change !== null || front.cutT > 0;                 // front moved into our lane just now
     if (cutIn) this.offence(front, rear, 'cut'); else this.offence(rear, front, 'rear');

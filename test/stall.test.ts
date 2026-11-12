@@ -1602,3 +1602,96 @@ describe('a car held for an away driver (#74)', () => {
     expect(go(false).digest).not.toBe(one.digest);
   });
 });
+
+// ------------------------------------------------------------------------------------------------ grace chains (#76)
+// A car with contact grace (an away car's rejoin, a re-slot, a pit exit) is never judged for touching the car ahead. The car it
+// shoves must then be protected exactly as when a connected driver shoves it: not blamed for its own contact with the next
+// car. Before #76 judge() returned for the grace before marking the shoved car as pushed, so that car took the rear-end
+// offence and both front laps were voided. See docs/auto-bay.md#stopped-on-track-recovery (The return).
+describe('a car shoved by a car with contact grace (#76)', () => {
+  const offencesOf = (ev: WireEvent[], id: string): WireEvent[] => ev.filter((e) => e.type === 'offence' && (e as { car: string }).car === id);
+  /** every fresh impact judge() was asked to judge, as "rear>front" (a bump event can be suppressed by the bump cooldown) */
+  function impacts(r: Race): string[] {
+    const seen: string[] = [];
+    const judge = r.judge.bind(r);
+    r.judge = (rear: Car, front: Car, rel: number) => { seen.push(`${rear.id}>${front.id}`); judge(rear, front, rel); };
+    return seen;
+  }
+  /** middle and front stopped nose-to-tail ahead of where the rear car will be, on lane `side` from track position `s` */
+  function chain(r: Race, s: number, side: number, gap = 4): { a: Car; m: Car; f: Car } {
+    const a = r.car('a')!, m = r.car('m')!, f = r.car('f')!;
+    place(r, a, U(r, s), side, 0);
+    place(r, m, a.u + r.T.CAR_LEN + gap, side, 0);
+    place(r, f, m.u + r.T.CAR_LEN + 0.5, side, 0);
+    for (const c of r.cars) c.lapValid = true;
+    return { a, m, f };
+  }
+  /** the rear car drove into the middle one, which was shoved into the front one: both impacts were judged, in that order */
+  const expectChain = (seen: string[]) => expect(seen.slice(0, 2)).toEqual(['a>m', 'm>f']);
+  const trio = () => { const r = race([human('a'), human('m'), human('f')]); return { r, seen: impacts(r) }; };
+
+  it('an away car rejoining and driving straight in: the shoved middle car gets no offence and keeps a valid lap', () => {
+    const { r, seen } = trio();
+    const { a, m, f } = chain(r, STRAIGHT, 1);
+    run(r, { a: AWAY, m: NONE, f: NONE }, 0.5);
+    expect(a.away).toBe(true);
+    let rejoined = -1;
+    const ev = run(r, { a: UP, m: NONE, f: NONE }, PEN.grace - 0.1, () => { if (rejoined < 0 && !a.away) rejoined = r.raceTime; });
+    expect(rejoined).toBeGreaterThan(0);
+    expectChain(seen);
+    expect(offencesOf(ev, 'm')).toEqual([]);
+    expect(offencesOf(ev, 'a')).toEqual([]);   // the rejoin grace still waives the shove itself (#74)
+    expect(offencesOf(ev, 'f')).toEqual([]);
+    expect(m.lapValid).toBe(true);
+    expect(f.lapValid).toBe(true);
+    // the protection ends with the chain window: a deliberate rear-end by the middle car later is judged as usual
+    f.stallT = 0;                              // (f has stood still a while: keep the stopped-on-track rule out of this)
+    run(r, { a: BRAKE, m: NONE, f: NONE }, PEN.chainWindow + 0.05);
+    expect(m.pushedT).toBe(0);
+    expect(f.mode).toBe('race');
+    place(r, a, a.u - 20, 1, 0);
+    place(r, m, f.u - r.T.CAR_LEN - 6, 1, 12);
+    const later = run(r, { a: BRAKE, m: UP, f: NONE }, 1);
+    expect(offencesOf(later, 'm').length).toBeGreaterThanOrEqual(1);
+  });
+
+  it('a re-slotted car driving straight in: the shoved middle car gets no offence and keeps a valid lap', () => {
+    const { r, seen } = trio();
+    const { a, m, f } = chain(r, STRAIGHT, 1);
+    // de-slotted just behind the pair and about to be put back on the slot (stepOff), 1.6 m behind where it left
+    const at = a.u;
+    a.mode = 'off'; a.off = { x: a.x, y: a.y, vx: 0, vy: 0, yaw: a.h, spin: 0, t: 1.7, z: 0, vz: 0, u0: at + 1.6, lane: 1 };
+    const ev = run(r, { a: UP, m: NONE, f: NONE }, PEN.grace - 0.1);
+    expect(a.mode).toBe('race');
+    expectChain(seen);
+    expect(offencesOf(ev, 'm')).toEqual([]);
+    expect(offencesOf(ev, 'a')).toEqual([]);
+    expect(m.lapValid).toBe(true);
+    expect(f.lapValid).toBe(true);
+  });
+
+  it('a car leaving the pits driving straight in: the shoved middle car gets no offence and keeps a valid lap', () => {
+    const { r, seen } = trio();
+    const { a, m, f } = chain(r, r.T.PIT_OUT1 + 0.3, -1, 3);
+    a.mode = 'pitlane'; a.u = U(r, r.T.PIT_OUT1) - 0.3; a.d = r.T.pitD(r.s(a)); a.v = 5;
+    const ev = run(r, { a: UP, m: NONE, f: NONE }, PEN.grace - 0.1);
+    expect(a.mode).toBe('race');
+    expectChain(seen);
+    expect(offencesOf(ev, 'm')).toEqual([]);
+    expect(offencesOf(ev, 'a')).toEqual([]);
+    expect(m.lapValid).toBe(true);
+    expect(f.lapValid).toBe(true);
+  });
+
+  it('the control: a connected driver doing the same gets the offence himself, and the middle car none', () => {
+    const { r, seen } = trio();
+    const { m } = chain(r, STRAIGHT, 1);
+    const ev = run(r, { a: UP, m: NONE, f: NONE }, PEN.grace - 0.1);
+    expectChain(seen);
+    expect(offencesOf(ev, 'a').length).toBe(1);
+    expect(offencesOf(ev, 'm')).toEqual([]);
+    expect(offencesOf(ev, 'f')).toEqual([]);
+    // a judged contact voids the laps of the cars in it, so here the middle car's lap goes with the rear car's
+    expect(m.lapValid).toBe(false);
+  });
+});
