@@ -43,6 +43,9 @@ export const CAR_DYNAMIC = {
   // #69 stopped-on-track recovery: a countdown that runs only while a car is stopped on the racing lane (exact, like the
   // other timers: it costs nothing the rest of the time and the HUD counts down the server's own value), and two flags
   stallT: 'exact', stallHold: 'exact', stallSvc: 'exact',
+  // #74 held for an away driver: optional and additive (absent while false, so an older server's frames simply lack it and
+  // a delta names it under DELETED when the hold ends), which keeps PROTOCOL_VERSION 2
+  away: 'exact',
 } as const satisfies Record<Exclude<keyof CarSnapshot, StaticKey>, Precision>;
 
 /** Race-level fields (everything but `cars`). Only the clocks change every step; they keep 1 ms. */

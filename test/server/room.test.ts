@@ -394,7 +394,7 @@ describe('races, results and timing', () => {
     expect(Object.isFrozen(env) && Object.isFrozen(env.classification) && Object.isFrozen(env.participants[0])).toBe(true);
     expect(env).toMatchObject({ schema: 1, raceId, roomId: room.id, mode: 'multiplayer', outcome: 'completed', track: { id: 'circuit-2' }, settings: { track: 'circuit-2', aiFill: false } });
     expect(env.track.version).toMatch(/^[0-9a-f]{16}$/);
-    expect(env.rules.version).toBe('race-core-2026.11.3');
+    expect(env.rules.version).toBe('race-core-2026.11.4');
     expect(env.classification!.map((s) => s.status)).toEqual(['finished', 'finished']);
     expect(env.classification!.map((s) => s.pos)).toEqual([1, 2]);
     expect(env.participants.map((p) => p.id).sort()).toEqual([...ids].sort());

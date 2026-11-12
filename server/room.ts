@@ -67,6 +67,16 @@ const RUNON_STEPS = 8;
 /** Seconds after the first finisher that a solo race (one human) waits before classifying the rest. */
 const SOLO_FINISH_WINDOW = 120;
 const RACE_TIME_LIMIT = 1200;
+/**
+ * An in-race seat is "away" (#74) when its connection is gone (in the reconnect hold) or when no `ctl` has arrived for longer
+ * than this. The second case is the common mobile drop: the socket dies silently and the server only notices on its next ws
+ * ping (25 s) or when the client's watchdog reconnects, so the seat still has a peer. The client sends `ctl` at least every
+ * HEARTBEAT_MS (250 ms); this sits above LIMITS.inputTimeoutMs (1000 ms, when held pedals go neutral) with a margin for a
+ * browser that throttles timers in the background, so a live but briefly slow client is never taken for a lost one. An
+ * away car is held where it stopped, out of traffic and exempt from the stopped-on-track rule, until the seat resumes, its
+ * first `ctl` arrives, or the hold expires and the car retires (docs/online-server.md, docs/auto-bay.md).
+ */
+export const LINK_AWAY_MS = 1500;
 
 export type JoinOk = { ok: true; participant: string; token: string };
 export type Fail = { ok: false; code: ErrorCode; detail?: string };
@@ -387,10 +397,29 @@ export class Room {
     if (this.state === 'results' && now - this.resultsAt > this.cfg.resultsIdleS * 1000) this.close('idle');
   }
 
-  private inputs(): Record<DriverId, Input> {
+  /** Whether this in-race seat's driver is away at `now` (LINK_AWAY_MS): decided here, from the server's own clock, never by a client. */
+  private away(p: Participant, now: number): boolean {
+    return p.inRace && !p.left && (!p.peer || now - p.ctlAt > LINK_AWAY_MS);
+  }
+
+  /**
+   * The race step's input per seat. An away seat gets neutral pedals plus `away` (#74), so the race core holds its car out of
+   * traffic: it is part of the input, so a replay of the same inputs gives the same race. A seat given up (left/retired) is
+   * omitted, which is neutral.
+   */
+  private inputs(now: number): Record<DriverId, Input> {
     const out: Record<DriverId, Input> = Object.create(null) as Record<DriverId, Input>;
-    for (const p of this.parts) if (p.inRace && !p.left && p.peer) out[p.id] = p.held;
+    for (const p of this.parts) {
+      if (!p.inRace || p.left) continue;
+      out[p.id] = this.away(p, now) ? { up: false, down: false, away: true } : p.held;
+    }
     return out;
+  }
+
+  /** Whether the race is holding this seat's car for a reconnect (#74); false outside a race. For tests and diagnostics. */
+  isAway(participantId: string, now = this.clock): boolean {
+    const p = this.participant(participantId);
+    return !!p && this.state === 'race' && this.away(p, now);
   }
 
   /**
@@ -443,7 +472,7 @@ export class Room {
 
   private stepOnce(now: number): void {
     const race = this.race!;
-    race.update(STEP, this.inputs());
+    race.update(STEP, this.inputs(now));
     this.stepsDone++;
     for (const e of race.drainEvents()) {
       this.evBuf.push(e);

@@ -5,7 +5,7 @@ import * as T from './track';
 import { Race, Car, LAPS, RaceEvent, DRIVERS, PERSONAS, PEN, DEF, SOLO_ID, DriverId, RosterEntry } from './race';
 import { buildWorld, disposeWorld, arrowGeometry, BayPaint, World } from './world';
 import { Y0, disposeObject } from './gfx';
-import { makeCar, makePlayerMarker, CarVisual } from './carModel';
+import { makeCar, makePlayerMarker, dimCar, CarVisual } from './carModel';
 import { Hud, fmt, carLabel, flags, escHtml } from './hud';
 import { Sfx } from './audio';
 import { t } from './i18n';
@@ -844,6 +844,8 @@ function syncCars(dt: number, time: number, poses: Pose[]): void {
     for (const w of v.wheels) w.rotation.z -= (c.v * dt) / 0.12;
     const blink = c.mode === 'tow' ? Math.floor(time * 8) % 2 === 0 && c.towT < 0.9 : c.recoverT > 0 ? Math.floor(time * 12) % 2 === 0 : true;
     v.group.visible = blink;
+    // held for an away driver (#74, Car.away from the server's snapshot): out of traffic, so drawn see-through on every client
+    dimCar(v, c.away);
   });
   // bridge decks turn translucent while the player drives beneath them
   const under = playerUnderBridge();

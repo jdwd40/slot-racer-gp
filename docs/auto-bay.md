@@ -56,6 +56,7 @@ The rule is part of the shared race core (`Race.stallUpdate()` and the methods n
 
 - **Off (no count at all):** practice, AI cars, the grid and the lights, a terminal result (finished, DQ, DNF), a retired car, and anything but the racing lane (`mode` `race`): the pit lane, bays, the box, tow and de-slot all count as off. The rule starts at the green: a car that has not moved off by then gets its countdown from the green.
 - **Held (a legitimate wait; the count is reset to zero):**
+  - the driver is away: online, the room server has lost the link and is holding the seat for a reconnect (`Input.away`, #74; see *Online* below)
   - held by the shared pit queue, on the approach or behind it (`pitHold`), or at the pit exit (`exitHold`, `yielding`)
   - the squeeze priority hold (`squeezeHold`)
   - automatic pit control has the pedals (`sgCtl`)
@@ -122,7 +123,18 @@ The loss is the distance driven since the car last passed its bay, from a few me
 
 ### Online
 
-The server's race core counts, decides and recovers. Snapshots carry `stallT`, `stallHold` and `stallSvc` per car; both are additive, and the mirror copies them, so the HUD reads the server's count. The recovery goes out once as the ordinary race event `{ type: 'recover', car }`, with the personal message alongside. There is no new message type and no extra message loop. A disconnected car has no immunity: its controls are neutral and its count runs like anyone's. A reconnect gets the current state, with no events replayed, so the count is neither reset nor extended and a recovery is never repeated.
+The server's race core counts, decides and recovers. Snapshots carry `stallT`, `stallHold` and `stallSvc` per car; both are additive, and the mirror copies them, so the HUD reads the server's count. The recovery goes out once as the ordinary race event `{ type: 'recover', car }`, with the personal message alongside. There is no new message type and no extra message loop. A reconnect gets the current state, with no events replayed, so a recovery is never repeated.
+
+**A driver whose link is down is held, not recovered (#74, rules `race-core-2026.11.4`).** The reconnect banner promises "your car is held where it stopped", so that is what happens. The room server marks an in-race seat *away* while its connection is gone (the reconnect hold, `SLOTRUSH_RECONNECT_GRACE_S`) or while no `ctl` has arrived for more than `LINK_AWAY_MS` (1.5 s; a half-open mobile link still has its socket). It sends that seat's step input as neutral pedals plus `away`, so the race core is told, never guesses, and a replay is exact. While away, the car on the racing lane:
+
+- is held: `stallBlock()` returns *held*, so the count is reset to 0 and it is never recovered
+- is out of traffic like a de-slotted, towed or parked car: `collide()`, `stallTrapped()`, the AI's following, automatic pit control's following, lane-change and pit-exit merge clearance and the re-slot check all ignore it. Other cars drive through its spot, and a car stopped behind it is not trapped by it (that car's own count runs)
+- gains nothing: its pedals are neutral, so it only coasts to a stop. Its place on the lap, lap validity, fuel and every debt and deadline are unchanged. A service deadline is not exempt: an away car carried over its last chance breaches as before
+- is snapshotted with `away: true` and drawn dimmed by every client
+
+In the pit lane, a bay or a service nothing changes: the rule does not apply there and the queue and bay rules run as for anyone.
+
+When the driver is back (a resume, or the first `ctl` on a live socket), the car rejoins traffic only once no car overlaps it and none closing from behind would reach it within `AWAY_REJOIN_S` (0.5 s), so there is no shunt on the return. Until then it stays out of collisions while its driver drives it clear. A stop after that is a fresh episode with the full three seconds. If the hold expires, nothing new happens: `dropSeat()` retires the car (DNF `retired`, or DQ with a latched breach), and it parks in its own bay as in *Disconnects, grace and retirement* ([online-server.md](online-server.md)). From #69 until #74 a disconnected car had no immunity and was moved to its bay 3 s after it stopped, losing up to a lap.
 
 ### Evidence (#69)
 

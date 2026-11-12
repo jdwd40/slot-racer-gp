@@ -20,7 +20,7 @@ const CAR_FIELDS = [
   'throttle', 'brake', 'fuel', 'crossed', 'lapsDone', 'lastLap', 'bestLap', 'lapStartT', 'lapValid', 'finishTime', 'pitStops',
   'offences', 'sgOwed', 'sgServed', 'sgServing', 'timePen', 'svcBreach', 'laneReq', 'pitReq', 'fuelReq', 'fuelDue', 'sgDue', 'sgDeferred',
   'routeHold', 'laneOverride', 'revOn', 'sgPhase', 'sgCtl', 'pitWait', 'exitReq', 'serviceT', 'penalty', 'towT', 'recoverT', 'bumpT',
-  'hiU', 'squeezeHold', 'pitHold', 'towSvc', 'pitFuel', 'serviced', 'upPrev', 'stallT', 'stallHold', 'stallSvc',
+  'hiU', 'squeezeHold', 'pitHold', 'towSvc', 'pitFuel', 'serviced', 'upPrev', 'stallT', 'stallHold', 'stallSvc', 'away',
 ] as const satisfies readonly (keyof CarSnapshot & keyof Car)[];
 
 /**
@@ -39,6 +39,8 @@ export function applySnapshot(r: Race, s: RaceSnapshot): void {
     c.off = cs.off ? { ...cs.off } : null;
     c.bay = cs.bayInUse;
     if (!('hiU' in src)) c.hiU = Math.max(c.hiU, c.u);
+    // `away` (#74) is sent only while true: its absence (an older server, or the hold over) means not held
+    if (!('away' in src)) c.away = false;
   }
   const idx = (id: DriverId | null): number => (id === null ? -1 : r.car(id)?.idx ?? -1);
   r.pit.box = idx(s.pit.box); r.pit.exit = idx(s.pit.exit);

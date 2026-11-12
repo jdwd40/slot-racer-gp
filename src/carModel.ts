@@ -5,7 +5,37 @@ function std(color: number, rough = 0.5, metal = 0, extra: THREE.MeshStandardMat
   return new THREE.MeshStandardMaterial({ color, roughness: rough, metalness: metal, ...extra });
 }
 
-export interface CarVisual { group: THREE.Group; body: THREE.Group; wheels: THREE.Mesh[]; }
+export interface CarVisual { group: THREE.Group; body: THREE.Group; wheels: THREE.Mesh[]; dimmed?: boolean; }
+
+/** Opacity of a car drawn as held (#74): clearly there, clearly not racing, like the personal-best ghost (0.42) but firmer. */
+export const HELD_OPACITY = 0.45;
+
+/**
+ * Draw a car dimmed (translucent) or normally. Used for a car the server holds for an away driver (#74): it is out of traffic
+ * and the others drive through its spot, so it must read as not solid. Each car has its own materials (makeCar), so this never
+ * touches another car; the original transparency is kept on the material and restored exactly. Only a change does any work.
+ */
+export function dimCar(v: CarVisual, on: boolean): void {
+  if (!!v.dimmed === on) return;
+  v.dimmed = on;
+  v.group.traverse((o) => {
+    const m = o as THREE.Mesh;
+    if (!m.isMesh) return;
+    for (const mat of Array.isArray(m.material) ? m.material : [m.material]) {
+      const ud = mat.userData as { solid?: { transparent: boolean; opacity: number; depthWrite: boolean } };
+      if (on) {
+        ud.solid ??= { transparent: mat.transparent, opacity: mat.opacity, depthWrite: mat.depthWrite };
+        mat.transparent = true; mat.opacity = ud.solid.opacity * HELD_OPACITY; mat.depthWrite = false;
+      } else if (ud.solid) {
+        mat.transparent = ud.solid.transparent; mat.opacity = ud.solid.opacity; mat.depthWrite = ud.solid.depthWrite;
+      }
+      mat.needsUpdate = true;
+    }
+    // a see-through car casting a solid shadow would still look solid: its own shadow goes while it is held
+    const mu = m.userData as { cast?: boolean };
+    if (on) { mu.cast ??= m.castShadow; m.castShadow = false; } else if (mu.cast !== undefined) m.castShadow = mu.cast;
+  });
+}
 
 /** Slot car facing +X, ~1.4 long, 0.6 wide. */
 export function makeCar(color: number, num: number, isPlayer: boolean): CarVisual {

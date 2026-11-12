@@ -174,6 +174,12 @@ export const STALL = {
   goDist: 4,           // ...for this distance without a break (about three car lengths)
   blockGap: 6,         // a stopped car with a slow car this close ahead (clear slot) on its own path is trapped, not blocking
 };
+/**
+ * A car held for an away driver (#74) rejoins traffic only once no car overlaps it and none closing from behind would reach
+ * it within this many seconds at their speed difference: the car that was driving through its spot is never handed a stopped
+ * car it cannot avoid.
+ */
+export const AWAY_REJOIN_S = 0.5;
 
 export interface OffState { x: number; y: number; vx: number; vy: number; yaw: number; spin: number; t: number; z: number; vz: number; u0: number; lane: number; }
 
@@ -298,6 +304,17 @@ export interface Car {
   stallHold: boolean;
   /** this bay stay is a stopped-on-track recovery: nothing is refuelled or served, the car may only rejoin (#69 review B1) */
   stallSvc: boolean;
+  /**
+   * The driver's link is down this step (#74): the room server says so in the step input (`Input.away`) while the seat is in
+   * its reconnect hold. Never inferred from anything else, so a replay of the same inputs gives the same race.
+   */
+  linkAway: boolean;
+  /**
+   * Held where it stopped while its driver is away (#74): on the racing lane, out of collisions and of everyone's traffic
+   * checks, exempt from the stopped-on-track rule. It stays set after the driver is back until no other car overlaps it, so
+   * the return never starts with a shunt. Drawn dimmed by every client.
+   */
+  away: boolean;
 }
 
 export type MsgKind = 'info' | 'good' | 'warn' | 'bad';
@@ -348,6 +365,8 @@ export interface CarSnapshot {
   hiU: number; squeezeHold: boolean; pitHold: boolean; towSvc: boolean; pitFuel: boolean; serviced: boolean; upPrev: boolean;
   /** stopped-on-track recovery (#69): the warning's count and the wait for the bay. Additive, so optional for older snapshots */
   stallT?: number; stallHold?: boolean; stallSvc?: boolean;
+  /** held while its driver reconnects (#74): present (true) only while held, so older snapshots and quiet cars omit it */
+  away?: boolean;
 }
 /** Authoritative race state: JSON-safe (no cycles, no Infinity or NaN, no browser objects), with driver IDs for every reference. */
 export interface RaceSnapshot {
@@ -362,11 +381,18 @@ export interface RaceSnapshot {
   final: Standing[] | null;
 }
 
-/** Held pedals for one human driver. Missing or released means neutral, for that driver only. */
-export interface Input { up: boolean; down: boolean; }
+/**
+ * Held pedals for one human driver. Missing or released means neutral, for that driver only. `away`: the room server has
+ * lost this driver's link (peer gone, or no controls for LINK_AWAY_MS) and is holding the seat for a reconnect (#74). It is
+ * part of the input, never guessed by the race, so replaying the same inputs replays the same race. An away driver's
+ * pedals are neutral whatever they say.
+ */
+export interface Input { up: boolean; down: boolean; away?: true; }
 /** Held inputs for this step, per human driver. A driver absent from the map is neutral. */
 export type Controls = Readonly<Record<DriverId, Input | undefined>>;
 export const NEUTRAL: Input = Object.freeze({ up: false, down: false });
+/** An away driver's input as the race applies it: pedals released, link down (#74). */
+export const AWAY: Input = Object.freeze({ up: false, down: false, away: true as const });
 /** Sequenced one-shot driver actions (Lane, Pit, Defer). Reverse and bay departure come from the held pedals. */
 export type ActionType = 'lane' | 'pit' | 'defer';
 export interface DriverAction { driver: DriverId; seq: number; type: ActionType; }
@@ -523,7 +549,7 @@ export class Race {
         revOn: false, revHoldT: 0, revLatch: false, revMark: null,
         pitWait: null, pitCap: 1e9, pitHold: false, exitHold: false, exitReq: false, pitFuel: false,
         sgPhase: null, sgCtl: false, sgCommit: -1, sgVc: 0, sgLeave: false, upPrev: false,
-        stallT: 0, stallRun: 0, stallHold: false, stallSvc: false,
+        stallT: 0, stallRun: 0, stallHold: false, stallSvc: false, linkAway: false, away: false,
       };
       this.cars.push(c);
     }
@@ -853,6 +879,7 @@ export class Race {
   inputOf(c: Car, inputs: Controls): Input {
     if (!c.human) return NEUTRAL;
     const i = Object.prototype.hasOwnProperty.call(inputs, c.id) ? inputs[c.id] : undefined;
+    if (i?.away === true) return AWAY;
     return i ? { up: i.up === true, down: i.down === true } : NEUTRAL;
   }
 
@@ -872,6 +899,8 @@ export class Race {
     // pit traffic is decided from where every car is before any of them moves, so array order never grants priority
     this.pit.update();
     for (const c of this.cars) this.stepCar(c, dt, this.inputOf(c, inputs));
+    // after every car has moved and before any touch: who is held out of traffic for an away driver this step (#74)
+    this.awayUpdate();
     this.collide();
     for (const c of this.cars) this.pose(c);
     if (this.phase === 'countdown') return;
@@ -896,6 +925,7 @@ export class Race {
     c.changeCooldown = Math.max(0, c.changeCooldown - dt);
     c.graceT = Math.max(0, c.graceT - dt); c.pushedT = Math.max(0, c.pushedT - dt); c.cutT = Math.max(0, c.cutT - dt);
     c.defendCooldown = Math.max(0, c.defendCooldown - dt);
+    c.linkAway = c.human && input.away === true;
     if (c.human) { this.sgUpdate(c); this.reverseControl(c, dt, input); }
     if (c.retire === 'parked') { c.v = 0; c.throttle = 0; c.brake = 0; return; }
     if (c.retire) c.retireT += dt;
@@ -1220,7 +1250,7 @@ export class Race {
     let cap = 1e9;
     const paths = [c.d, -this.T.laneHalf(s)];
     for (const o of this.cars) {
-      if (o === c || (o.mode !== 'race' && o.mode !== 'pitlane' && o.mode !== 'grid')) continue;
+      if (o === c || (o.mode !== 'race' && o.mode !== 'pitlane' && o.mode !== 'grid') || o.away) continue;
       const g = this.T.gapS(s, this.s(o));
       if (g <= 1e-6 || g > PIT_Q.look || !paths.some((d) => Math.abs(d - o.d) < this.T.CAR_W)) continue;
       const room = g - this.T.CAR_LEN - PIT_Q.gap + (o.v > 0 ? (o.v * o.v) / (2 * PIT_Q.leadBrake) : o.v * 0.5);
@@ -1330,7 +1360,7 @@ export class Race {
   laneClear(c: Car, to: number): boolean {
     const s = this.s(c);
     for (const o of this.cars) {
-      if (o === c || !this.occupies(o, to)) continue;
+      if (o === c || o.away || !this.occupies(o, to)) continue;
       const g = this.T.gapS(s, this.s(o));
       const front = this.T.CAR_LEN + 0.5 + Math.max(0, c.v - o.v) * 0.45;
       const back = this.T.CAR_LEN + 0.5 + Math.max(0, o.v - c.v) * 0.55;
@@ -1347,7 +1377,7 @@ export class Race {
     const s = this.s(c);
     const zone = this.T.PIT_OUT1 - this.T.PIT_OUT0 + this.T.CAR_LEN + 2;
     for (const o of this.cars) {
-      if (o === c || o.mode !== 'race') continue;
+      if (o === c || o.mode !== 'race' || o.away) continue;
       if (!(o.change || o.laneSide < 0)) continue;
       const z = this.T.gapS(this.T.PIT_OUT0, this.s(o));
       if (o.v < 1 && z > 1.5 && z < zone + Math.max(0, -o.v) * 1.5) return true;
@@ -1475,7 +1505,7 @@ export class Race {
       const u = o.u0 - 1.6;
       const s = this.T.wrapS(u);
       const d = o.lane * this.T.laneHalf(s);
-      const busy = this.cars.some((x) => x !== c && (x.mode === 'race' || x.mode === 'pitlane') && Math.abs(this.T.gapS(s, this.s(x))) < 2.4 && Math.abs(x.d - d) < this.T.CAR_W);
+      const busy = this.cars.some((x) => x !== c && (x.mode === 'race' || x.mode === 'pitlane') && !x.away && Math.abs(this.T.gapS(s, this.s(x))) < 2.4 && Math.abs(x.d - d) < this.T.CAR_W);
       if (!busy) {
         c.u = u; c.laneSide = o.lane; c.d = d; c.mode = 'race'; c.off = null; c.v = 0; c.recoverT = 1.0; c.graceT = PEN.grace; c.yawOff = 0; c.wobble = 0;
         if (c.human) this.pmsg(c, 'msg.backOn', 'info');
@@ -1542,6 +1572,9 @@ export class Race {
    */
   stallBlock(c: Car): 'off' | 'held' | null {
     if (this.practice || this.phase !== 'racing' || !c.human || c.status !== 'running' || c.finished || c.retire || c.mode !== 'race') return 'off';
+    // the driver's link is down and the seat is held for a reconnect (#74): the car is held where it stopped, out of traffic,
+    // so it blocks nobody. Held, so the count is reset: the driver who comes back gets a fresh three seconds, never the rest
+    if (c.linkAway) return 'held';
     if (c.pitHold || c.exitHold || c.squeezeHold || c.yielding || c.sgCtl || c.recoverT > 0 || c.fuel <= 0) return 'held';
     return this.stallTrapped(c) ? 'held' : null;
   }
@@ -1555,7 +1588,8 @@ export class Race {
   stallTrapped(c: Car): boolean {
     const s = this.s(c);
     for (const o of this.cars) {
-      if (o === c || (o.mode !== 'race' && o.mode !== 'pitlane' && o.mode !== 'grid') || o.v >= STALL.goV) continue;
+      // a car held for an away driver (#74) is out of traffic like a towed one: others drive through it, so it traps nobody
+      if (o === c || (o.mode !== 'race' && o.mode !== 'pitlane' && o.mode !== 'grid') || o.away || o.v >= STALL.goV) continue;
       if (Math.abs(o.d - c.d) >= this.T.CAR_W || Math.abs(o.z - c.z) > 1) continue;
       const g = this.T.gapS(s, this.s(o));
       if (g > 0 && g - this.T.CAR_LEN < STALL.blockGap) return true;
@@ -1596,6 +1630,40 @@ export class Race {
       if (c.stallT >= STALL.grace - 1e-9 && !(own && c.v > 0)) due.push(c);
     });
     for (const c of due) this.stallRecover(c);
+  }
+
+  /**
+   * Hold the cars of away drivers out of traffic (#74). A car whose driver's link is down (Input.away) and that is on the
+   * racing lane is held where it is: out of collisions and everyone's traffic checks, so the field drives through its spot and
+   * nobody is trapped behind it for the length of the reconnect hold. It gains nothing: its pedals are neutral, so it only
+   * coasts to a stop, and its lap, lap validity, fuel, debts and deadlines run on as usual. In the pit lane, a bay or a
+   * service it is already off the racing lane and the usual queue rules apply. Once the driver is back (or the car retires
+   * when the hold runs out) it rejoins traffic only when no other car overlaps it, so the return is never a shunt; until then
+   * it stays out of collisions while its driver drives it clear. Leaving the racing lane (a de-slot, a tow, parking) ends it.
+   * Runs on c.linkAway, which stepCar has just set from this step's input.
+   */
+  awayUpdate(): void {
+    for (const c of this.cars) {
+      if (c.mode !== 'race') { c.away = false; continue; }
+      if (c.linkAway && !c.retire) { c.away = true; continue; }
+      if (c.away && !this.overlapsAny(c)) c.away = false;
+    }
+  }
+
+  /**
+   * Another car on the road or in the pit lane touches this one: within contact distance in the same slot (the test collide()
+   * clears contact with), or about to be, closing from behind fast enough to reach it within AWAY_REJOIN_S. The second part is
+   * what makes a return safe for the car that was driving through the held car's spot: it is never handed a stopped car a
+   * bumper's length ahead of it at racing speed, which it could not avoid.
+   */
+  overlapsAny(c: Car): boolean {
+    const s = this.s(c);
+    return this.cars.some((o) => {
+      if (o === c || (o.mode !== 'race' && o.mode !== 'pitlane') || Math.abs(o.d - c.d) >= this.T.CAR_W) return false;
+      const g = this.T.gapS(this.s(o), s);   // > 0: o is behind c by g
+      if (Math.abs(g) < this.T.CAR_LEN + PEN.separateGap) return true;
+      return g > 0 && o.v > c.v && g - this.T.CAR_LEN < (o.v - c.v) * AWAY_REJOIN_S;
+    });
   }
 
   /**
@@ -1688,7 +1756,7 @@ export class Race {
     // follow traffic in the same slot
     let nearest: Car | null = null, ng = 1e9;
     for (const o of this.cars) {
-      if (o === c || o.mode === 'off' || o.mode === 'tow' || o.mode === 'grid') continue;
+      if (o === c || o.mode === 'off' || o.mode === 'tow' || o.mode === 'grid' || o.away) continue;
       if (Math.abs(o.d - c.d) > this.T.CAR_W) continue;
       const g = this.T.gapS(s, this.s(o));
       if (g > 0 && g < ng) { ng = g; nearest = o; }
@@ -1904,7 +1972,8 @@ export class Race {
   dbg = { defendReq: 0, defendDone: 0, defendUnsafe: 0, defendNoGap: 0 };
 
   collide(): void {
-    const act = this.cars.filter((c) => c.mode === 'race' || c.mode === 'pitlane');
+    // a car held for an away driver (#74) is out of collisions, like a de-slotted, towed or parked one
+    const act = this.cars.filter((c) => (c.mode === 'race' || c.mode === 'pitlane') && !c.away);
     for (let i = 0; i < act.length; i++) for (let j = i + 1; j < act.length; j++) {
       const a = act[i], b = act[j];
       const key = Math.min(a.idx, b.idx) * 4 + Math.max(a.idx, b.idx);
@@ -1974,6 +2043,7 @@ export class Race {
         serviceT: c.serviceT, penalty: c.penalty, towT: c.towT, recoverT: c.recoverT, bumpT: c.bumpT,
         hiU: c.hiU, squeezeHold: c.squeezeHold, pitHold: c.pitHold, towSvc: c.towSvc, pitFuel: c.pitFuel, serviced: c.serviced, upPrev: c.upPrev,
         stallT: c.stallT, stallHold: c.stallHold, stallSvc: c.stallSvc,
+        ...(c.away ? { away: true } : {}),
       })),
       pit: {
         box: idOf(this.pit.box), exit: idOf(this.pit.exit),
