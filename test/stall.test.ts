@@ -982,6 +982,104 @@ describe('the pit entrance (review NB1)', () => {
   });
 });
 
+describe('the warning while reversing (#82)', () => {
+  it('stallLeft(): a paused count hides the warning while reversing, and it returns with the same time once reverse ends', () => {
+    const c = { stallT: 0.82, mode: 'race', finished: false, revOn: false, v: 0 };
+    expect(stallLeft(c)).toBe(3);
+    // in reverse gear, still at a standstill or already backing up: hidden, the count itself untouched
+    expect(stallLeft({ ...c, revOn: true })).toBe(0);
+    expect(stallLeft({ ...c, revOn: true, v: -3 })).toBe(0);
+    // rolling back after leaving the gear, at the count's own threshold (STALL.stopV) or more: hidden too
+    expect(stallLeft({ ...c, v: -3 })).toBe(0);
+    expect(stallLeft({ ...c, v: -STALL.stopV })).toBe(0);
+    // slower than that the count runs again, and so does the warning
+    expect(stallLeft({ ...c, v: -STALL.stopV + 0.01 })).toBe(3);
+    // reverse over, stallT still 0.82: the warning is back with the remaining whole seconds, not a fresh count
+    expect(stallLeft({ ...c, revOn: false, v: 0 })).toBe(3);
+    expect(stallLeft({ ...c, stallT: 1.4, v: 0 })).toBe(2);
+    expect(stallLeft({ ...c, stallT: 2.5, v: -0.2 })).toBe(1);
+    // no episode: nothing, reversing or not
+    expect(stallLeft({ ...c, stallT: 0, revOn: true, v: -3 })).toBe(0);
+  });
+
+  // stop for 1 s, back up on Brake for several seconds, release and stand still
+  function stopThenReverse(): { r: Race; p: Car; ev: WireEvent[]; held: number } {
+    const r = race([human('p')]);
+    const p = r.car('p')!;
+    place(r, p, U(r, 175), 1, 0);
+    const ev = run(r, {}, 1);
+    expect(p.stallT).toBeGreaterThan(0.95); expect(p.stallT).toBeLessThan(1.05);
+    expect(stallLeft(p)).toBe(2);
+    // Brake at the standstill: 0.6 s to engage reverse (that standstill still counts), then backing up at REV.speed
+    let held = -1, minV = 0;
+    ev.push(...run(r, { p: BRAKE }, 4, () => {
+      minV = Math.min(minV, p.v);
+      if (p.revOn || p.v <= -STALL.stopV) expect(stallLeft(p)).toBe(0);
+      else expect(stallLeft(p)).toBeGreaterThan(0);
+      if (p.v <= -STALL.stopV) {
+        if (held < 0) held = p.stallT;
+        expect(p.stallT).toBe(held);        // paused, never reset
+        expect(p.mode).toBe('race');
+      }
+    }));
+    expect(minV).toBeLessThan(-2.9);         // really backed up, at about REV.speed
+    expect(held).toBeGreaterThan(1.5); expect(held).toBeLessThan(STALL.grace - 0.5);
+    expect(p.revOn).toBe(true);
+    expect(p.stallT).toBe(held);
+    expect(recov(ev)).toHaveLength(0);
+    // release: the car rolls to a stop; the count runs again below STALL.stopV, and the warning is back with what is left
+    ev.push(...run(r, {}, 0.5));
+    expect(p.v).toBeCloseTo(0, 5);
+    expect(p.revOn).toBe(false);
+    expect(p.stallT).toBeGreaterThan(held);
+    expect(p.stallT).toBeLessThan(held + 0.5);
+    expect(stallLeft(p)).toBe(Math.ceil(STALL.grace - p.stallT - 1e-9));
+    expect(stallLeft(p)).toBeLessThan(3);    // the remaining time, not a fresh 3 s
+    expect(recov(ev)).toHaveLength(0);
+    return { r, p, ev, held };
+  }
+
+  it('stop, reverse for seconds (count paused, warning hidden, no recovery), stop again: recovered once the 3 s of counting are used', () => {
+    const { r, p, ev } = stopThenReverse();
+    const left = STALL.grace - p.stallT;
+    const rest = timeToRecover(r, 'p');
+    expect(Math.abs(rest - left)).toBeLessThanOrEqual(DT + 1e-9);
+    expect(recov(ev)).toHaveLength(0);
+    expect(p).toMatchObject({ mode: 'service', stallT: 0 });
+    expect(stallLeft(p)).toBe(0);
+  });
+
+  it('stop, reverse, stop again, then drive off: the episode ends and the car is never recovered', () => {
+    const { r, p, ev } = stopThenReverse();
+    ev.push(...run(r, { p: UP }, 1.2));
+    expect(p.stallT).toBe(0);
+    expect(stallLeft(p)).toBe(0);
+    // a later stop would be a fresh episode with the full 3 s (the drive-off test above); here it just keeps going
+    expect(recov(ev)).toHaveLength(0);
+    expect(p.mode).toBe('race');
+  });
+
+  it('the online mirror hides the warning while reversing too (revOn and v are in the snapshot)', () => {
+    const srv = race([human('a')]);
+    const a = srv.car('a')!;
+    place(srv, a, U(srv, 175), 1, 0);
+    const snap = (): RaceSnapshot => JSON.parse(JSON.stringify(srv.snapshot())) as RaceSnapshot;
+    const m = mirrorRace(snap());
+    let shown = 0, hidden = 0;
+    for (let i = 0; i < 60 * 4; i++) {
+      srv.update(DT, { a: i < 60 ? NONE : BRAKE });
+      srv.drainEvents();
+      applySnapshot(m, snap());
+      const ma = m.car('a')!;
+      expect(stallLeft(ma)).toBe(stallLeft(a));
+      if (a.stallT > 0 && stallLeft(a) === 0) hidden++; else if (stallLeft(a) > 0) shown++;
+    }
+    expect(shown).toBeGreaterThan(0);
+    expect(hidden).toBeGreaterThan(60);
+    expect(a.revOn).toBe(true);
+  });
+});
+
 describe('state on the wire and determinism', () => {
   it('the mirror shows the server\'s countdown and the recovery; the recovery event crosses the wire intact', () => {
     const srv = race([human('a', 1), human('b', 0)]);

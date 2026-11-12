@@ -361,9 +361,15 @@ export class Hud {
   }
 }
 
-/** Whole seconds left on a stopped-on-track warning (3, 2, 1), or 0 when none is running (#69). */
-export function stallLeft(c: { stallT: number; mode: string; finished: boolean }): number {
+/**
+ * Whole seconds left on a stopped-on-track warning (3, 2, 1), or 0 when none is running (#69). Also 0 while the car is
+ * reversing (#82): reverse gear, or rolling back at STALL.stopV or more, the same threshold that pauses the count. Backing up
+ * is the recovery manoeuvre, so the tow countdown is not shown; the count is only paused, so when reverse ends with the car
+ * still stopped the warning returns with the time that is left.
+ */
+export function stallLeft(c: { stallT: number; mode: string; finished: boolean; revOn: boolean; v: number }): number {
   if (!(c.stallT > 0) || c.mode !== 'race' || c.finished) return 0;
+  if (c.revOn || c.v <= -STALL.stopV) return 0;
   return Math.max(1, Math.min(Math.ceil(STALL.grace), Math.ceil(STALL.grace - c.stallT - 1e-9)));
 }
 
