@@ -94,9 +94,13 @@ async function openPage(run, url, view = 'laptop', { touch = false, name = view,
     // stateN/stateBytes: every `state` frame this page received and its size (UTF-8 bytes on the wire, #67)
     const q = (window.__lat = { arm: false, downAt: 0, waitNet: false, waitDraw: false, net: [], drawn: [], stateN: 0, stateBytes: 0, stateT0: 0, stateT1: 0 });
     window.addEventListener('keydown', (e) => { if (q.arm && !e.repeat && e.code === 'KeyS') { q.arm = false; q.downAt = performance.now(); q.waitNet = q.waitDraw = true; } }, true);
+    // __qaBlockWs (the seat-expiry check, #78): while set, every new socket goes to a closed port and fails as an unreachable
+    // server would. It has to live here: page.routeWebSocket only swaps window.WebSocket for its mock, and NetSession keeps the
+    // constructor it was made with (this class, over the native one), so a route set mid-session never sees its reconnects.
     const W = window.WebSocket;
     window.WebSocket = class extends W {
       constructor(...a) {
+        if (window.__qaBlockWs) a[0] = 'ws://127.0.0.1:9/ws';
         super(...a);
         this.addEventListener('message', (ev) => {
           if (typeof ev.data !== 'string' || !ev.data.startsWith('{"t":"state"')) return;
@@ -624,12 +628,14 @@ async function connection(run, c) {
   c.ok('Page reload: Rejoin from the title resumes the same seat before expiry', (await read(b.page, () => window.__game.localId)) === idb);
 
   // ---- expiry: the phone cannot reconnect for longer than the grace period
-  await b.page.routeWebSocket(/\/ws$/, (ws) => ws.close({ code: 4000, reason: 'blocked' }));
-  await read(b.page, () => window.__game.netDrop());
+  // blocked inside the page's own WebSocket class, not with page.routeWebSocket: see __qaBlockWs in openPage (#78)
+  await read(b.page, () => { window.__qaBlockWs = true; window.__game.netDrop(); });
   await waitFor(b.page, () => window.__game.screen === 'online', undefined, (run.real.cfg.graceS + 15) * 1000).catch(async (e) => { throw new Error(`${e.message} ${JSON.stringify(await read(b.page, () => ({ screen: window.__game.screen, net: window.__game.net && { conn: window.__game.net.conn, state: window.__game.net.room?.state }, me: window.__game.race.car(window.__game.localId)?.status, card: document.querySelector('.overlay.show .card')?.textContent?.slice(0, 160) })))}`); });
   const exp = await read(b.page, () => ({ msg: document.getElementById('n-msg').textContent, seat: sessionStorage.getItem('srgp.seat') }));
-  c.ok('Seat expiry: the phone is told its seat expired and the stored seat is gone', exp.msg === STRINGS['net.end.expired'] && exp.seat === null, exp);
-  await b.page.unrouteAll({ behavior: 'ignoreErrors' });
+  // a multiplayer car still racing when its seat expires names the room and says the car was retired (net.end.disconnectedRace,
+  // docs/online-client.md "Reconnect"), not the room-less net.end.expired this check once expected while it never got this far
+  c.ok('Seat expiry: the phone is told its seat in this room expired and its car retired; the stored seat is gone', exp.msg === STRINGS['net.end.disconnectedRace'].replace('{code}', code) && exp.seat === null, exp);
+  await read(b.page, () => { window.__qaBlockWs = false; });
   await b.page.fill('#n-code', code);
   await b.page.locator('#n-join').tap();
   await waitFor(b.page, () => document.getElementById('n-msg').textContent.startsWith('That race'));
