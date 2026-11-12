@@ -154,6 +154,20 @@ It cannot wait for ever. A car inside it is in traffic and is not trapped by a h
 
 **The hold window.** If the reconnect grace runs out, nothing new happens: `dropSeat()` retires the car (DNF `retired`, or DQ with a latched breach), and it parks in its own bay as in *Disconnects, grace and retirement* ([online-server.md](online-server.md)). The same window applies to a socket that stays open but sends no controls: after `SLOTRUSH_RECONNECT_GRACE_S` of silence the server treats it as expired in exactly the same way, for a car still racing. A finished car affects nobody, so its driver keeps the seat (and gets the result) however quiet the page is. From #69 until #74 a disconnected car had no immunity and was moved to its bay 3 s after it stopped, losing up to a lap.
 
+**A de-slot during the coast, before the hold (#83).** The hold only starts once the car has stopped on the racing lane. Until then it is in traffic and under the normal grip rule, so a car whose link drops at racing speed can still de-slot on the way to that stop, and a de-slot voids the lap as it always does (`deslot()` sets `lapValid = false`). "No lap lost" is a promise about the stopped-on-track recovery, which never applies to a held car; it does not exempt a moving car from grip. What happens then is the stock path: `mode` `off` with `v = 0` while off the slot (`away` stays false, because the hold is only for a car on the racing lane), the marshal puts it back 1.6 m behind where it left with `recoverT = 1`, and from there, stopped on the slot, it is held as above.
+
+On a half-open link (the socket still there, no `ctl`) the room server keeps the seat's last held pedals for `LIMITS.inputTimeoutMs` (1 s, the jitter tolerance for a 250 ms heartbeat), then sends neutral, and marks the seat away at `LINK_AWAY_MS` (1.5 s). So a driver whose page froze on full Throttle keeps full Throttle for that second, exactly as a connected driver who kept the key down for that second and then let go: the race core gets the same input and does the same thing, step for step. A closed socket is away, and neutral, at once. Playtest 5 hit this on circuit-1: a link frozen at 22.4 m/s on the straight about 20 m before the hairpin (about 13.9 m/s on the outside lane). The tests reproduce it on the race core and on the room server:
+
+| Same car, same instant (s ≈ 87–88.5, 22.8–23.1 m/s) | De-slot | What follows |
+| --- | --- | --- |
+| half-open link (1 s of the last Throttle, neutral, away at 1.5 s) | yes, in the hairpin (s ≈ 115.5–115.8) at +1.2–1.3 s | `off`, `v = 0`; back on at `u0 − 1.6` with `recoverT = 1` at about +2.9–3.0 s; lap void; then held there, never recovered |
+| connected, Throttle kept for 1 s, then lifted | yes, identical to the half-open link on every step | the same, then a connected car's ordinary stopped count |
+| connected, Throttle kept down | yes | the stock de-slot |
+| connected, lifted at that instant | no | coasts to a stop at s ≈ 113.9–114.2, lap valid |
+| closed socket (away at once) | no | coasts to a stop, held there, lap valid |
+
+A connected driver lifting as late as 0.8 s after that instant (s ≈ 107, just before the turn-in) still makes it; from 0.85 s it de-slots. Dropped mid-straight at about 22 m/s (s 150) the half-open car coasts through the next bend and is held with no de-slot, and at about 8 m/s just out of the pits (the playtest-4 case) it coasts and is held with no de-slot. So the drop does not cause the de-slot; the last Throttle the driver sent does, as it would for anyone who kept it down into the hairpin. Shortening `inputTimeoutMs` would cut Throttle on every connected player whose controls are briefly late, and would still not remove the case (a drop just before the braking point de-slots with any window), so the rules are unchanged (#83, no `RULES_VERSION` bump). Tests: `test/stall.test.ts` and `test/server/stall.test.ts`, the #83 blocks.
+
 ### Evidence (#69)
 
 Automated simulation and network evidence, on Node 26.7.0 (Node 22, the `.nvmrc` pin, is not on the build host; typecheck also passed on Node 24.21.0):
