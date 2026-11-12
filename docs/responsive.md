@@ -19,6 +19,7 @@ What collapses on compact layouts:
 
 - The standings list, the championship round label and the Last / Best times are hidden. Position, lap, time, fuel, penalty and route chips, the refuelling and stop-and-go instructions, and Pause stay visible. The round and the standings are still on the pause and championship cards.
 - The throttle meter is hidden, because the Throttle control already shows when it is pressed.
+- The laps-of-fuel figure beside the fuel bar (#87, [fuel-laps.md](fuel-laps.md)) drops the word: `≈3.4` instead of `≈ 3.4 laps`, at 12 px, with the full text as its title and accessible name.
 - View, zoom, sound and the practice ghost move into the **More** tray. It is a labelled button with `aria-expanded`, and the tray opens under it, clear of the driving controls. It closes on pause and every other screen change, and when the screen rotates.
 - In portrait the follow camera widens until its view is as wide as it would be on a square screen, so the track ahead is not cut to a narrow strip. Landscape and desktop views are unchanged. The overview marker's zoom threshold uses the same measure, so portrait does not show it all the time.
 

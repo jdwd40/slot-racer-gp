@@ -40,6 +40,12 @@ button:focus-visible { outline: 2px solid #fff; outline-offset: 2px; }
 .fill.fuel { background: linear-gradient(90deg, #0ea5e9, #22d3ee); }
 .fill.fuel.low { background: linear-gradient(90deg, #dc2626, #f87171); animation: blink 0.6s infinite alternate; }
 .pct { position: absolute; right: 6px; top: -1px; font-size: 10px; font-weight: 800; }
+/* laps of fuel left (#87): right of the fuel bar, muted unless it is short of the flag (orange) or under a lap (red); never blinks */
+.fuellaps { flex: none; min-width: 74px; margin-left: 8px; font-size: 12px; font-weight: 800; color: #d1d5db; white-space: nowrap; text-align: right; font-variant-numeric: tabular-nums; }
+.fuellaps[hidden] { display: none; }
+.fuellaps.short { color: #fb923c; }
+.fuellaps.low { color: #f87171; }
+.fuellaps .fl-short { display: none; }
 .chips { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; min-height: 0; }
 .chip { font-size: 11px; font-weight: 800; padding: 3px 7px; border-radius: 6px; letter-spacing: 0.5px; }
 .chip.yel { background: #ffd23f; color: #222; }
@@ -213,6 +219,9 @@ small { color: #9ca3af; font-weight: 500; }
   .topbar .tc { padding: 6px 10px; font-size: 14px; }
   .topbar .stand, .topbar .round, .bl .meter:first-child { display: none; }
   .bl .meter .lbl { width: auto; }
+  .fuellaps { min-width: 40px; margin-left: 6px; }
+  .fuellaps .fl-long { display: none; }
+  .fuellaps .fl-short { display: inline; }
   .chip { padding: 2px 6px; font-size: 10px; }
   .touch .dock .status { padding: 6px 10px; font-size: 12px; }
   .btn.more { display: inline-flex; align-items: center; justify-content: center; }

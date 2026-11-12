@@ -3,6 +3,7 @@ import { Race, LAPS, LOW_FUEL, Car, SERVICE_READY, DriverId, SOLO_ID, STALL } fr
 import { t } from './i18n';
 import { fmtMs } from './records';
 import { laneCue, pitCue } from './input';
+import { FuelLapsEstimator, SteadyFigure, fuelLapsVisible, fuelWarning, lapsToFlag } from './fuelLaps';
 
 /** `me` is the local driver: the HUD shows that car's state, whatever its grid slot. */
 export interface HudExtra { mode: 'race' | 'practice' | 'champ'; pbMs: number; round: string; me: DriverId; }
@@ -31,6 +32,9 @@ export class Hud {
   mScale = 1; mOx = 0; mOy = 0; mW = 230; mH = 200;
   toastT = 0;
   fuelVisit = false;
+  /** laps of fuel left (#87): one estimator per race and local car, and the steadied figure it shows */
+  fuelEst = new FuelLapsEstimator(); fuelFig = new SteadyFigure();
+  fuelFor: { race: Race | null; id: DriverId | null } = { race: null, id: null };
 
   constructor(parent: HTMLElement) {
     this.root = document.createElement('div');
@@ -66,7 +70,7 @@ export class Hud {
         <div id="h-status" class="status"></div>
         <div class="panel bl">
           <div class="meter"><span class="lbl" data-t="hud.throttle"></span><div class="bar"><div id="h-thr" class="fill thr"></div></div></div>
-          <div class="meter"><span class="lbl" data-t="hud.fuel"></span><div class="bar"><div id="h-fuel" class="fill fuel"></div><div id="h-fuelpct" class="pct"></div></div></div>
+          <div class="meter"><span class="lbl" data-t="hud.fuel"></span><div class="bar"><div id="h-fuel" class="fill fuel"></div><div id="h-fuelpct" class="pct"></div></div><span id="h-fuellaps" class="fuellaps" role="img" hidden><span class="fl-long"></span><span class="fl-short"></span></span></div>
           <div id="h-chips" class="chips"></div>
         </div>
       </div>
@@ -188,6 +192,7 @@ export class Hud {
     const low = p.fuel < LOW_FUEL;
     fe.classList.toggle('low', low);
     this.set('h-fuelpct', `${Math.round(p.fuel * 100)}%`);
+    this.fuelLaps(race, p, practice);
 
     // chips
     const chips: string[] = [];
@@ -299,6 +304,33 @@ export class Hud {
 
     if (this.toastT > 0) { this.toastT -= dt; if (this.toastT <= 0) this.el['h-toast'].classList.remove('show'); }
     this.drawMini(race, time, p.id);
+  }
+
+  /**
+   * The approximate laps-of-fuel figure right of the fuel bar (#87, src/fuelLaps.ts, docs/fuel-laps.md). Reads only what the
+   * online mirror also has (fuel, u, lapsDone, crossed, the race clock and track), so offline and online behave alike.
+   * Orange: probably not enough to reach the flag; red: under a lap. The bar, LOW FUEL chip and toast are unchanged.
+   */
+  fuelLaps(race: Race, p: Car, practice: boolean): void {
+    const e = this.el['h-fuellaps'];
+    if (this.fuelFor.race !== race || this.fuelFor.id !== p.id) {
+      this.fuelFor = { race, id: p.id }; this.fuelEst.reset(); this.fuelFig.reset();
+    }
+    const show = fuelLapsVisible({ practice: practice || race.practice, finished: p.finished, status: p.status, phase: race.phase });
+    if (!show) { if (!e.hidden) e.hidden = true; this.fuelFig.reset(); return; }
+    const L = race.T.L;
+    const r = this.fuelEst.update({ fuel: p.fuel, u: p.u, L, now: race.raceTime });
+    const n = this.fuelFig.show(r.laps, race.raceTime);
+    const warn = fuelWarning(Number(n), lapsToFlag(LAPS, p.lapsDone, race.T.ahead(race.T.FINISH_S, race.s(p)), L, p.crossed));
+    const long = t('hud.fuelLaps', { n });
+    if (this.cache['h-fuellaps'] !== long + warn) {
+      this.cache['h-fuellaps'] = long + warn;
+      e.className = `fuellaps ${warn}`;
+      e.title = long; e.setAttribute('aria-label', long);
+      (e.firstElementChild as HTMLElement).textContent = long;
+      (e.lastElementChild as HTMLElement).textContent = t('hud.fuelLapsShort', { n });
+    }
+    if (e.hidden) e.hidden = false;
   }
 
   drawMini(race: Race, time: number, me: DriverId): void {
