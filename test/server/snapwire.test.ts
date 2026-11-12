@@ -166,6 +166,38 @@ describe('snapshot wire format v2 (#67)', () => {
     });
   });
 
+  it('the #74 away flag is optional and additive: frames without it (an older server) decode and mirror as not held; it round-trips and is deleted when it ends', () => {
+    const enc = new SnapEncoder('r'), dec = new SnapDecoder();
+    const base = frames[600].snap;
+    // the recorded race never has an away driver: every frame is what an older v2 server sends, with no such field
+    expect(frames.every((f) => f.snap.cars.every((c) => !('away' in c)))).toBe(true);
+    const variant = (k: number, away: boolean): RaceSnapshot => {
+      const s = JSON.parse(JSON.stringify(base)) as RaceSnapshot; s.t += k;
+      if (away) s.cars[1].away = true;
+      return s;
+    };
+    const m = mirrorRace(JSON.parse(JSON.stringify(wireRounded(base))) as RaceSnapshot);
+    const seq = [false, true, true, false, true];
+    seq.forEach((away, i) => {
+      const s = variant(i, away);
+      const f = enc.next(s, i + 1, i * 50);
+      const got = dec.decode(wire(i + 1, f))!;
+      expect(got).toEqual(JSON.parse(JSON.stringify(wireRounded(s))));
+      expect(got.cars[1].away).toBe(away ? true : undefined);
+      if (i === 1) expect(f.snap.cars[1]).toEqual({ away: true });   // a delta: just the flag, nothing else changed
+      if (i === 3) expect(f.snap.cars[1][DELETED]).toEqual(['away']);
+      applySnapshot(m, got);
+      expect(m.car(got.cars[1].id)!.away).toBe(away);
+      expect(m.cars.filter((c) => c.away)).toHaveLength(away ? 1 : 0);
+    });
+    // a keyframe from an older server: no field anywhere, nothing held, the protocol is still 2
+    const old = new SnapDecoder().decode(wire(1, new SnapEncoder('o').next(base, 1, 0)))!;
+    expect(old.cars.some((c) => 'away' in c)).toBe(false);
+    applySnapshot(m, old);
+    expect(m.cars.some((c) => c.away)).toBe(false);
+    expect(PROTOCOL_VERSION).toBe(2);
+  });
+
   it('a 4-car race averages well under 1.5 KB a state (v1 sent every field of every car)', () => {
     const enc = new SnapEncoder('3f2c6e1a-0d5b-4a8e-9a77-2f1d7b0c9e41');
     let v1 = 0, v2 = 0;
@@ -299,7 +331,9 @@ describe('the room server streams v2 states', () => {
 
   it('same seed and inputs give the same result digest as before the wire change (race results unchanged)', () => {
     // inputs scripted by tick (never read from snapshots), so the result is a function of the seed and inputs alone. The
-    // digest covers the whole envelope except its random ids and the protocol number; pinned on main before #67 (1b2f865, rules race-core-2026.11.3)
+    // digest covers the whole envelope except its random ids and the protocol number; pinned on main before #67 (1b2f865, rules
+    // race-core-2026.11.3: 00ce7abd…acfc0). Re-pinned for #74, whose only change here is the rules version string inside the
+    // envelope: both seats send controls every tick, so neither is ever away, and with 11.3 in place the old digest still results
     const run = () => {
       const h = harness({}, 4242);
       const peers = [new FakePeer(), new FakePeer()];
@@ -318,7 +352,7 @@ describe('the room server streams v2 states', () => {
     };
     const a = run(), b = run();
     expect(b).toEqual(a);
-    expect(a).toEqual({ digest: '00ce7abd722e661d701f68521260aba33d08fdb24160b5477c345c1505eacfc0', outcome: 'completed', ticks: 18031 });
+    expect(a).toEqual({ digest: '44a653808750b6fadd9275fe6e0d30dc185f7dfdea1870927cd914803765b591', outcome: 'completed', ticks: 18031 });
   });
 });
 

@@ -3,6 +3,7 @@
 // so car-array order, frame rate and who is human never decide priority. The HUD only reads it.
 import * as T from './track';
 import type { Car, Race } from './race';
+import { outOfTraffic } from './traffic';
 
 /** What an assisted car is waiting for, or null when it is not being held. */
 export type PitWait = 'queued' | 'bay' | 'exit' | null;
@@ -90,6 +91,8 @@ export class PitTraffic {
   // ------------------------------------------------------------ geometry
   /** Routed into the pit at the coming entrance: on the outside lane, no change running, within the approach. */
   approaching(c: Car): boolean {
+    // a car held out of traffic for an away driver (#74) is not pit traffic: it takes no place in the queue or the box order
+    if (outOfTraffic(c)) return false;
     if (c.mode !== 'race' || !c.pitReq || c.status !== 'running' || c.finished || c.change || c.laneSide >= 0) return false;
     if (c.human && c.laneOverride) return false;     // heading for the inside lane at the next switch
     return this.T.ahead(this.r.s(c), this.T.PIT_IN0) < PIT_Q.approach;
@@ -152,7 +155,7 @@ export class PitTraffic {
     // road followers nearest the entrance first: one braking for the queue joins it, so the car behind brakes for it in turn
     const queue = new Set(cars.filter((c) => c.pitHold));
     const toEntry = (c: Car): number => this.T.ahead(r.s(c), this.T.PIT_IN0);
-    const road = cars.filter((c) => !mem.has(c) && c.mode === 'race' && !c.change && c.laneSide < 0 && toEntry(c) < PIT_Q.approach)
+    const road = cars.filter((c) => !mem.has(c) && c.mode === 'race' && !outOfTraffic(c) && !c.change && c.laneSide < 0 && toEntry(c) < PIT_Q.approach)
       .sort((a, b) => (toEntry(a) - toEntry(b)) || a.idx - b.idx);
     for (const c of road) {
       if (!queue.size) break;
@@ -169,7 +172,8 @@ export class PitTraffic {
     for (const o of r.cars) {
       if (o === c) continue;
       const counts = o.mode === 'race' || o.mode === 'pitlane' || o.mode === 'grid' || o.mode === 'bayIn' || this.merging(o);
-      if (!counts) continue;
+      // a car out of traffic (#74: held for an away driver) is driven through, so nobody queues behind it
+      if (!counts || outOfTraffic(o)) continue;
       if (onlyHeld && !onlyHeld.has(o)) continue;     // a road car only brakes for the held queue, not ordinary racing traffic
       const so = r.s(o);
       const g = this.T.ahead(s, so);

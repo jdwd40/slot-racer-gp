@@ -329,7 +329,7 @@ describe('protocol and access checks', () => {
   it('health and version report the protocol, rules and load; unknown API paths are 404 and accounts are off without a database', async () => {
     const h = await fetch(`${base}/api/health`).then(async (r) => ({ s: r.status, b: (await r.json()) as Record<string, unknown> }));
     expect(h.s).toBe(200);
-    expect(h.b).toMatchObject({ ok: true, protocol: PROTOCOL_VERSION, rules: 'race-core-2026.11.3', db: 'disabled', accounts: false, roomCap: cfg.roomCap });
+    expect(h.b).toMatchObject({ ok: true, protocol: PROTOCOL_VERSION, rules: 'race-core-2026.11.4', db: 'disabled', accounts: false, roomCap: cfg.roomCap });
     expect(typeof h.b.rssMb).toBe('number');
     expect(await fetch(`${base}/api/version`).then((r) => r.json())).toMatchObject({ protocol: PROTOCOL_VERSION });
     expect((await fetch(`${base}/api/nothing`)).status).toBe(404);

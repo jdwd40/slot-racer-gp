@@ -19,7 +19,15 @@ describe('reconnect banner per screen', () => {
       expect(reconnectTextId(s)).toBe('net.reconnecting');
       expect(bannerOnCard(s)).toBe(false);
     }
-    expect(t(reconnectTextId('race'), { n: 20 })).toBe('Connection lost. Reconnecting… your car is held for up to 20 s.');
+    expect(t(reconnectTextId('race'), { n: 20 })).toBe('Connection lost. Reconnecting… your car is held where it stopped for up to 20 s.');
+  });
+
+  it('the race wording says what the server does (#74): the car is held where it stopped, for the room\'s grace period', () => {
+    // the server holds an away driver's car on the spot, out of traffic, and never recovers it to the pits meanwhile
+    expect(t('net.reconnecting', { n: 30 })).toBe('Connection lost. Reconnecting… your car is held where it stopped for up to 30 s.');
+    expect(t('net.reconnecting', { n: 20 })).toContain('held where it stopped');
+    // the lobby wording is unchanged: no car on track there
+    expect(t('net.reconnectingLobby', { n: 20 })).not.toContain('car');
   });
 
   it('the seat wording follows the room\'s grace period like the race wording does', () => {

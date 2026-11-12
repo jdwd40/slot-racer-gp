@@ -56,6 +56,7 @@ The rule is part of the shared race core (`Race.stallUpdate()` and the methods n
 
 - **Off (no count at all):** practice, AI cars, the grid and the lights, a terminal result (finished, DQ, DNF), a retired car, and anything but the racing lane (`mode` `race`): the pit lane, bays, the box, tow and de-slot all count as off. The rule starts at the green: a car that has not moved off by then gets its countdown from the green.
 - **Held (a legitimate wait; the count is reset to zero):**
+  - the driver is away: online, the room server has lost the link and is holding the seat for a reconnect (`Input.away`, #74; see *Online* below)
   - held by the shared pit queue, on the approach or behind it (`pitHold`), or at the pit exit (`exitHold`, `yielding`)
   - the squeeze priority hold (`squeezeHold`)
   - automatic pit control has the pedals (`sgCtl`)
@@ -122,7 +123,32 @@ The loss is the distance driven since the car last passed its bay, from a few me
 
 ### Online
 
-The server's race core counts, decides and recovers. Snapshots carry `stallT`, `stallHold` and `stallSvc` per car; both are additive, and the mirror copies them, so the HUD reads the server's count. The recovery goes out once as the ordinary race event `{ type: 'recover', car }`, with the personal message alongside. There is no new message type and no extra message loop. A disconnected car has no immunity: its controls are neutral and its count runs like anyone's. A reconnect gets the current state, with no events replayed, so the count is neither reset nor extended and a recovery is never repeated.
+The server's race core counts, decides and recovers. Snapshots carry `stallT`, `stallHold` and `stallSvc` per car; both are additive, and the mirror copies them, so the HUD reads the server's count. The recovery goes out once as the ordinary race event `{ type: 'recover', car }`, with the personal message alongside. There is no new message type and no extra message loop. A reconnect gets the current state, with no events replayed, so a recovery is never repeated.
+
+**A driver whose link is down is held, not recovered (#74, rules `race-core-2026.11.4`).** The reconnect banner promises "your car is held where it stopped", so that is what happens. The room server marks an in-race seat *away* while its connection is gone (the reconnect hold, `SLOTRUSH_RECONNECT_GRACE_S`) or while no `ctl` has arrived for more than `LINK_AWAY_MS` (1.5 s; a half-open mobile link still has its socket). It sends that seat's step input as neutral pedals plus `away`, so the race core is told, never guesses, and a replay is exact. The rule it follows: an away car must never gain anything, above all never track position through another car.
+
+- **While it is still moving** it stays in traffic: neutral pedals, it bumps and can be bumped like any car, so a coasting car can never slip through the one ahead. `stallBlock()` already returns *held*, so its count is 0.
+- **Once it has stopped** (slower than `STALL.stopV`) on the racing lane it is held (`Car.away`), unless automatic pit control is driving it (`sgCtl`, on the approach or in the box queue): the controller still takes such a car on into the pits when its turn comes, as before #74, so the cars queued behind it are never stuck for the hold. A held car:
+  - never counted and never recovered (`stallBlock()` *held*, the count reset to 0)
+  - out of traffic like a de-slotted, towed or parked car. Every check that reads other cars asks one predicate, `outOfTraffic()` (`src/traffic.ts`: mode `off` or `tow`, or held): collisions, `stallTrapped()`, the AI's following and defensive driving, automatic pit control's following, the shared pit queue (`PitTraffic.leader()`; a held car is not pit traffic at all, so it takes no place in the approach queue, the box order or a bay reservation while held), lane-change, pit-exit merge and re-slot clearance. It is also taken out of the squeeze priority queue while held, so it caps nobody there, and put back at its physical place if it rejoins inside the squeeze. Other cars drive through its spot, and a car stopped behind it is not trapped by it (that car's own count runs)
+  - standing on its brakes, whoever would drive it: its driver, automatic stop-and-go control or the AI of a finished car
+  - its place on the lap, lap validity, fuel and every debt and deadline unchanged. A service deadline is not exempt: an away car carried over its last chance breaches as before
+  - snapshotted with `away: true` and drawn dimmed by every client
+
+In the pit lane, a bay or a service nothing changes: the rule does not apply there and the queue and bay rules run as for anyone.
+
+**The return** (a resume, or the first `ctl` on a live socket). A held car rejoins traffic as soon as both hold:
+
+- no car in traffic is really inside it: less than `CAR_LEN` of slot apart in the same slot (touching bumper to bumper is not inside)
+- no car closing from behind could fail to stop short of it. With `rel` the closing car's speed above the held car's, its clear slot must exceed `rel × 0.5 s + rel² / (2 × BRAKE) + 1 m` (`AWAY_REJOIN`: half a second to react, then full braking at the race's own `BRAKE`, 30 m/s², with a metre to spare; about 24 m at 25 m/s). A car changing lanes into the held car's lane counts as in that lane wherever it is in the change. A change that starts after the rejoin needs `laneClear()`, which sees the rejoined car, so only one already under way can arrive unannounced.
+
+The wait for closing cars is capped at `AWAY_REJOIN.maxWait` (2 s) after the driver is back, so a stream of traffic cannot keep it out for ever; after that only a car inside it delays the return. Until it rejoins its pedals are still not its own (it stays on the brakes and is still *held* for the count), so the driver can never drive it through anything.
+
+It rejoins with the same contact grace as a re-slotted car (`graceT = PEN.grace`, 1.5 s): a contact involving it in that time is resolved but judged against neither car, so a driver who was told to drive through a held car is never penalised for meeting it as it comes back. After the grace, contact is judged as usual. A stop after the return is a fresh episode with the full three seconds.
+
+It cannot wait for ever. A car inside it is in traffic and is not trapped by a held car, so it either drives on (an AI never follows a held car) or, a stopped human car, is recovered by its own three-second count, and the held car rejoins on the next step. Two held cars inside each other ignore each other and rejoin together once both drivers are back; `collide()` then separates them like any overlap, front car in front, so neither passes the other (the front one is pushed forward by at most a quarter of the overlap, about 0.35 m, as in any contact, and the rejoin grace means neither is judged for it). (A car held legitimately inside it, for example by the pit queue, keeps it waiting just as long: it would be queueing there anyway.)
+
+**The hold window.** If the reconnect grace runs out, nothing new happens: `dropSeat()` retires the car (DNF `retired`, or DQ with a latched breach), and it parks in its own bay as in *Disconnects, grace and retirement* ([online-server.md](online-server.md)). The same window applies to a socket that stays open but sends no controls: after `SLOTRUSH_RECONNECT_GRACE_S` of silence the server treats it as expired in exactly the same way, for a car still racing. A finished car affects nobody, so its driver keeps the seat (and gets the result) however quiet the page is. From #69 until #74 a disconnected car had no immunity and was moved to its bay 3 s after it stopped, losing up to a lap.
 
 ### Evidence (#69)
 

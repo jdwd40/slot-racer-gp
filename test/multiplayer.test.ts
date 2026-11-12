@@ -4,6 +4,7 @@
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import raceSrc from '../src/race.ts?raw';
 import pitSrc from '../src/pit.ts?raw';
+import trafficSrc from '../src/traffic.ts?raw';
 import trackSrc from '../src/track.ts?raw';
 import * as T from '../src/track';
 import {
@@ -466,9 +467,10 @@ describe('authoritative state', () => {
   it('the simulation core imports no browser, rendering, audio or storage code and runs headless', () => {
     expect(typeof (globalThis as { window?: unknown }).window).toBe('undefined');
     expect(typeof (globalThis as { document?: unknown }).document).toBe('undefined');
-    for (const src of [raceSrc, pitSrc, trackSrc]) {
+    // src/traffic.ts (#74 review): the one out-of-traffic predicate the race core and the pit traffic share
+    for (const src of [raceSrc, pitSrc, trackSrc, trafficSrc]) {
       const imports = [...src.matchAll(/from '([^']+)'/g)].map((m) => m[1]);
-      expect(imports.every((x) => x === './track' || x === './pit' || x === './race')).toBe(true);
+      expect(imports.every((x) => x === './track' || x === './pit' || x === './race' || x === './traffic')).toBe(true);
       expect(src).not.toMatch(/\b(window|document|localStorage|requestAnimationFrame|AudioContext|performance)\b\./);
     }
     const r = new Race({ roster: [{ id: 'a', control: 'ai' }, { id: 'b', control: 'ai' }], seed: 5 });

@@ -67,6 +67,23 @@ const RUNON_STEPS = 8;
 /** Seconds after the first finisher that a solo race (one human) waits before classifying the rest. */
 const SOLO_FINISH_WINDOW = 120;
 const RACE_TIME_LIMIT = 1200;
+/**
+ * An in-race seat is "away" (#74) when its connection is gone (in the reconnect hold) or when no `ctl` has arrived for longer
+ * than this. The second case is the common mobile drop: the socket dies silently and the server only notices on its next ws
+ * ping (25 s) or when the client's watchdog reconnects, so the seat still has a peer. The client sends `ctl` at least every
+ * HEARTBEAT_MS (250 ms); this sits above LIMITS.inputTimeoutMs (1000 ms, when held pedals go neutral) with a margin for a
+ * browser that throttles timers in the background, so a live but briefly slow client is never taken for a lost one. An
+ * away car is held where it stopped, out of traffic and exempt from the stopped-on-track rule, until the seat resumes, its
+ * first `ctl` arrives, or the hold expires and the car retires (docs/online-server.md, docs/auto-bay.md).
+ */
+export const LINK_AWAY_MS = 1500;
+/**
+ * A gap between two pumps of this room longer than this is the server's own stall (GC, an overloaded event loop), not the
+ * clients': the room is normally pumped every 10 ms, and controls that arrived during the stall are only read after it. The
+ * time beyond this is not counted against any seat's control clock (`ctlAt`), so a server stall never makes every driver
+ * away at once, nor brings a silent seat's hold expiry closer. Controls that were already late before the stall still count.
+ */
+export const PUMP_STALL_MS = 250;
 
 export type JoinOk = { ok: true; participant: string; token: string };
 export type Fail = { ok: false; code: ErrorCode; detail?: string };
@@ -89,6 +106,8 @@ export class Room {
   /** the latest wall time the room was given (by pump, handle, join...), for work done outside those calls */
   private clock: number;
   private resultsAt = 0;
+  /** wall time of the previous pump (null before the first): see PUMP_STALL_MS */
+  private lastPumpAt: number | null = null;
   // ---- the current race (state 'race'); everything here is reset on start
   race: Race | null = null;
   raceId: string | null = null;
@@ -352,7 +371,8 @@ export class Room {
     });
     this.raceId = randomUUID();
     this.enc = new SnapEncoder(this.raceId);
-    for (const p of this.parts) { p.inRace = !p.left; p.held = neutral(); p.ready = false; }
+    // the control clock starts with the race: no controls are sent in the lobby, so lobby time is never silence (#74)
+    for (const p of this.parts) { p.inRace = !p.left; p.held = neutral(); p.ready = false; p.ctlAt = now; }
     this.state = 'race';
     this.baseWall = now; this.stepsDone = 0; this.lagSteps = 0; this.startedAt = now; this.greenAt = null;
     this.laps = []; this.evBuf = []; this.result = null; this.snapSlot = 0; this.snapTick = -1;
@@ -366,6 +386,12 @@ export class Room {
   pump(now: number): void {
     if (this.state === 'closed') return;
     this.clock = Math.max(this.clock, now);
+    // a server stall is not a client's silence (PUMP_STALL_MS): only staleness that built up while the room was pumped counts
+    if (this.lastPumpAt !== null) {
+      const late = now - this.lastPumpAt - PUMP_STALL_MS;
+      if (late > 0) for (const p of this.parts) if (p.peer) p.ctlAt = Math.min(now, p.ctlAt + late);
+    }
+    this.lastPumpAt = now;
     this.timers(now);
     if (this.state === 'race' && this.race) this.stepRace(now);
   }
@@ -381,16 +407,55 @@ export class Room {
         this.dropSeat(p, now);
         if (this.state === 'closed') return;
       }
+      // a half-open link (#74): the socket is still there but the race has had no controls from it for the whole reconnect
+      // grace. Its car has been held as away all that time; the hold window is the same as for a closed socket, so it ends
+      // the same way: the socket is closed (the page, if it is alive at all, reconnects and is told its seat expired) and the
+      // seat is dropped, which retires the car (DNF retired, DQ on a latched breach) and parks it. Only a car still racing:
+      // a finished car affects nobody, and its driver (say, a tab left hidden while slower cars finish, whose timers the
+      // browser throttles to once a minute) must still get the result and the rematch
+      else if (!p.left && p.peer && p.inRace && this.state === 'race' && this.stillRacing(p) && now - p.ctlAt > this.cfg.graceS * 1000) {
+        this.log.info('room.grace_expired', { room: this.id, participant: p.id, state: this.state, silent: true });
+        const peer = p.peer;
+        p.peer = null; p.held = neutral();
+        try { peer.close(4000, 'no controls'); } catch { /* already closing */ }
+        this.dropSeat(p, now);
+        if ((this.state as RoomState) === 'closed') return;   // (dropSeat may close the room)
+      }
     }
     if (now - this.createdAt > this.cfg.roomMaxS * 1000) { this.abortAndClose('lifetime', now); return; }
     if (this.state === 'lobby' && now - this.lastActivity > this.cfg.lobbyIdleS * 1000) { this.close('idle'); return; }
     if (this.state === 'results' && now - this.resultsAt > this.cfg.resultsIdleS * 1000) this.close('idle');
   }
 
-  private inputs(): Record<DriverId, Input> {
+  /** This seat's car is still racing: running, not finished, not retired. */
+  private stillRacing(p: Participant): boolean {
+    const c = this.race?.car(p.id);
+    return !!c && c.status === 'running' && !c.finished && !c.retire;
+  }
+
+  /** Whether this in-race seat's driver is away at `now` (LINK_AWAY_MS): decided here, from the server's own clock, never by a client. */
+  private away(p: Participant, now: number): boolean {
+    return p.inRace && !p.left && (!p.peer || now - p.ctlAt > LINK_AWAY_MS);
+  }
+
+  /**
+   * The race step's input per seat. An away seat gets neutral pedals plus `away` (#74), so the race core holds its car out of
+   * traffic: it is part of the input, so a replay of the same inputs gives the same race. A seat given up (left/retired) is
+   * omitted, which is neutral.
+   */
+  private inputs(now: number): Record<DriverId, Input> {
     const out: Record<DriverId, Input> = Object.create(null) as Record<DriverId, Input>;
-    for (const p of this.parts) if (p.inRace && !p.left && p.peer) out[p.id] = p.held;
+    for (const p of this.parts) {
+      if (!p.inRace || p.left) continue;
+      out[p.id] = this.away(p, now) ? { up: false, down: false, away: true } : p.held;
+    }
     return out;
+  }
+
+  /** Whether the race is holding this seat's car for a reconnect (#74); false outside a race. For tests and diagnostics. */
+  isAway(participantId: string, now = this.clock): boolean {
+    const p = this.participant(participantId);
+    return !!p && this.state === 'race' && this.away(p, now);
   }
 
   /**
@@ -443,7 +508,7 @@ export class Room {
 
   private stepOnce(now: number): void {
     const race = this.race!;
-    race.update(STEP, this.inputs());
+    race.update(STEP, this.inputs(now));
     this.stepsDone++;
     for (const e of race.drainEvents()) {
       this.evBuf.push(e);

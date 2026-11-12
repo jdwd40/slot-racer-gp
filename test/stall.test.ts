@@ -2,7 +2,8 @@
 // car ahead, gets a three-second warning and is then moved to its own bay. These tests drive the shared race core (the same
 // code the room server runs) under continuous simulation. See docs/auto-bay.md#stopped-on-track-recovery.
 import { describe, it, expect } from 'vitest';
-import { Race, Car, LAPS, PEN, STALL, type Controls, type Input, type RosterEntry, type WireEvent, type RaceSnapshot } from '../src/race';
+import { createHash } from 'node:crypto';
+import { Race, Car, LAPS, PEN, STALL, AWAY, AWAY_REJOIN, BRAKE as BRAKE_DECEL, type Controls, type Input, type RosterEntry, type WireEvent, type RaceSnapshot } from '../src/race';
 import { stallLeft } from '../src/hud';
 import { applySnapshot, localEvent, mirrorRace } from '../src/net/mirror';
 import { FINISH_S } from '../src/track';
@@ -16,6 +17,7 @@ const NONE: Input = { up: false, down: false };
 const UP: Input = { up: true, down: false };
 const BRAKE: Input = { up: false, down: true };
 const BOTH: Input = { up: true, down: true };
+
 
 /** A race already under way: no countdown, no start grace, every car on lap LAP. */
 function race(roster: RosterEntry[], track = 'circuit-1', opts: { practice?: boolean } = {}): Race {
@@ -1039,5 +1041,564 @@ describe('state on the wire and determinism', () => {
       expect(on).toBe(go(false, roster));
       expect(on).not.toContain('"type":"recover"');
     }
+  });
+});
+
+// ------------------------------------------------------------------------------------------------ away drivers (#74)
+// While the room server holds a seat for a reconnect it sends the driver's input as `away` (Input.away). The car is held
+// where it stopped, out of collisions and of everyone's traffic checks, exempt from the stopped-on-track rule; it rejoins
+// traffic once nothing overlaps it. See docs/auto-bay.md#stopped-on-track-recovery and docs/online-server.md.
+describe('a car held for an away driver (#74)', () => {
+  /** AWAY_REJOIN's clear slot for a car closing at rel m/s: reaction, then full braking, then the margin */
+  const stopNeed = (rel: number): number => rel * AWAY_REJOIN.react + (rel * rel) / (2 * BRAKE_DECEL) + AWAY_REJOIN.margin;
+  const contacts = (ev: WireEvent[], id: string): WireEvent[] => ev.filter((e) => (e.type === 'bump' || e.type === 'offence') && ((e as { car?: string }).car === id || (e as { other?: string }).other === id));
+
+  it('stopped for 10 s while away: never counted, never recovered, never touched; the car behind drives through its spot', () => {
+    const r = race([human('p'), ai('f')]);
+    const p = r.car('p')!, f = r.car('f')!;
+    place(r, p, U(r, STRAIGHT), 1, 0);
+    place(r, f, U(r, STRAIGHT - 12), 1, 0);
+    const spot = p.u;
+    r.ai = () => ({ t: 0.6, b: 0 });          // a steady part throttle straight at it
+    let maxStall = 0, everTouched = false, notAway = 0;
+    const ev = run(r, { p: AWAY }, 10, () => { maxStall = Math.max(maxStall, p.stallT); everTouched ||= touches(r, p); if (!p.away) notAway++; });
+    expect(recov(ev)).toEqual([]);
+    expect(maxStall).toBe(0);
+    expect(notAway).toBe(0);
+    expect(everTouched).toBe(false);
+    expect(contacts(ev, 'p')).toEqual([]);
+    expect(p).toMatchObject({ mode: 'race', status: 'running', v: 0 });
+    expect(p.u).toBe(spot);                   // never shoved along
+    expect(f.u).toBeGreaterThan(spot + 10);   // drove through where it stands
+    expect(r.snapshot().cars.find((c) => c.id === 'p')!.away).toBe(true);
+  });
+
+  it('a stopped car right behind it is not trapped by it: that car is recovered at 3 s, the away car never', () => {
+    const go = (pIn: Input) => {
+      const r = race([human('p'), human('b')]);
+      const p = r.car('p')!, b = r.car('b')!;
+      place(r, p, U(r, STRAIGHT), 1, 0);
+      place(r, b, U(r, STRAIGHT) - r.T.CAR_LEN - 1, 1, 0);
+      const t0 = r.raceTime;
+      const at: Record<string, number> = {};
+      run(r, { p: pIn }, 10, (ev) => { for (const e of recov(ev)) at[(e as { car: string }).car] = r.raceTime - t0; });
+      return { r, p, b, at };
+    };
+    const away = go(AWAY);
+    expect(away.r.stallTrapped(away.b)).toBe(false);
+    expect(Object.keys(away.at)).toEqual(['b']);
+    expect(Math.abs(away.at.b - 3)).toBeLessThanOrEqual(1 / 120 + 1e-9);
+    expect(away.p.mode).toBe('race');
+    // the control: a connected driver stopped there blocks, so it is recovered first and the one behind 3 s later
+    const here = go(NONE);
+    expect(Math.abs(here.at.p - 3)).toBeLessThanOrEqual(1 / 120 + 1e-9);
+    expect(Math.abs(here.at.b - 6)).toBeLessThanOrEqual(2 / 120 + 1e-9);
+  });
+
+  it('a real AI behind it does not queue: it drives through instead of following a stopped car', () => {
+    const r = new Race({ roster: [human('p', 0), ai('f', 1)], seed: 5, track: 'circuit-1' });
+    r.phase = 'racing'; r.t = 10; r.raceTime = 5;
+    for (const c of r.cars) { c.mode = 'race'; c.graceT = 0; c.crossed = LAP; c.lapsDone = LAP - 1; c.sectors = 0; c.pitPlan = false; c.fuel = 1; }
+    const p = r.car('p')!, f = r.car('f')!;
+    place(r, p, U(r, STRAIGHT), 1, 0);
+    place(r, f, U(r, STRAIGHT - 30), 1, 12);
+    const spot = p.u;
+    const ev = run(r, { p: AWAY }, 6);
+    expect(f.u).toBeGreaterThan(spot + 20);
+    expect(contacts(ev, 'p')).toEqual([]);
+    expect(p.u).toBe(spot);
+  });
+
+  it('coming back resets the count: a running warning is cleared by the hold, and a later stop gets the full 3 s', () => {
+    const r = race([human('p')]);
+    const p = r.car('p')!;
+    place(r, p, U(r, STRAIGHT), 1, 0);
+    run(r, { p: NONE }, 2);
+    expect(p.stallT).toBeGreaterThan(1.9);
+    let maxStall = 0;
+    const ev = run(r, { p: AWAY }, 5, () => { maxStall = Math.max(maxStall, p.stallT); });
+    expect(maxStall).toBe(0);                 // reset at once, not paused
+    expect(recov(ev)).toEqual([]);
+    // back, and still not moving: a fresh episode of 3 s from the first step back
+    const t = timeToRecover(r, 'p', { p: NONE });
+    expect(Math.abs(t - 3)).toBeLessThanOrEqual(1 / 120 + 1e-9);
+  });
+
+  it('collisions come back only once no car is inside it; until then its pedals are not its own, so it cannot drive through', () => {
+    const r = race([human('p'), human('f')]);
+    const p = r.car('p')!, f = r.car('f')!;
+    place(r, p, U(r, STRAIGHT), 1, 0);
+    place(r, f, U(r, STRAIGHT) - 0.3, 1, 0);   // f stands inside p's spot (it drove into it while p was held)
+    const pu = p.u, fu = f.u;
+    run(r, { p: AWAY, f: NONE }, 1);
+    expect(p.away).toBe(true);
+    expect([p.u, f.u]).toEqual([pu, fu]);      // inside each other, and nobody is pushed apart
+    // p is back, on full Throttle, while f is still inside it: still held, it does not move, and it does not count
+    const ev = run(r, { p: UP, f: NONE }, 0.5);
+    expect(p.away).toBe(true);
+    expect([p.u, f.u]).toEqual([pu, fu]);
+    expect(p.throttle).toBe(0);
+    expect(p.stallT).toBe(0);
+    expect(contacts(ev, 'p')).toEqual([]);
+    // f drives on, through and out ahead: p rejoins traffic on the first step nothing is inside it, never earlier, and only
+    // then drives, behind f
+    let clearedGap = -1;
+    ev.push(...run(r, { p: UP, f: UP }, 3, () => {
+      if (clearedGap < 0 && !p.away) clearedGap = r.T.gapS(r.s(p), r.s(f));
+      if (p.away) expect(p.u).toBe(pu);
+      expect(r.T.gapS(r.s(p), r.s(f))).toBeGreaterThan(-r.T.CAR_LEN);   // p never gets in front of f
+    }));
+    expect(clearedGap).toBeGreaterThanOrEqual(r.T.CAR_LEN - 1e-6);
+    expect(contacts(ev, 'p')).toEqual([]);
+    expect(p.away).toBe(false);
+    expect(r.snapshot().cars.find((c) => c.id === 'p')!.away).toBeUndefined();
+    // and it is in traffic again: an overlap now is resolved like any other contact
+    place(r, f, p.u + r.T.CAR_LEN - 0.3, 1, 0);
+    r.update(DT, { p: NONE, f: NONE });
+    expect(r.T.gapS(r.s(p), r.s(f))).toBeGreaterThanOrEqual(r.T.CAR_LEN - 1e-6);
+  });
+
+  // ---- review of #75, finding 1: an away car must never gain track position through another car
+  /** p's slot distance behind f (> 0 while p is behind), wrapped like everything on the slot */
+  const behind = (r: Race, p: Car, f: Car): number => r.T.gapS(r.s(p), r.s(f));
+
+  it('nose to tail behind a stopped car: one away step and then Throttle never takes it through (it stays behind)', () => {
+    for (const awaySteps of [1, 30, 120]) {
+      const r = race([human('p'), ai('f')]);
+      parkAI(r);                                // f stands on its brakes for the whole run
+      const p = r.car('p')!, f = r.car('f')!;
+      place(r, f, U(r, STRAIGHT), 1, 0);
+      place(r, p, U(r, STRAIGHT) - r.T.CAR_LEN, 1, 0);
+      let i = 0, minGap = Infinity;
+      run(r, () => ({ p: i++ < awaySteps ? AWAY : UP }), 1.5 + awaySteps * DT, () => { minGap = Math.min(minGap, behind(r, p, f)); });
+      expect(minGap).toBeGreaterThan(r.T.CAR_LEN - 0.05);
+      expect(behind(r, p, f)).toBeGreaterThan(0);
+      expect(p.laneSide).toBe(f.laneSide);
+    }
+  });
+
+  it('rolling contact: 12 m/s into a car holding 4 m/s, with the away step during the contact, never passes it', () => {
+    for (const awayAt of [0, 3, 10]) {
+      const r = race([human('p'), ai('f')]);
+      const p = r.car('p')!, f = r.car('f')!;
+      place(r, f, U(r, STRAIGHT - 30), 1, 4);
+      place(r, p, U(r, STRAIGHT - 30) - r.T.CAR_LEN - 0.05, 1, 12);
+      r.ai = (c: Car) => ({ t: c.v < 4 ? 0.6 : 0, b: c.v > 4.3 ? 1 : 0 });
+      // the server's realistic sequence: Throttle, then neutral pedals (input timeout), then one away step, then Throttle
+      let i = 0;
+      run(r, () => { const k = i++; return { p: k === awayAt ? AWAY : k < awayAt ? NONE : UP }; }, 2, () => {
+        expect(behind(r, p, f)).toBeGreaterThan(0);
+      });
+      expect(behind(r, p, f)).toBeGreaterThan(r.T.CAR_LEN - 0.05);
+      expect(p.away).toBe(false);
+    }
+  });
+
+  it('a coasting away car stays in traffic: it runs into the stopped car ahead and stays behind it, and is held only once stopped', () => {
+    const r = race([human('p'), human('f')]);
+    const p = r.car('p')!, f = r.car('f')!;
+    place(r, f, U(r, STRAIGHT), 1, 0);
+    place(r, p, U(r, STRAIGHT) - r.T.CAR_LEN - 1, 1, 6);
+    let heldWhileMoving = false, bumped = false;
+    const ev = run(r, { p: AWAY, f: NONE }, 2, (e) => {
+      if (p.away && Math.abs(p.v) >= STALL.stopV) heldWhileMoving = true;
+      bumped ||= e.some((x) => x.type === 'bump' && x.car === 'p');
+      expect(behind(r, p, f)).toBeGreaterThan(0);
+    });
+    expect(heldWhileMoving).toBe(false);
+    expect(bumped).toBe(true);
+    expect(p.away).toBe(true);
+    expect(recov(ev)).toEqual([]);
+  });
+
+  it('a stopped queue on the racing lane cannot be jumped by going away and coming back', () => {
+    const r = race([ai('a', 1), human('b', 0), human('c', 2)]);
+    parkAI(r);
+    const [a, b, c] = ['a', 'b', 'c'].map((id) => r.car(id)!);
+    const u0 = U(r, STRAIGHT);
+    place(r, a, u0, 1, 0); place(r, b, u0 - r.T.CAR_LEN - 0.2, 1, 0); place(r, c, u0 - 2 * r.T.CAR_LEN - 0.4, 1, 0);
+    let i = 0;
+    run(r, () => { const k = i++; return { b: k === 5 ? AWAY : UP, c: k === 2 || k === 40 ? AWAY : UP }; }, 2, () => {
+      expect(behind(r, b, a)).toBeGreaterThan(0);
+      expect(behind(r, c, b)).toBeGreaterThan(0);
+    });
+    expect(behind(r, b, a)).toBeGreaterThan(r.T.CAR_LEN - 0.05);
+    expect(behind(r, c, b)).toBeGreaterThan(r.T.CAR_LEN - 0.05);
+  });
+
+  it('under automatic stop-and-go control an away car is never held: it stays in traffic, so the controller cannot take it through the car ahead', () => {
+    const go = (awayStep: boolean) => {
+      const r = race([human('p'), human('f')]);
+      const p = r.car('p')!, f = r.car('f')!;
+      place(r, f, U(r, STRAIGHT), 1, 0);
+      place(r, p, U(r, STRAIGHT) - r.T.CAR_LEN, 1, 0);
+      // the controller owns p's pedals and wants 10 m/s (as on an automatic pit approach), whatever is ahead
+      const sg = r.sgUpdate.bind(r);
+      r.sgUpdate = (c: Car) => { sg(c); if (c === p) c.sgCtl = true; };
+      r.sgTarget = () => 10;
+      let i = 0, minGap = Infinity;
+      run(r, () => ({ p: awayStep && i++ === 0 ? AWAY : NONE, f: NONE }), 1.5, () => { minGap = Math.min(minGap, behind(r, p, f)); });
+      return { minGap, end: behind(r, p, f), len: r.T.CAR_LEN };
+    };
+    for (const x of [go(false), go(true)]) {
+      expect(x.minGap).toBeGreaterThan(x.len - 0.05);
+      expect(x.end).toBeGreaterThan(0);
+    }
+  });
+
+  // ---- review of #75 round 2: a held car is out of every traffic check, the shared pit queue and the squeeze queue included
+  /**
+   * The shared pit queue at the entrance: AI x stands in the box serving `serve` s; human p, routed to the box, waits stopped
+   * at the entrance behind it; human q, routed to the box too, comes up behind p. p's link drops (`pIn`). `forceManual` keeps
+   * p out of automatic control, as for a car the controller has not taken over, so that p really is held out of traffic.
+   */
+  function pitQueue(pIn: Input, forceManual: boolean) {
+    const r = race([human('p', 0), ai('x', 1), human('q', 2)]);
+    const p = r.car('p')!, x = r.car('x')!, q = r.car('q')!;
+    x.mode = 'pitlane'; x.u = U(r, r.T.PEN_S); x.d = r.T.pitD(r.s(x)); x.v = 0; x.laneSide = -1; x.sgOwed = 2; x.sgDue = LAP + 1;
+    place(r, p, U(r, r.T.PIT_IN0 - 0.5), -1, 0); p.sgOwed = 3; p.sgDue = LAP + 1; r.syncRoute(p);
+    place(r, q, U(r, r.T.PIT_IN0 - 12), -1, 6); q.sgOwed = 3; q.sgDue = LAP + 1; r.syncRoute(q);
+    if (forceManual) { const sg = r.sgUpdate.bind(r); r.sgUpdate = (c: Car) => { sg(c); if (c === p) c.sgCtl = false; }; }
+    let qStopped = 0, xLeft = -1, qIn = -1, qServed = -1, pHeld = false;
+    const t0 = r.raceTime;
+    const ev = run(r, () => ({ p: pIn, q: NONE }), 14, () => {
+      if (q.mode === 'race' && Math.abs(q.v) < 0.05) qStopped += DT;
+      if (xLeft < 0 && x.sgOwed <= 0) xLeft = r.raceTime - t0;
+      if (qIn < 0 && q.mode !== 'race') qIn = r.raceTime - t0;
+      if (qServed < 0 && q.sgOwed <= 0) qServed = r.raceTime - t0;
+      pHeld ||= p.away;
+      return qServed >= 0;                    // q's own stop served: what it does next is not this test
+    });
+    return { r, p, q, x, ev, qStopped, xLeft, qIn, qServed, pHeld };
+  }
+
+  it('the shared pit queue: a car behind an away car on the approach goes on into the pits once the box frees (never stuck for the hold)', () => {
+    // under automatic pit control (as the controller takes a routed car over at the entrance): the away car is never held, so
+    // the controller drives it into the box when its turn comes and the car behind follows, exactly as with it connected
+    const here = pitQueue(NONE, false), away = pitQueue(AWAY, false);
+    expect(here.xLeft).toBeGreaterThan(0);
+    expect(here.qServed).toBeGreaterThan(here.xLeft);   // the box is exclusive: x, then p, then q
+    // the away car itself was driven in and served, as before #74 (back out on the road with no driver it then coasts to a
+    // stop and is held there, which is the ordinary away case)
+    expect(away.p.sgOwed).toBeLessThanOrEqual(0);
+    expect(away.qServed).toBeGreaterThan(0);
+    expect(away.qServed).toBeLessThan(here.qServed + 1);
+    // not under automatic control: the away car is held out of traffic, and it is no queue leader for anyone: q goes past it
+    // into the pits as soon as the box is free (and never counts or is recovered while it waits for the box)
+    const manual = pitQueue(AWAY, true);
+    expect(manual.pHeld).toBe(true);
+    expect(manual.p).toMatchObject({ mode: 'race', away: true });
+    expect(manual.qServed).toBeGreaterThan(manual.xLeft);
+    expect(manual.qServed).toBeLessThan(here.qServed + 1);
+    expect(manual.r.pit.order).not.toContain(manual.p.idx);
+    for (const x of [away, manual]) expect(recov(x.ev)).toEqual([]);
+  });
+
+  it('the squeeze priority queue: a held car ahead holds nobody, on either lane, and the same-lane car is neither capped nor recovered', () => {
+    for (const side of [1, -1]) {
+      const r = race([human('a'), human('p')]);
+      const a = r.car('a')!, p = r.car('p')!;
+      place(r, a, U(r, r.T.SQ_Q1 + 2), -1, 0);
+      place(r, p, side < 0 ? U(r, r.T.SQ_Q1 + 2) - r.T.CAR_LEN - 1 : U(r, r.T.SQ_Q1 - 0.2), side, 0);
+      r.squeezeQ.length = 0; r.squeezeQ.push(a, p);
+      run(r, { a: AWAY, p: NONE }, DT);
+      expect(a.away).toBe(true);
+      expect(r.squeezeQ).not.toContain(a);     // held: out of the queue
+      const lapValid = p.lapValid;
+      let held = false;
+      const ev = run(r, { a: AWAY, p: UP }, 3, () => { held ||= p.squeezeHold; });
+      expect(held).toBe(false);
+      expect(p.u).toBeGreaterThan(a.u + 5);    // drove on past (through) the held car
+      expect(recov(ev)).toEqual([]);
+      expect(p.lapValid).toBe(lapValid);
+      expect(contacts(ev, 'p')).toEqual([]);
+    }
+  });
+
+  it('a held car that rejoins inside the squeeze is queued again at its physical place, behind the car that went past it', () => {
+    const r = race([human('a'), human('p')]);
+    const a = r.car('a')!, p = r.car('p')!;
+    place(r, a, U(r, r.T.SQ_ENTRY + 3), -1, 0);
+    place(r, p, U(r, r.T.SQ_ENTRY + 3) - r.T.CAR_LEN - 1, -1, 0);
+    r.squeezeQ.length = 0; r.squeezeQ.push(a, p);
+    run(r, { a: AWAY, p: UP }, 3, () => r.T.gapS(r.s(a), r.s(p)) > r.T.CAR_LEN + 1);
+    expect(r.T.gapS(r.s(a), r.s(p))).toBeGreaterThan(r.T.CAR_LEN);   // p went through and is clear ahead
+    expect(r.T.inRange(r.s(p), r.T.SQ_ENTRY, r.T.SQ_EXIT)).toBe(true);
+    run(r, { a: NONE, p: NONE }, DT);
+    expect(a.away).toBe(false);
+    expect(r.squeezeQ).toEqual([p, a]);
+  });
+
+  it('two held cars inside each other both rejoin when both drivers are back, in their order on the slot, without a pass', () => {
+    const r = race([human('a'), human('b')]);
+    const a = r.car('a')!, b = r.car('b')!;
+    place(r, a, U(r, STRAIGHT), 1, 0);
+    place(r, b, U(r, STRAIGHT) - 0.5, 1, 0);   // b came to rest inside a
+    run(r, { a: AWAY, b: AWAY }, 1);
+    expect([a.away, b.away]).toEqual([true, true]);
+    let steps = 0;
+    run(r, { a: NONE, b: NONE }, 1, () => { steps++; return !a.away && !b.away; });
+    expect([a.away, b.away]).toEqual([false, false]);
+    expect(steps).toBeLessThanOrEqual(2);
+    // collide() separates them as any overlap: b behind a, a car length apart, and then both drive on in that order
+    run(r, { a: UP, b: UP }, 2, () => { expect(behind(r, b, a)).toBeGreaterThan(0); });
+    expect(behind(r, b, a)).toBeGreaterThanOrEqual(r.T.CAR_LEN - 1e-6);
+  });
+
+  it('no deadlock: a connected car stopped inside a held car is not trapped by it, so its own rule recovers it, and the held car then rejoins', () => {
+    const r = race([human('p'), human('x')]);
+    const p = r.car('p')!, x = r.car('x')!;
+    place(r, p, U(r, STRAIGHT), 1, 0);
+    run(r, { p: AWAY }, 0.2);
+    place(r, x, U(r, STRAIGHT) - 0.4, 1, 0); x.stallT = 0;   // x drove into p's spot and has just stopped there
+    expect(r.stallTrapped(x)).toBe(false);
+    const t0 = r.raceTime;
+    let rejoinedAt = -1;
+    const ev = run(r, { p: NONE, x: NONE }, 4, () => { if (rejoinedAt < 0 && !p.away) rejoinedAt = r.raceTime - t0; });
+    expect(recov(ev)).toEqual([{ type: 'recover', car: 'x' }]);
+    expect(rejoinedAt).toBeGreaterThan(2.9);
+    expect(rejoinedAt).toBeLessThan(3.1);
+    expect(p).toMatchObject({ mode: 'race', away: false });
+  });
+
+  it('a car closing fast from behind keeps it out of traffic until it is past: the return never hands it a stopped car', () => {
+    const r = race([human('p'), ai('f')]);
+    const p = r.car('p')!, f = r.car('f')!;
+    place(r, p, U(r, STRAIGHT), 1, 0);
+    place(r, f, U(r, STRAIGHT) - r.T.CAR_LEN - 3, 1, 14);
+    r.ai = () => ({ t: 1, b: 0 });
+    run(r, { p: AWAY }, DT);
+    expect(p.away).toBe(true);
+    // back at once: f is 3 m of clear slot behind at 14 m/s, far inside its stopping distance, so p stays held
+    let heldWhileBehind = true;
+    const ev = run(r, { p: NONE }, 1.5, () => {
+      const g = r.T.gapS(r.s(f), r.s(p));
+      if (g > 0 && g - r.T.CAR_LEN < stopNeed(f.v - p.v) && !p.away) heldWhileBehind = false;
+    });
+    expect(heldWhileBehind).toBe(true);
+    expect(contacts(ev, 'p')).toEqual([]);
+    expect(f.u).toBeGreaterThan(p.u + r.T.CAR_LEN);
+    expect(p.away).toBe(false);
+  });
+
+  // ---- review of #75 round 3: the rejoin never shunts or penalises the car behind
+  const offencesOf = (ev: WireEvent[], id: string): WireEvent[] => ev.filter((e) => e.type === 'offence' && (e as { car: string }).car === id);
+
+  it('a rival driving through at 15/20/25 m/s when the driver returns: no offence for anyone, whether it brakes 0.3 s after the rejoin or never', () => {
+    for (const v of [15, 20, 25]) for (const back of [4, 8, 12, 18, 25, 32]) for (const brakes of [true, false]) {
+      const r = race([human('a'), human('b')]);
+      const a = r.car('a')!, b = r.car('b')!;
+      place(r, a, U(r, STRAIGHT), 1, 0);
+      place(r, b, U(r, STRAIGHT) - r.T.CAR_LEN - back, 1, v);
+      run(r, { a: AWAY, b: UP }, DT);
+      expect(a.away).toBe(true);
+      let rejoinedAt = -1, gapAtRejoin = -1, relAtRejoin = 0, waitAtRejoin = 0;
+      const offenceTimes: number[] = [];
+      const back0 = r.raceTime;
+      const ev = run(r, () => {
+        const sinceRejoin = rejoinedAt < 0 ? -1 : r.raceTime - rejoinedAt;
+        return { a: NONE, b: brakes && sinceRejoin >= 0.3 ? BRAKE : UP };
+      }, 3, (e) => {
+        if (e.some((x) => x.type === 'offence')) offenceTimes.push(r.raceTime);
+        if (rejoinedAt < 0 && !a.away) {
+          rejoinedAt = r.raceTime;
+          const g = r.T.gapS(r.s(b), r.s(a));
+          gapAtRejoin = g > 0 ? g - r.T.CAR_LEN : Infinity;   // b already past: nothing closing
+          relAtRejoin = b.v - a.v; waitAtRejoin = r.raceTime - back0;
+        }
+      });
+      const tag = `v ${v} back ${back} ${brakes ? 'brakes' : 'throttle'}`;
+      expect(rejoinedAt, tag).toBeGreaterThan(0);
+      expect(offencesOf(ev, 'a'), tag).toEqual([]);
+      if (brakes) expect(offencesOf(ev, 'b'), tag).toEqual([]);
+      // never braking at all, it hits the rejoined car: that first contact (within the rejoin grace) is judged against
+      // nobody. Ramming it again once the grace is over is an ordinary rear-end, judged as any other
+      else expect(offenceTimes.filter((t) => t - rejoinedAt < PEN.grace), tag).toEqual([]);
+      // it rejoined with b far enough back to stop (or b already past), unless the bounded wait ran out first
+      if (Number.isFinite(gapAtRejoin) && waitAtRejoin <= AWAY_REJOIN.maxWait) expect(gapAtRejoin, tag).toBeGreaterThanOrEqual(stopNeed(relAtRejoin) - 0.5);
+      // braking 0.3 s after the rejoin, it stops short: no contact at all
+      if (brakes) expect(contacts(ev, 'b').filter((e) => e.type === 'bump'), tag).toEqual([]);
+    }
+  });
+
+  it('a rival changing lanes into the held car\'s lane: it is held until that car could stop, and nobody is judged', () => {
+    for (const v of [10, 14, 18]) for (const brakes of [true, false]) {
+      const r = race([human('a'), human('b')]);
+      const a = r.car('a')!, b = r.car('b')!;
+      const sw = r.T.SWITCHES[0];
+      place(r, a, U(r, sw.s1 + 3), -1, 0);
+      place(r, b, U(r, sw.s0 - 2), 1, v);
+      b.laneReq = true;
+      run(r, { a: AWAY, b: UP }, DT);
+      let started = false;
+      run(r, { a: AWAY, b: UP }, 2, () => { if (b.change && b.change.to === -1) { started = true; return true; } });
+      expect(started).toBe(true);
+      let rejoinedAt = -1, safeAtRejoin = true;
+      const back0 = r.raceTime;
+      const ev = run(r, () => ({ a: NONE, b: brakes && rejoinedAt >= 0 && r.raceTime - rejoinedAt >= 0.3 ? BRAKE : UP }), 3, () => {
+        if (rejoinedAt < 0 && !a.away) {
+          rejoinedAt = r.raceTime;
+          // the car changing into its lane was either past it or far enough back to stop (unless the bounded wait ran out)
+          const g = r.T.gapS(r.s(b), r.s(a));
+          if (g > 0 && r.raceTime - back0 <= AWAY_REJOIN.maxWait) safeAtRejoin = g - r.T.CAR_LEN >= stopNeed(b.v - a.v) - 0.5;
+        }
+      });
+      const tag = `v ${v} ${brakes ? 'brakes' : 'throttle'}`;
+      expect(rejoinedAt, tag).toBeGreaterThan(0);
+      expect(safeAtRejoin, tag).toBe(true);
+      if (brakes) expect(contacts(ev, 'b').filter((e) => e.type === 'bump'), tag).toEqual([]);
+      expect(offencesOf(ev, 'b'), tag).toEqual([]);
+      expect(offencesOf(ev, 'a'), tag).toEqual([]);
+    }
+  });
+
+  it('collisions are judged again once the rejoin grace is over: a later deliberate rear-end is an offence as usual', () => {
+    const r = race([human('a'), human('b')]);
+    const a = r.car('a')!, b = r.car('b')!;
+    place(r, a, U(r, STRAIGHT), 1, 0);
+    place(r, b, U(r, STRAIGHT) - 60, 1, 0);
+    run(r, { a: AWAY, b: NONE }, 0.2);
+    run(r, { a: NONE, b: NONE }, DT);
+    expect(a.away).toBe(false);
+    expect(a.graceT).toBeGreaterThan(PEN.grace - 2 * DT);   // the re-slot path's grace, from the rejoin
+    run(r, { a: NONE, b: NONE }, PEN.grace + 0.1);
+    expect(a.graceT).toBe(0);
+    // now b drives into the back of the standing a at speed: judged, as any rear-end
+    place(r, b, a.u - r.T.CAR_LEN - 6, 1, 12); b.graceT = 0;
+    const ev = run(r, { a: NONE, b: UP }, 1);
+    expect(offencesOf(ev, 'b').length).toBeGreaterThanOrEqual(1);
+  });
+
+  it('the wait for closing traffic is bounded: in a stream of cars it rejoins within AWAY_REJOIN.maxWait of the return, with no offence', () => {
+    const r = race([human('a', 0), ai('x', 1), ai('y', 2), ai('z', 3)]);
+    const a = r.car('a')!;
+    place(r, a, U(r, STRAIGHT), 1, 0);
+    const stream = ['x', 'y', 'z'].map((id) => r.car(id)!);
+    // a stream through its spot: never fewer than one car closing within its stopping distance, round after round
+    stream.forEach((c, k) => place(r, c, U(r, STRAIGHT) - 8 - k * 9, 1, 16));
+    r.ai = (c: Car) => ({ t: c.v < 16 ? 1 : 0, b: 0 });
+    let i = 0;
+    const respawn = () => { for (const c of stream) if (r.T.gapS(r.s(a), r.s(c)) > 4) { place(r, c, a.u - 30 + 9 * ((i++) % 3), 1, 16); } };
+    run(r, { a: AWAY }, DT);
+    expect(a.away).toBe(true);
+    const t0 = r.raceTime;
+    let rejoinedAt = -1, waited = false;
+    const ev = run(r, { a: NONE }, AWAY_REJOIN.maxWait + 1, () => {
+      if (rejoinedAt < 0) { respawn(); if (r.raceTime - t0 > 0.5 && a.away) waited = true; }
+      if (rejoinedAt < 0 && !a.away) rejoinedAt = r.raceTime - t0;
+    });
+    expect(waited).toBe(true);                 // the stream really did hold it back
+    expect(rejoinedAt).toBeGreaterThan(0);
+    expect(rejoinedAt).toBeLessThanOrEqual(AWAY_REJOIN.maxWait + 0.5);
+    // whatever reached it inside the grace is resolved and judged against nobody
+    const within = ev.filter((e) => e.type === 'offence');
+    expect(within).toEqual([]);
+  });
+
+  it('a held car is no part of the road queue behind a held pit queue: it gets no hold or cap from it', () => {
+    const r = race([human('h', 0), ai('x', 1), ai('y', 2)]);
+    parkAI(r);
+    const h = r.car('h')!, x = r.car('x')!, y = r.car('y')!;
+    // x stands just inside the entrance, y is queued on the road right behind it (held); h stops behind y without a request
+    x.mode = 'pitlane'; x.u = U(r, r.T.PIT_IN0 + 1.8); x.d = r.T.pitD(r.s(x)); x.v = 0; x.laneSide = -1;
+    place(r, y, U(r, r.T.PIT_IN0 - 0.3), -1, 0); y.pitReq = true; y.pitPlan = true;
+    place(r, h, U(r, r.T.PIT_IN0 - 0.3) - r.T.CAR_LEN - 1.2, -1, 0);
+    run(r, { h: AWAY }, 0.1);
+    expect(h.away).toBe(true);
+    expect(y.pitHold).toBe(true);
+    let everHeld = false;
+    run(r, { h: AWAY }, 2, () => { everHeld ||= h.pitHold || h.pitCap < 1e9 || h.pitWait !== null; });
+    expect(everHeld).toBe(false);
+  });
+
+  it('keeps its place, lap, lap validity, fuel and every debt and deadline while away', () => {
+    const r = race([human('p', 2), ai('x')]);
+    parkAI(r);
+    const p = r.car('p')!;
+    place(r, p, U(r, STRAIGHT), 1, 0);
+    place(r, r.car('x')!, U(r, 60), -1, 0);
+    Object.assign(p, { sgOwed: PEN.stopSeconds, sgDue: LAP + 1, sgDeferred: true, fuelDue: LAP + 1, offences: 2, fuel: 0.37, bestLap: 20.5, lastLap: 21.25, pitStops: 1, lapValid: true, sectors: 3 });
+    r.syncRoute(p);
+    const keep = (c: Car) => ({ u: c.u, hiU: c.hiU, crossed: c.crossed, lapsDone: c.lapsDone, lapStartT: c.lapStartT, lapValid: c.lapValid, fuel: c.fuel, bestLap: c.bestLap, lastLap: c.lastLap, pitStops: c.pitStops, offences: c.offences, timePen: c.timePen, sgOwed: c.sgOwed, sgDue: c.sgDue, sgDeferred: c.sgDeferred, fuelDue: c.fuelDue, svcBreach: c.svcBreach, sectors: c.sectors, status: c.status, mode: c.mode, d: c.d, laneSide: c.laneSide });
+    const before = keep(p);
+    const ev = run(r, { p: AWAY }, 10);
+    expect(keep(p)).toEqual(before);
+    expect(ev.filter((e) => e.type === 'recover' || e.type === 'tow' || e.type === 'lap' || e.type === 'breach' || e.type === 'dq')).toEqual([]);
+  });
+
+  it('a deadline is not exempt: an away car carried over its last chance breaches exactly as a connected one, and is DQ if the hold expires', () => {
+    const go = (inp: Input) => {
+      const r = race([human('p')]);
+      const p = r.car('p')!;
+      p.crossed = LAP; p.lapsDone = LAP - 1; p.sectors = 7;
+      place(r, p, U(r, r.T.FINISH_S, LAP + 1) - 0.3, -1, 10);
+      Object.assign(p, { sgOwed: PEN.stopSeconds, sgDue: LAP, sgDeferred: true });
+      const ev = run(r, { p: inp }, 0.5);
+      return { r, p, ev, json: JSON.stringify({ ev: ev.filter((e) => e.type !== 'msg' || e.text !== 'msg.stallWarn'), s: { ...r.snapshot(), cars: r.snapshot().cars.map(({ away: _a, ...c }) => c) } }) };
+    };
+    const away = go(AWAY), here = go(NONE);
+    expect(away.p.svcBreach).toBe('stopGo');
+    expect(away.ev.some((e) => e.type === 'breach')).toBe(true);
+    expect(away.json).toBe(here.json);
+    // the hold runs out: the server retires the seat, and the latched breach makes it a DQ, as without the hold
+    away.r.retire('p');
+    expect(away.p).toMatchObject({ status: 'dq', retire: 'coast' });
+    run(away.r, {}, 5);
+    expect(away.p).toMatchObject({ retire: 'parked', mode: 'off', away: false });
+  });
+
+  it('the pit lane, its bays and service are unchanged by away: the same race as with a neutral input, never held out of traffic', () => {
+    const go = (inp: Input): string => {
+      const r = race([human('p'), ai('x', 1)]);
+      parkAI(r);
+      const p = r.car('p')!, x = r.car('x')!;
+      p.mode = 'pitlane'; p.u = U(r, r.T.BAYS[p.bayHome] - 4); p.d = r.T.pitD(r.s(p)); p.v = 3; p.laneSide = -1; p.pitFuel = true;
+      x.mode = 'pitlane'; x.u = p.u - r.T.CAR_LEN - 0.2; x.d = r.T.pitD(r.s(x)); x.v = 3; x.laneSide = -1;
+      r.pose(p); r.pose(x);
+      let everAway = false;
+      const ev = run(r, { p: inp }, 8, () => { everAway ||= p.away; });
+      expect(everAway).toBe(false);
+      return JSON.stringify({ ev, s: r.snapshot() });
+    };
+    const away = go(AWAY);
+    expect(away).toBe(go(NONE));
+    expect(away).toContain('"mode":"service"');
+  });
+
+  it('an AI entry ignores an away input, and offline (no away anywhere) is unchanged', () => {
+    const go = (inputs: Controls): string => {
+      const r = new Race({ roster: [human('p', 0), ai('b', 1), ai('c', 2)], seed: 21, track: 'circuit-2' });
+      const ev: WireEvent[] = [];
+      for (let i = 0; i < 60 * 30; i++) { r.update(DT, { p: drive(r.snapshot(), 'p'), ...inputs }); ev.push(...r.drainEvents()); }
+      expect(r.cars.some((c) => c.away)).toBe(false);
+      return JSON.stringify({ ev, s: r.snapshot() });
+    };
+    expect(go({ b: AWAY, c: { up: true, down: false, away: true } })).toBe(go({}));
+  });
+
+  it('a replay with away inputs is identical (same input sequence, same state digest), and away does change the race', () => {
+    const go = (withAway: boolean): { digest: string; sawAway: boolean } => {
+      const r = race([human('a'), human('b'), human('c'), ai('x')]);
+      const u0 = U(r, STRAIGHT);
+      place(r, r.car('a')!, u0, 1, 0); place(r, r.car('b')!, u0 - 2.5, 1, 0); place(r, r.car('c')!, u0 + 1, -1, 0);
+      place(r, r.car('x')!, u0 - 40, 1, 15);
+      const h = createHash('sha256');
+      let sawAway = false;
+      run(r, (rr) => {
+        const t = rr.raceTime;
+        const a: Input = withAway && t > 6 && t < 14 ? AWAY : t > 14 ? drive(rr.snapshot(), 'a') : NONE;
+        const c: Input = withAway && Math.floor(t / 1.3) % 2 === 1 ? AWAY : drive(rr.snapshot(), 'c', 0.9);
+        return { a, b: rr.raceTime > 9 ? drive(rr.snapshot(), 'b') : NONE, c };
+      }, 20, (ev) => {
+        const s = r.snapshot();
+        sawAway ||= s.cars.some((c) => c.away);
+        h.update(JSON.stringify({ ev, s }));
+      });
+      return { digest: h.digest('hex'), sawAway };
+    };
+    const one = go(true);
+    expect(one.sawAway).toBe(true);
+    expect(go(true).digest).toBe(one.digest);
+    expect(go(false).digest).not.toBe(one.digest);
   });
 });
