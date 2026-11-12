@@ -154,7 +154,7 @@ describe.skipIf(!URL)('PostgreSQL: career points, award ledger, personal bests',
     const s = await stats(a[0].cookie);
     expect(s.career).toEqual({ points: 10, races: 1, wins: 1, seconds: 0, thirds: 0, dq: 0, dnf: 0 });
     expect((await stats(a[3].cookie)).career).toMatchObject({ points: 0, races: 1, wins: 0 });
-    expect(s.recent[0]).toMatchObject({ raceId: e.raceId, mode: 'multiplayer', track: 'circuit-1', pos: 1, status: 'finished', points: 10, field: 4, humans: 4, scoring: 'career-1:10-6-4', rules: 'race-core-2026.11.5' });
+    expect(s.recent[0]).toMatchObject({ raceId: e.raceId, mode: 'multiplayer', track: 'circuit-1', pos: 1, status: 'finished', points: 10, field: 4, humans: 4, scoring: 'career-1:10-6-4', rules: 'race-core-2026.11.6' });
     await expect(pool.query('UPDATE career_awards SET points = 100')).rejects.toThrow(/immutable/);
     await expect(pool.query('UPDATE race_results SET outcome = $1', ['completed'])).rejects.toThrow(/immutable/);
     // DQ/DNF and AI/guest rows: positions kept, no credit for AI or guests, zero for DQ and DNF
@@ -197,7 +197,7 @@ describe.skipIf(!URL)('PostgreSQL: career points, award ledger, personal bests',
     const s = await stats(cookie);
     const solo = s.bests.filter((b) => b.mode === 'solo').map((b) => [b.lapMs, b.current]).sort();
     expect(solo).toEqual([[5000, false], [7700, true]]);
-    expect(s.bests.find((b) => b.mode === 'multiplayer')).toMatchObject({ track: 'circuit-1', trackVersion: trackVersion('circuit-1'), current: true, lapMs: 7100, lap: 3, rules: 'race-core-2026.11.5', livery: 'blue' });
+    expect(s.bests.find((b) => b.mode === 'multiplayer')).toMatchObject({ track: 'circuit-1', trackVersion: trackVersion('circuit-1'), current: true, lapMs: 7100, lap: 3, rules: 'race-core-2026.11.6', livery: 'blue' });
   });
 
   it('clients cannot set totals, positions or bests, nor read another account: the career API is the session\'s own and read-only', async () => {
