@@ -410,8 +410,10 @@ export class Room {
       // a half-open link (#74): the socket is still there but the race has had no controls from it for the whole reconnect
       // grace. Its car has been held as away all that time; the hold window is the same as for a closed socket, so it ends
       // the same way: the socket is closed (the page, if it is alive at all, reconnects and is told its seat expired) and the
-      // seat is dropped, which retires the car (DNF retired, DQ on a latched breach) and parks it
-      else if (!p.left && p.peer && p.inRace && this.state === 'race' && now - p.ctlAt > this.cfg.graceS * 1000) {
+      // seat is dropped, which retires the car (DNF retired, DQ on a latched breach) and parks it. Only a car still racing:
+      // a finished car affects nobody, and its driver (say, a tab left hidden while slower cars finish, whose timers the
+      // browser throttles to once a minute) must still get the result and the rematch
+      else if (!p.left && p.peer && p.inRace && this.state === 'race' && this.stillRacing(p) && now - p.ctlAt > this.cfg.graceS * 1000) {
         this.log.info('room.grace_expired', { room: this.id, participant: p.id, state: this.state, silent: true });
         const peer = p.peer;
         p.peer = null; p.held = neutral();
@@ -423,6 +425,12 @@ export class Room {
     if (now - this.createdAt > this.cfg.roomMaxS * 1000) { this.abortAndClose('lifetime', now); return; }
     if (this.state === 'lobby' && now - this.lastActivity > this.cfg.lobbyIdleS * 1000) { this.close('idle'); return; }
     if (this.state === 'results' && now - this.resultsAt > this.cfg.resultsIdleS * 1000) this.close('idle');
+  }
+
+  /** This seat's car is still racing: running, not finished, not retired. */
+  private stillRacing(p: Participant): boolean {
+    const c = this.race?.car(p.id);
+    return !!c && c.status === 'running' && !c.finished && !c.retire;
   }
 
   /** Whether this in-race seat's driver is away at `now` (LINK_AWAY_MS): decided here, from the server's own clock, never by a client. */

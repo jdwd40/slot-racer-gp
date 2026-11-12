@@ -1,5 +1,6 @@
 import * as T from './track';
 import { PitTraffic, PitWait, PIT_Q } from './pit';
+import { outOfTraffic } from './traffic';
 
 export const LAPS = 13;
 export const ACC = 30, VMAX = 26, COAST = 9, BRAKE = 30, DRAG = 0.006;
@@ -994,6 +995,7 @@ export class Race {
     }
     // shared pit queue: a stopping gap behind whatever is ahead on the car's own path
     cap = Math.min(cap, c.pitCap);
+    // (a car held for an away driver is not in the squeeze queue while held: awayUpdate takes it out and puts it back)
     const qi = this.squeezeQ.indexOf(c);
     if (qi > 0) {
       const ah = this.squeezeQ[qi - 1];
@@ -1256,7 +1258,7 @@ export class Race {
     let cap = 1e9;
     const paths = [c.d, -this.T.laneHalf(s)];
     for (const o of this.cars) {
-      if (o === c || (o.mode !== 'race' && o.mode !== 'pitlane' && o.mode !== 'grid') || o.away) continue;
+      if (o === c || (o.mode !== 'race' && o.mode !== 'pitlane' && o.mode !== 'grid') || outOfTraffic(o)) continue;
       const g = this.T.gapS(s, this.s(o));
       if (g <= 1e-6 || g > PIT_Q.look || !paths.some((d) => Math.abs(d - o.d) < this.T.CAR_W)) continue;
       const room = g - this.T.CAR_LEN - PIT_Q.gap + (o.v > 0 ? (o.v * o.v) / (2 * PIT_Q.leadBrake) : o.v * 0.5);
@@ -1366,7 +1368,7 @@ export class Race {
   laneClear(c: Car, to: number): boolean {
     const s = this.s(c);
     for (const o of this.cars) {
-      if (o === c || o.away || !this.occupies(o, to)) continue;
+      if (o === c || outOfTraffic(o) || !this.occupies(o, to)) continue;
       const g = this.T.gapS(s, this.s(o));
       const front = this.T.CAR_LEN + 0.5 + Math.max(0, c.v - o.v) * 0.45;
       const back = this.T.CAR_LEN + 0.5 + Math.max(0, o.v - c.v) * 0.55;
@@ -1383,7 +1385,7 @@ export class Race {
     const s = this.s(c);
     const zone = this.T.PIT_OUT1 - this.T.PIT_OUT0 + this.T.CAR_LEN + 2;
     for (const o of this.cars) {
-      if (o === c || o.mode !== 'race' || o.away) continue;
+      if (o === c || o.mode !== 'race' || outOfTraffic(o)) continue;
       if (!(o.change || o.laneSide < 0)) continue;
       const z = this.T.gapS(this.T.PIT_OUT0, this.s(o));
       if (o.v < 1 && z > 1.5 && z < zone + Math.max(0, -o.v) * 1.5) return true;
@@ -1511,7 +1513,7 @@ export class Race {
       const u = o.u0 - 1.6;
       const s = this.T.wrapS(u);
       const d = o.lane * this.T.laneHalf(s);
-      const busy = this.cars.some((x) => x !== c && (x.mode === 'race' || x.mode === 'pitlane') && !x.away && Math.abs(this.T.gapS(s, this.s(x))) < 2.4 && Math.abs(x.d - d) < this.T.CAR_W);
+      const busy = this.cars.some((x) => x !== c && (x.mode === 'race' || x.mode === 'pitlane') && !outOfTraffic(x) && Math.abs(this.T.gapS(s, this.s(x))) < 2.4 && Math.abs(x.d - d) < this.T.CAR_W);
       if (!busy) {
         c.u = u; c.laneSide = o.lane; c.d = d; c.mode = 'race'; c.off = null; c.v = 0; c.recoverT = 1.0; c.graceT = PEN.grace; c.yawOff = 0; c.wobble = 0;
         if (c.human) this.pmsg(c, 'msg.backOn', 'info');
@@ -1596,7 +1598,7 @@ export class Race {
     const s = this.s(c);
     for (const o of this.cars) {
       // a car held for an away driver (#74) is out of traffic like a towed one: others drive through it, so it traps nobody
-      if (o === c || (o.mode !== 'race' && o.mode !== 'pitlane' && o.mode !== 'grid') || o.away || o.v >= STALL.goV) continue;
+      if (o === c || (o.mode !== 'race' && o.mode !== 'pitlane' && o.mode !== 'grid') || outOfTraffic(o) || o.v >= STALL.goV) continue;
       if (Math.abs(o.d - c.d) >= this.T.CAR_W || Math.abs(o.z - c.z) > 1) continue;
       const g = this.T.gapS(s, this.s(o));
       if (g > 0 && g - this.T.CAR_LEN < STALL.blockGap) return true;
@@ -1664,9 +1666,28 @@ export class Race {
     const held = new Set(this.cars.filter((c) => c.away));
     for (const c of this.cars) {
       if (c.mode !== 'race') { c.away = false; continue; }
-      if (c.linkAway && !c.retire) { if (!c.away && Math.abs(c.v) < STALL.stopV) c.away = true; continue; }
-      if (c.away && !this.penetrated(c, held)) c.away = false;
+      if (c.linkAway && !c.retire) {
+        // a car the automatic pit controller is driving (sgCtl: the approach, the box queue) is never held: the controller
+        // still drives it on into the pits when its turn comes, so the cars queued behind it are not stuck for the hold
+        if (!c.away && Math.abs(c.v) < STALL.stopV && !c.sgCtl) { c.away = true; this.leaveSqueeze(c); }
+        continue;
+      }
+      if (c.away && !this.penetrated(c, held)) { c.away = false; this.rejoinSqueeze(c); }
     }
+  }
+
+  /**
+   * A held car is out of the squeeze priority queue (it would cap the cars behind it, which drive through its spot), so a car
+   * rejoining traffic inside the squeeze is put back in the queue at its physical place: behind every queued car ahead of it
+   * on the slot, ahead of those behind it (ties by grid slot, deterministic). Outside the squeeze it is simply not queued.
+   */
+  rejoinSqueeze(c: Car): void {
+    const s = this.s(c);
+    if (!this.T.inRange(s, this.T.SQ_ENTRY, this.T.SQ_EXIT) || this.squeezeQ.includes(c)) return;
+    const prog = (x: Car): number => this.T.gapS(this.T.SQ_ENTRY, this.s(x));
+    const p = prog(c);
+    const at = this.squeezeQ.findIndex((x) => prog(x) < p || (prog(x) === p && x.idx > c.idx));
+    if (at < 0) this.squeezeQ.push(c); else this.squeezeQ.splice(at, 0, c);
   }
 
   /**
@@ -1679,7 +1700,7 @@ export class Race {
   penetrated(c: Car, held: ReadonlySet<Car>): boolean {
     const s = this.s(c);
     return this.cars.some((o) => {
-      if (o === c || held.has(o) || (o.mode !== 'race' && o.mode !== 'pitlane') || Math.abs(o.d - c.d) >= this.T.CAR_W) return false;
+      if (o === c || held.has(o) || outOfTraffic(o) || (o.mode !== 'race' && o.mode !== 'pitlane') || Math.abs(o.d - c.d) >= this.T.CAR_W) return false;
       const g = this.T.gapS(this.s(o), s);   // > 0: o is behind c by g
       if (Math.abs(g) < this.T.CAR_LEN - 1e-6) return true;
       return g > 0 && o.v > c.v && g - this.T.CAR_LEN < (o.v - c.v) * AWAY_REJOIN_S;
@@ -1776,7 +1797,7 @@ export class Race {
     // follow traffic in the same slot
     let nearest: Car | null = null, ng = 1e9;
     for (const o of this.cars) {
-      if (o === c || o.mode === 'off' || o.mode === 'tow' || o.mode === 'grid' || o.away) continue;
+      if (o === c || o.mode === 'grid' || outOfTraffic(o)) continue;
       if (Math.abs(o.d - c.d) > this.T.CAR_W) continue;
       const g = this.T.gapS(s, this.s(o));
       if (g > 0 && g < ng) { ng = g; nearest = o; }
@@ -1821,7 +1842,7 @@ export class Race {
     const P = c.persona;
     let threat: Car | null = null, tg = 1e9;
     for (const o of this.cars) {
-      if (o === c || o.mode !== 'race' || o.finished) continue;
+      if (o === c || o.mode !== 'race' || o.finished || outOfTraffic(o)) continue;
       const g = this.T.gapS(this.s(o), s); // how far o is behind us
       if (g <= 0 || g > DEF.look || g >= tg) continue;
       if (o.v - c.v < DEF.closing) continue;
@@ -1851,7 +1872,7 @@ export class Race {
     if (this.T.inRange(sw.s0, this.T.SQ_ENTRY - 2, this.T.SQ_EXIT) || this.T.inRange(sw.s1, this.T.SQ_ENTRY - 2, this.T.SQ_EXIT)) return false;
     if (to < 0 && this.T.ahead(sw.s1, this.T.PIT_IN0) < 10) return false;
     for (const o of this.cars) {
-      if (o === c || o.mode !== 'race') continue;
+      if (o === c || o.mode !== 'race' || outOfTraffic(o)) continue;
       const g = this.T.gapS(this.s(o), s); // o behind us by g
       if (g > 0 && g < 30 && o.pitReq && to < 0 && this.T.ahead(s, this.T.PIT_IN0) < 40) return false;
       if (!this.occupies(o, to) && !(o.change && o.change.to === to)) continue;
@@ -1993,7 +2014,7 @@ export class Race {
 
   collide(): void {
     // a car held for an away driver (#74) is out of collisions, like a de-slotted, towed or parked one
-    const act = this.cars.filter((c) => (c.mode === 'race' || c.mode === 'pitlane') && !c.away);
+    const act = this.cars.filter((c) => (c.mode === 'race' || c.mode === 'pitlane') && !outOfTraffic(c));
     for (let i = 0; i < act.length; i++) for (let j = i + 1; j < act.length; j++) {
       const a = act[i], b = act[j];
       const key = Math.min(a.idx, b.idx) * 4 + Math.max(a.idx, b.idx);

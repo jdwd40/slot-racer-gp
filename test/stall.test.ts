@@ -1223,7 +1223,7 @@ describe('a car held for an away driver (#74)', () => {
     expect(behind(r, c, b)).toBeGreaterThan(r.T.CAR_LEN - 0.05);
   });
 
-  it('under automatic stop-and-go control a held car is not driven: the controller cannot take it through the car ahead', () => {
+  it('under automatic stop-and-go control an away car is never held: it stays in traffic, so the controller cannot take it through the car ahead', () => {
     const go = (awayStep: boolean) => {
       const r = race([human('p'), human('f')]);
       const p = r.car('p')!, f = r.car('f')!;
@@ -1241,6 +1241,89 @@ describe('a car held for an away driver (#74)', () => {
       expect(x.minGap).toBeGreaterThan(x.len - 0.05);
       expect(x.end).toBeGreaterThan(0);
     }
+  });
+
+  // ---- review of #75 round 2: a held car is out of every traffic check, the shared pit queue and the squeeze queue included
+  /**
+   * The shared pit queue at the entrance: AI x stands in the box serving `serve` s; human p, routed to the box, waits stopped
+   * at the entrance behind it; human q, routed to the box too, comes up behind p. p's link drops (`pIn`). `forceManual` keeps
+   * p out of automatic control, as for a car the controller has not taken over, so that p really is held out of traffic.
+   */
+  function pitQueue(pIn: Input, forceManual: boolean) {
+    const r = race([human('p', 0), ai('x', 1), human('q', 2)]);
+    const p = r.car('p')!, x = r.car('x')!, q = r.car('q')!;
+    x.mode = 'pitlane'; x.u = U(r, r.T.PEN_S); x.d = r.T.pitD(r.s(x)); x.v = 0; x.laneSide = -1; x.sgOwed = 2; x.sgDue = LAP + 1;
+    place(r, p, U(r, r.T.PIT_IN0 - 0.5), -1, 0); p.sgOwed = 3; p.sgDue = LAP + 1; r.syncRoute(p);
+    place(r, q, U(r, r.T.PIT_IN0 - 12), -1, 6); q.sgOwed = 3; q.sgDue = LAP + 1; r.syncRoute(q);
+    if (forceManual) { const sg = r.sgUpdate.bind(r); r.sgUpdate = (c: Car) => { sg(c); if (c === p) c.sgCtl = false; }; }
+    let qStopped = 0, xLeft = -1, qIn = -1, qServed = -1, pHeld = false;
+    const t0 = r.raceTime;
+    const ev = run(r, () => ({ p: pIn, q: NONE }), 14, () => {
+      if (q.mode === 'race' && Math.abs(q.v) < 0.05) qStopped += DT;
+      if (xLeft < 0 && x.sgOwed <= 0) xLeft = r.raceTime - t0;
+      if (qIn < 0 && q.mode !== 'race') qIn = r.raceTime - t0;
+      if (qServed < 0 && q.sgOwed <= 0) qServed = r.raceTime - t0;
+      pHeld ||= p.away;
+      return qServed >= 0;                    // q's own stop served: what it does next is not this test
+    });
+    return { r, p, q, x, ev, qStopped, xLeft, qIn, qServed, pHeld };
+  }
+
+  it('the shared pit queue: a car behind an away car on the approach goes on into the pits once the box frees (never stuck for the hold)', () => {
+    // under automatic pit control (as the controller takes a routed car over at the entrance): the away car is never held, so
+    // the controller drives it into the box when its turn comes and the car behind follows, exactly as with it connected
+    const here = pitQueue(NONE, false), away = pitQueue(AWAY, false);
+    expect(here.xLeft).toBeGreaterThan(0);
+    expect(here.qServed).toBeGreaterThan(here.xLeft);   // the box is exclusive: x, then p, then q
+    // the away car itself was driven in and served, as before #74 (back out on the road with no driver it then coasts to a
+    // stop and is held there, which is the ordinary away case)
+    expect(away.p.sgOwed).toBeLessThanOrEqual(0);
+    expect(away.qServed).toBeGreaterThan(0);
+    expect(away.qServed).toBeLessThan(here.qServed + 1);
+    // not under automatic control: the away car is held out of traffic, and it is no queue leader for anyone: q goes past it
+    // into the pits as soon as the box is free (and never counts or is recovered while it waits for the box)
+    const manual = pitQueue(AWAY, true);
+    expect(manual.pHeld).toBe(true);
+    expect(manual.p).toMatchObject({ mode: 'race', away: true });
+    expect(manual.qServed).toBeGreaterThan(manual.xLeft);
+    expect(manual.qServed).toBeLessThan(here.qServed + 1);
+    expect(manual.r.pit.order).not.toContain(manual.p.idx);
+    for (const x of [away, manual]) expect(recov(x.ev)).toEqual([]);
+  });
+
+  it('the squeeze priority queue: a held car ahead holds nobody, on either lane, and the same-lane car is neither capped nor recovered', () => {
+    for (const side of [1, -1]) {
+      const r = race([human('a'), human('p')]);
+      const a = r.car('a')!, p = r.car('p')!;
+      place(r, a, U(r, r.T.SQ_Q1 + 2), -1, 0);
+      place(r, p, side < 0 ? U(r, r.T.SQ_Q1 + 2) - r.T.CAR_LEN - 1 : U(r, r.T.SQ_Q1 - 0.2), side, 0);
+      r.squeezeQ.length = 0; r.squeezeQ.push(a, p);
+      run(r, { a: AWAY, p: NONE }, DT);
+      expect(a.away).toBe(true);
+      expect(r.squeezeQ).not.toContain(a);     // held: out of the queue
+      const lapValid = p.lapValid;
+      let held = false;
+      const ev = run(r, { a: AWAY, p: UP }, 3, () => { held ||= p.squeezeHold; });
+      expect(held).toBe(false);
+      expect(p.u).toBeGreaterThan(a.u + 5);    // drove on past (through) the held car
+      expect(recov(ev)).toEqual([]);
+      expect(p.lapValid).toBe(lapValid);
+      expect(contacts(ev, 'p')).toEqual([]);
+    }
+  });
+
+  it('a held car that rejoins inside the squeeze is queued again at its physical place, behind the car that went past it', () => {
+    const r = race([human('a'), human('p')]);
+    const a = r.car('a')!, p = r.car('p')!;
+    place(r, a, U(r, r.T.SQ_ENTRY + 3), -1, 0);
+    place(r, p, U(r, r.T.SQ_ENTRY + 3) - r.T.CAR_LEN - 1, -1, 0);
+    r.squeezeQ.length = 0; r.squeezeQ.push(a, p);
+    run(r, { a: AWAY, p: UP }, 3, () => r.T.gapS(r.s(a), r.s(p)) > r.T.CAR_LEN + 1);
+    expect(r.T.gapS(r.s(a), r.s(p))).toBeGreaterThan(r.T.CAR_LEN);   // p went through and is clear ahead
+    expect(r.T.inRange(r.s(p), r.T.SQ_ENTRY, r.T.SQ_EXIT)).toBe(true);
+    run(r, { a: NONE, p: NONE }, DT);
+    expect(a.away).toBe(false);
+    expect(r.squeezeQ).toEqual([p, a]);
   });
 
   it('two held cars inside each other both rejoin when both drivers are back, in their order on the slot, without a pass', () => {

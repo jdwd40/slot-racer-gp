@@ -243,6 +243,7 @@ function awayScenario(outage: Outage, holdMs: number, over: Partial<Config> = {}
   expect(cut).not.toBe(null);
   return { h, room, peers, ids, rec, cut: cut!, back, cutAt, backAt, during, maxStallBefore };
 }
+const h0Grace = (): number => testConfig({ graceS: 20 }).graceS * 1000;
 const awayCore = (s: ReturnType<typeof awayScenario>): string => {
   const env = s.room.result!;
   const norm = (x: string): string => s.ids.reduce((y, id, k) => y.split(id).join(`H${k}`), x);
@@ -376,6 +377,54 @@ describe('a driver whose link is down is held, not recovered (#74)', () => {
       expect(room.participant(ids[1])).toMatchObject({ left: false });
       expect(room.race!.car(ids[1])!.status).toBe('running');
     }
+  });
+
+  /** Two humans in a started multiplayer race on the harness clock; `lobbyMs` of lobby time first (nothing is sent there). */
+  function twoSeats(lobbyMs = 0) {
+    const h = harness({ graceS: 20 }, 4242);
+    const p0 = new FakePeer(), p1 = new FakePeer();
+    const c = h.mgr.create(p0, { name: 'P0', accountId: null, mode: 'multiplayer', settings: { track: 'circuit-1' } });
+    if (!c.ok) throw new Error(c.code);
+    const j = h.mgr.join(p1, '10.0.0.1', { code: c.room.code, name: 'P1', accountId: null });
+    if (!j.ok) throw new Error(j.code);
+    const room = c.room, ids = [c.participant, j.participant];
+    h.advance(lobbyMs, 50);
+    room.handle(ids[1], { t: 'ready', ready: true }, h.now); room.handle(ids[0], { t: 'start' }, h.now);
+    let n = 0;
+    const beat = (who: string[]) => () => { n++; for (const id of who) room.handle(id, { t: 'ctl', seq: n, up: false, down: false }, h.now); };
+    return { h, room, ids, peers: [p0, p1], beat };
+  }
+
+  it('the silent-socket expiry only ends a car still racing: a finished driver whose page goes quiet keeps the seat and gets the result', () => {
+    const { h, room, ids, peers, beat } = twoSeats();
+    h.advance(2000, 50, beat(ids));
+    // seat 0 has taken the flag (its classification is settled); seat 1 is still racing. Both pages then go quiet
+    const fin = room.race!.car(ids[0])!;
+    fin.finished = true; fin.status = 'finished'; fin.finishTime = room.race!.raceTime;
+    h.advance(h.cfg.graceS * 1000 + 2000, 50);
+    expect(room.participant(ids[0])).toMatchObject({ left: false });
+    expect(peers[0].closed).toBe(null);
+    // the unfinished one is retired as before (that ended the race: nobody else is still running)
+    expect(peers[1].closed).toMatchObject({ code: 4000 });
+    expect(room.race!.car(ids[1])!).toMatchObject({ status: 'dnf', dnfReason: 'retired' });
+    expect(room.race!.car(ids[0])!).toMatchObject({ status: 'finished' });
+    // and the finished driver, still connected, is sent the result
+    expect(peers[0].of('result')).toHaveLength(1);
+    expect(room.result!.classification!.find((x) => x.id === ids[0])).toMatchObject({ status: 'finished' });
+  });
+
+  it('the control clock starts with the race: a lobby that waited longer than graceS starts with every seat present, none away or expired', () => {
+    const { h, room, ids, peers, beat } = twoSeats(h0Grace() + 5000);
+    expect(room.state).toBe('race');
+    // the first ticks of the race, before the pages' heartbeats start (they start on the first state)
+    h.advance(200, 50);
+    for (const [k, id] of ids.entries()) {
+      expect(room.participant(id)).toMatchObject({ left: false });
+      expect(room.isAway(id)).toBe(false);
+      expect(peers[k].closed).toBe(null);
+    }
+    h.advance(3000, 50, beat(ids));
+    expect(ids.map((id) => room.race!.car(id)!.status)).toEqual(['running', 'running']);
   });
 
   it('a server stall is not a client silence: a pump 3 s late marks no live seat away, while one already silent before it still is', () => {
