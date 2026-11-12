@@ -176,11 +176,17 @@ export const STALL = {
   blockGap: 6,         // a stopped car with a slow car this close ahead (clear slot) on its own path is trapped, not blocking
 };
 /**
- * A car held for an away driver (#74) rejoins traffic only once no car overlaps it and none closing from behind would reach
- * it within this many seconds at their speed difference: the car that was driving through its spot is never handed a stopped
- * car it cannot avoid.
+ * When a car held for an away driver (#74) may rejoin traffic: never while a car is inside it, and not while a car closing
+ * from behind (on its lane, or changing lanes into it) could not stop short of it. With `rel` the closing car's speed above
+ * the held car's, that car needs a clear slot of more than
+ *     rel * react + rel² / (2 * BRAKE) + margin
+ * (reaction at `react` seconds, then full braking at the race's own BRAKE deceleration, 30 m/s², with `margin` m to spare).
+ * At 25 m/s that is about 12.5 + 10.4 + 1 = 24 m. The closing-car wait is capped at `maxWait` seconds of the driver being
+ * back, so a stream of traffic cannot keep it out for ever; whatever then reaches it is covered by the rejoin's contact
+ * grace (PEN.grace, as for a re-slotted car), so nobody is judged for the contact. A car inside it is never capped: that
+ * car is in traffic and drives on, or its own stopped-on-track count recovers it.
  */
-export const AWAY_REJOIN_S = 0.5;
+export const AWAY_REJOIN = { react: 0.5, margin: 1, maxWait: 2 };
 
 export interface OffState { x: number; y: number; vx: number; vy: number; yaw: number; spin: number; t: number; z: number; vz: number; u0: number; lane: number; }
 
@@ -316,6 +322,8 @@ export interface Car {
    * the return never starts with a shunt. Drawn dimmed by every client.
    */
   away: boolean;
+  /** simulation seconds a held car has waited to rejoin since its driver came back (#74); 0 while away or in traffic */
+  awayWaitT: number;
 }
 
 export type MsgKind = 'info' | 'good' | 'warn' | 'bad';
@@ -550,7 +558,7 @@ export class Race {
         revOn: false, revHoldT: 0, revLatch: false, revMark: null,
         pitWait: null, pitCap: 1e9, pitHold: false, exitHold: false, exitReq: false, pitFuel: false,
         sgPhase: null, sgCtl: false, sgCommit: -1, sgVc: 0, sgLeave: false, upPrev: false,
-        stallT: 0, stallRun: 0, stallHold: false, stallSvc: false, linkAway: false, away: false,
+        stallT: 0, stallRun: 0, stallHold: false, stallSvc: false, linkAway: false, away: false, awayWaitT: 0,
       };
       this.cars.push(c);
     }
@@ -901,7 +909,7 @@ export class Race {
     this.pit.update();
     for (const c of this.cars) this.stepCar(c, dt, this.inputOf(c, inputs));
     // after every car has moved and before any touch: who is held out of traffic for an away driver this step (#74)
-    this.awayUpdate();
+    this.awayUpdate(dt);
     this.collide();
     for (const c of this.cars) this.pose(c);
     if (this.phase === 'countdown') return;
@@ -1650,9 +1658,11 @@ export class Race {
    *   length of the reconnect hold. A coasting car that slips through another would gain; a standing one cannot.
    * - While held it stands on the brakes, whoever would drive it (stepCar), and its stopped count is held at 0 (stallBlock).
    *   Its lap, lap validity, fuel, debts and deadlines run on as usual.
-   * - When its driver is back it rejoins traffic as soon as no car really penetrates it (`penetrated`), and gets its pedals
-   *   back only then, so the driver can never drive it through anything. A car merely touching it (bumper to bumper, as after
-   *   any contact) does not delay the return.
+   * - When its driver is back it rejoins traffic as soon as no car really penetrates it and none closing on it could not stop
+   *   (`penetrated`, AWAY_REJOIN), and gets its pedals back only then, so the driver can never drive it through anything. A
+   *   car merely touching it (bumper to bumper, as after any contact) does not delay the return. It rejoins with the same
+   *   contact grace as a re-slotted car (graceT = PEN.grace): a contact involving it in that time is resolved but judged
+   *   against neither car (judge()), so the driver who was told to drive through a held car is never penalised for it.
    * - It cannot be held for ever: the penetrating car is in traffic and not trapped by a held car (stallTrapped), so it either
    *   drives on or, a stopped human car, is recovered by its own stopped-on-track count within 3 s; an AI never follows a held
    *   car and drives on. Two held cars inside each other ignore each other here, so both rejoin when both drivers are back
@@ -1661,18 +1671,24 @@ export class Race {
    * and a retired car (the hold expired) rejoins like a returned one, then parks once it stands. Runs on c.linkAway, which
    * stepCar has just set from this step's input.
    */
-  awayUpdate(): void {
+  awayUpdate(dt: number): void {
     // judged from who was held before this pass, so array order never decides which of two held cars rejoins first
     const held = new Set(this.cars.filter((c) => c.away));
     for (const c of this.cars) {
-      if (c.mode !== 'race') { c.away = false; continue; }
+      if (c.mode !== 'race') { c.away = false; c.awayWaitT = 0; continue; }
       if (c.linkAway && !c.retire) {
         // a car the automatic pit controller is driving (sgCtl: the approach, the box queue) is never held: the controller
         // still drives it on into the pits when its turn comes, so the cars queued behind it are not stuck for the hold
         if (!c.away && Math.abs(c.v) < STALL.stopV && !c.sgCtl) { c.away = true; this.leaveSqueeze(c); }
+        c.awayWaitT = 0;
         continue;
       }
-      if (c.away && !this.penetrated(c, held)) { c.away = false; this.rejoinSqueeze(c); }
+      if (!c.away) continue;
+      c.awayWaitT += dt;
+      if (this.penetrated(c, held, c.awayWaitT <= AWAY_REJOIN.maxWait + 1e-9)) continue;
+      // back in traffic, with the re-slot path's contact grace (judge() exempts both cars of a contact during it)
+      c.away = false; c.awayWaitT = 0; c.graceT = PEN.grace;
+      this.rejoinSqueeze(c);
     }
   }
 
@@ -1691,19 +1707,26 @@ export class Race {
   }
 
   /**
-   * A car in traffic on the road or in the pit lane is inside this one in the same slot (less than a car length of slot
-   * between them, beyond a float's tolerance: bumper-to-bumper contact is not inside), or is closing from behind fast enough
-   * to reach it within AWAY_REJOIN_S, so a car driving through the held car's spot is never handed a stopped car it cannot
-   * avoid. Cars held at the start of this step (`held`) do not count: they are out of collisions, and two of them rejoining
-   * together are separated by collide() like any overlap.
+   * Whether a held car must stay out of traffic for now: a car on the road or in the pit lane is inside it in the same slot
+   * (less than a car length of slot between them, beyond a float's tolerance: bumper-to-bumper contact is not inside), or,
+   * with `closing`, one behind it could not stop short of it (AWAY_REJOIN). A car changing lanes into the held car's lane
+   * counts as in that lane, wherever it is in the change. A change that starts after the rejoin needs laneClear(), which
+   * sees the rejoined car, so only changes already under way can arrive unannounced. Cars held at the start of this step
+   * (`held`) do not count: they are out of collisions, and two of them rejoining together are separated by collide() like
+   * any overlap, front car in front.
    */
-  penetrated(c: Car, held: ReadonlySet<Car>): boolean {
+  penetrated(c: Car, held: ReadonlySet<Car>, closing: boolean): boolean {
     const s = this.s(c);
+    const lane = c.change ? c.change.to : Math.sign(c.laneSide);
     return this.cars.some((o) => {
-      if (o === c || held.has(o) || outOfTraffic(o) || (o.mode !== 'race' && o.mode !== 'pitlane') || Math.abs(o.d - c.d) >= this.T.CAR_W) return false;
+      if (o === c || held.has(o) || (o.mode !== 'race' && o.mode !== 'pitlane')) return false;
+      const into = o.mode === 'race' && o.change !== null && o.change.to === lane;
+      if (!into && Math.abs(o.d - c.d) >= this.T.CAR_W) return false;
       const g = this.T.gapS(this.s(o), s);   // > 0: o is behind c by g
       if (Math.abs(g) < this.T.CAR_LEN - 1e-6) return true;
-      return g > 0 && o.v > c.v && g - this.T.CAR_LEN < (o.v - c.v) * AWAY_REJOIN_S;
+      const rel = o.v - c.v;
+      if (!closing || g <= 0 || rel <= 0) return false;
+      return g - this.T.CAR_LEN < rel * AWAY_REJOIN.react + (rel * rel) / (2 * BRAKE) + AWAY_REJOIN.margin;
     });
   }
 
