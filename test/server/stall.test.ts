@@ -468,6 +468,105 @@ describe('a driver whose link is down is held, not recovered (#74)', () => {
   });
 });
 
+// ------------------------------------------------------------------------------------------------ a link lost at speed (#83)
+type SpeedOutage = 'silent' | 'close' | 'lift' | 'hold1s';
+/**
+ * Two humans on circuit-1 (seat 1 never drives). Seat 0 drives on full Throttle from the start until it is on the straight
+ * before the hairpin at racing speed (s 86..90, faster than 20 m/s), sends that last `up` and then: `silent` sends nothing
+ * more (a half-open link: the socket stays), `close` disconnects, `lift` stays connected and sends neutral from the next
+ * tick, `hold1s` stays connected and keeps sending `up` for 1 s and neutral after it. Every tick of the 6 s after that
+ * records seat 0's car on the server and whether the room has it away.
+ */
+function speedDrop(outage: SpeedOutage) {
+  const h = harness({ graceS: 20 }, 4242);
+  const peers = [new FakePeer(), new FakePeer()];
+  const c = h.mgr.create(peers[0], { name: 'P0', accountId: null, mode: 'multiplayer', settings: { track: 'circuit-1' } });
+  if (!c.ok) throw new Error(c.code);
+  const room: Room = c.room;
+  const j = h.mgr.join(peers[1], '10.0.0.1', { code: room.code, name: 'P1', accountId: null });
+  if (!j.ok) throw new Error(j.code);
+  const ids = [c.participant, j.participant];
+  expect(room.handle(ids[1], { t: 'ready', ready: true }, h.now)).toBe(null);
+  expect(room.handle(ids[0], { t: 'start' }, h.now)).toBe(null);
+  const race = room.race!;
+  const me = () => race.car(ids[0])!;
+  const deslots: { wall: number; u: number }[] = [];
+  const orig = race.deslot.bind(race);
+  race.deslot = (car: Car) => { if (car.id === ids[0]) deslots.push({ wall: h.now - cutAt, u: car.u }); orig(car); };
+  let ctl = 0, cutAt = -1;
+  let at = null as { s: number; v: number; lapValid: boolean } | null;
+  const log: { wall: number; mode: string; u: number; v: number; throttle: number; recoverT: number; lapValid: boolean; away: boolean; held: boolean }[] = [];
+  h.advance(60_000, 50, () => {
+    if (room.state !== 'race') return;
+    const c0 = me();
+    if (cutAt >= 0) {
+      const wall = h.now - cutAt;
+      if (wall > 0) log.push({ wall, mode: c0.mode, u: c0.u, v: c0.v, throttle: c0.throttle, recoverT: c0.recoverT, lapValid: c0.lapValid, away: room.isAway(ids[0], h.now), held: c0.away });
+      if (outage === 'close' && wall === 50) room.disconnect(ids[0], peers[0], h.now);
+      if (outage === 'lift' && wall > 0) room.handle(ids[0], { t: 'ctl', seq: ++ctl, up: false, down: false }, h.now);
+      if (outage === 'hold1s' && wall > 0) room.handle(ids[0], { t: 'ctl', seq: ++ctl, up: wall < 1000, down: false }, h.now);
+      return;
+    }
+    const s = race.T.wrapS(c0.u);
+    if (race.phase === 'racing' && c0.mode === 'race' && s > 86 && s < 90 && c0.v > 20) { cutAt = h.now; at = { s, v: c0.v, lapValid: c0.lapValid }; }
+    room.handle(ids[0], { t: 'ctl', seq: ++ctl, up: race.phase === 'racing', down: false }, h.now);
+  }, () => room.state !== 'race' || (cutAt >= 0 && h.now - cutAt > 6000));
+  expect(at).not.toBe(null);
+  return { room, race, ids, at: at!, deslots, log };
+}
+
+describe('a link lost at racing speed on the room server (#83)', () => {
+  it('a half-open link keeps the last Throttle until inputTimeoutMs, so the car de-slots in the hairpin; then the marshal return and the #74 hold', () => {
+    const s = speedDrop('silent');
+    expect(s.at.v).toBeGreaterThan(20);
+    expect(s.at.lapValid).toBe(true);
+    const timeout = testConfig().inputTimeoutMs;
+    expect(timeout).toBe(1000);
+    // the held pedals stay applied up to the input timeout (still on full Throttle, still accelerating, not away)
+    const live = s.log.filter((x) => x.wall <= timeout);
+    expect(live.every((x) => x.mode === 'race' && !x.away && x.throttle > 0.99)).toBe(true);
+    for (let i = 1; i < live.length; i++) expect(live[i].v).toBeGreaterThanOrEqual(live[i - 1].v);
+    // one de-slot, on the hairpin, just after the timeout neutralised the pedals and before the seat was judged away
+    expect(s.deslots).toHaveLength(1);
+    expect(s.deslots[0].wall).toBeGreaterThan(timeout);
+    expect(s.deslots[0].wall).toBeLessThanOrEqual(LINK_AWAY_MS);
+    expect(s.race.T.wrapS(s.deslots[0].u)).toBeGreaterThan(108);
+    expect(s.race.T.wrapS(s.deslots[0].u)).toBeLessThan(124);
+    // off the slot: v = 0, not held (the room has it away from LINK_AWAY_MS, the race core holds only a car on the slot)
+    const off = s.log.filter((x) => x.mode === 'off');
+    expect(off.length).toBeGreaterThan(20);
+    expect(off.every((x) => x.v === 0 && !x.held && !x.lapValid)).toBe(true);
+    expect(s.log.filter((x) => x.wall > LINK_AWAY_MS + 50).every((x) => x.away)).toBe(true);
+    // back on the slot 1.6 m behind where it left, recoverT from 1, then held there for the rest of the outage
+    const back = s.log[s.log.indexOf(off.at(-1)!) + 1];
+    expect(back).toMatchObject({ mode: 'race', v: 0 });
+    expect(back.u).toBeCloseTo(s.deslots[0].u - 1.6, 9);
+    expect(back.recoverT).toBeGreaterThan(0.9);
+    const after = s.log.slice(s.log.indexOf(back) + 1);
+    expect(after.every((x) => x.held && x.mode === 'race' && x.u === back.u)).toBe(true);
+    expect(s.race.car(s.ids[0])!.status).toBe('running');
+  });
+
+  it('a connected driver who keeps Throttle for the same second and then lifts gets the same de-slot at the same spot; one who lifts at once, or a closed socket, gets none', () => {
+    const silent = speedDrop('silent'), hold = speedDrop('hold1s');
+    expect(hold.at).toEqual(silent.at);
+    expect(hold.deslots).toEqual(silent.deslots);
+    // the same car on every tick until the link seat is held (the only thing the away flag changes)
+    const n = silent.log.findIndex((x) => x.held);
+    const strip = (x: (typeof silent.log)[number]) => ({ wall: x.wall, mode: x.mode, u: x.u, v: x.v, recoverT: x.recoverT, lapValid: x.lapValid });
+    expect(hold.log.slice(0, n).map(strip)).toEqual(silent.log.slice(0, n).map(strip));
+    for (const k of ['lift', 'close'] as const) {
+      const d = speedDrop(k);
+      expect(d.at).toEqual(silent.at);
+      expect(d.deslots).toEqual([]);
+      const before = d.log.filter((x) => x.wall <= 3000);
+      expect(before.every((x) => x.mode === 'race' && x.lapValid)).toBe(true);
+      expect(Math.abs(d.race.car(d.ids[0])!.v)).toBeLessThan(STALL.stopV);
+      if (k === 'close') expect(d.log.at(-1)!.held).toBe(true);
+    }
+  });
+});
+
 // ------------------------------------------------------------------------------------------------ real sockets
 const SCALE = 12;
 const ORIGIN = 'http://localhost:5173';

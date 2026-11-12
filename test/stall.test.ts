@@ -1959,3 +1959,146 @@ describe('a car shoved by a car with contact grace (#76)', () => {
     expect(m.lapValid).toBe(false);
   });
 });
+
+// ------------------------------------------------------------------------------------------ a de-slot during the coast (#83)
+// Playtest 5: a car whose link froze at ~22.4 m/s on the straight before the circuit-1 hairpin went mode 'off', v = 0, came
+// back on the slot 1.6 m behind with recoverT = 1, and was then held (#74). That is the stock de-slot and marshal return.
+// On the room server a half-open link keeps the seat's last held pedals for LIMITS.inputTimeoutMs (1 s), then neutral, and
+// marks the seat away at LINK_AWAY_MS (1.5 s): to the race core that is the driver's own last Throttle for 1 s and then no
+// pedals, exactly what a connected driver who keeps the key down for that second and then lets go sends. These cases pin
+// that: the half-open drop de-slots where (and only where) the same connected driver would, and the hold is unchanged.
+describe('a link lost at racing speed: a de-slot in the coast before the hold is the stock de-slot (#83)', () => {
+  /** circuit-1: the straight from s 62 to 108, then the hairpin (curvature 0.238, about 13.9 m/s on the outside lane) */
+  const HAIRPIN = [108, 124] as const;
+  /** What the race core is sent, `t` seconds after the instant the link drops (or the driver decides). */
+  type Script = (t: number) => Input;
+  const LINK: Record<string, Script> = {
+    // a half-open link on the room server: the last held Throttle until inputTimeoutMs, neutral, then away at LINK_AWAY_MS
+    halfOpen: (t) => (t < 1.0 ? UP : t < 1.5 ? NONE : AWAY),
+    // a closed socket: away (neutral pedals) from the first step
+    closed: () => AWAY,
+    // connected drivers at the same instant: keeps Throttle for the same second then lifts / lifts at once / keeps it down
+    hold1sLift: (t) => (t < 1.0 ? UP : NONE),
+    lift: () => NONE,
+    hold: () => UP,
+  };
+  type Sample = { t: number; mode: string; u: number; v: number; recoverT: number; lapValid: boolean; away: boolean; stallT: number };
+  /**
+   * One human car alone on circuit-1's outside lane, put at `fromS` at `v0` and driven on full Throttle until it reaches
+   * `dropS` (so its pedal state is a real one), then run on `script` for `sec` seconds, sampled every step.
+   */
+  function drop(fromS: number, dropS: number, v0: number, script: Script, sec = 6) {
+    const r = race([human('p')]);
+    const p = r.car('p')!;
+    place(r, p, U(r, fromS), -1, v0);
+    for (let i = 0; i < 600 && r.T.ahead(fromS, r.s(p)) < r.T.ahead(fromS, dropS); i++) { r.update(DT, { p: UP }); r.drainEvents(); }
+    const at = { s: r.s(p), u: p.u, v: p.v, lapValid: p.lapValid, crossed: p.crossed };
+    const samples: Sample[] = [];
+    const ev: WireEvent[] = [];
+    let t = 0;
+    for (let i = 0; i < Math.round(sec / DT); i++) {
+      r.update(DT, { p: script(t) }); t += DT;
+      ev.push(...r.drainEvents());
+      samples.push({ t, mode: p.mode, u: p.u, v: p.v, recoverT: p.recoverT, lapValid: p.lapValid, away: p.away, stallT: p.stallT });
+    }
+    const deslots = ev.filter((e) => e.type === 'deslot' && e.car === 'p');
+    return { r, p, at, samples, ev, deslots };
+  }
+  /** the samples as the race sees them, without the away flag (which only a held, stopped car acts on) */
+  const motion = (x: Sample[]) => x.map(({ t, mode, u, v, recoverT, lapValid }) => ({ t, mode, u, v, recoverT, lapValid }));
+
+  it('approaching the hairpin at ~23 m/s: the half-open drop de-slots in the corner, re-slots 1.6 m behind with recoverT = 1, voids the lap, and is then held', () => {
+    const d = drop(60, 88.48, 22, LINK.halfOpen);
+    expect(d.at.v).toBeGreaterThan(22);
+    expect(d.at.v).toBeLessThan(23.5);
+    expect(d.at.lapValid).toBe(true);
+    // still racing on the held Throttle at +1.0 s (the playtest's v = 23.03 sample), going faster, not away
+    const s1 = d.samples.find((x) => x.t >= 1 - 1e-9)!;
+    expect(s1).toMatchObject({ mode: 'race', away: false });
+    expect(s1.v).toBeGreaterThan(d.at.v);
+    // one de-slot, in the hairpin, just after the held pedals went neutral (too late: the car is already in the corner)
+    expect(d.deslots).toHaveLength(1);
+    const offAt = d.samples.findIndex((x) => x.mode === 'off');
+    const offT = d.samples[offAt].t;
+    expect(offT).toBeGreaterThan(1.0);
+    expect(offT).toBeLessThan(1.5);
+    const u0 = d.samples[offAt].u;
+    expect(d.r.T.wrapS(u0)).toBeGreaterThan(HAIRPIN[0]);
+    expect(d.r.T.wrapS(u0)).toBeLessThan(HAIRPIN[1]);
+    // off the slot: v = 0 every step, not away (away is cleared while mode !== 'race'), the lap voided by the de-slot
+    const off = d.samples.filter((x) => x.mode === 'off');
+    expect(off.every((x) => x.v === 0 && !x.away && !x.lapValid)).toBe(true);
+    // the marshal's return: 1.6 m behind where it left, v = 0, recoverT counting down from 1
+    const back = d.samples[offAt + off.length];
+    expect(back.mode).toBe('race');
+    expect(back.u).toBeCloseTo(u0 - 1.6, 9);
+    expect(back.v).toBe(0);
+    expect(back.recoverT).toBeGreaterThan(1 - 2 * DT);
+    // then the #74 hold: away, stopped count at 0, never recovered, held at the re-slot spot for the rest of the outage
+    const after = d.samples.slice(offAt + off.length + 2);
+    expect(after.every((x) => x.away && x.stallT === 0 && x.u === back.u && x.mode === 'race')).toBe(true);
+    expect(recov(d.ev)).toEqual([]);
+    expect(d.p.lapValid).toBe(false);
+  });
+
+  it('the same instant, the same place: the half-open drop is exactly a connected driver who keeps Throttle down for that second and then lifts', () => {
+    const half = drop(60, 88.48, 22, LINK.halfOpen), conn = drop(60, 88.48, 22, LINK.hold1sLift);
+    expect(conn.deslots).toHaveLength(1);
+    // every step identical (de-slot, return, recoverT, lap validity) up to the moment the link car is held
+    const n = half.samples.findIndex((x) => x.away);
+    expect(n).toBeGreaterThan(0);
+    expect(motion(half.samples.slice(0, n))).toEqual(motion(conn.samples.slice(0, n)));
+    // and a connected driver keeping it down for longer de-slots there as well
+    expect(drop(60, 88.48, 22, LINK.hold).deslots).toHaveLength(1);
+  });
+
+  it('a connected lift at the drop instant, or a closed socket (neutral at once), coasts to a stop before the apex with no de-slot and the lap still valid', () => {
+    for (const k of ['lift', 'closed'] as const) {
+      const d = drop(60, 88.48, 22, LINK[k]);
+      expect(d.deslots).toEqual([]);
+      // (a connected car left standing is recovered by the stopped-on-track rule after 3 s: compare before that)
+      const live = k === 'lift' ? d.samples.slice(0, Math.round(4 / DT)) : d.samples;
+      expect(live.every((x) => x.mode === 'race' && x.lapValid)).toBe(true);
+      expect(d.samples.slice(0, Math.round(1.5 / DT)).every((x) => x.v >= STALL.stopV)).toBe(true);
+      if (k === 'closed') {
+        // held only once stopped, then for the rest of the outage
+        const from = d.samples.findIndex((x) => x.away);
+        expect(d.samples.slice(0, from).every((x) => Math.abs(x.v) >= STALL.stopV - 0.2)).toBe(true);
+        expect(d.samples.slice(from).every((x) => x.away && x.stallT === 0)).toBe(true);
+        expect(recov(d.ev)).toEqual([]);
+      }
+    }
+    // the stale second is the whole difference: a connected driver who lifts half a second after that instant still makes it
+    expect(drop(60, 88.48, 22, (t) => (t < 0.5 ? UP : NONE)).deslots).toEqual([]);
+  });
+
+  it('dropped at ~22 m/s mid-straight: the half-open drop coasts through the next bend and is held, with no de-slot and the lap unchanged', () => {
+    for (const k of ['halfOpen', 'closed', 'lift'] as const) {
+      const d = drop(130, STRAIGHT, 20, LINK[k]);
+      expect(d.at.v).toBeGreaterThan(21);
+      expect(d.deslots).toEqual([]);
+      const live = k === 'lift' ? d.samples.slice(0, Math.round(4 / DT)) : d.samples;
+      expect(live.every((x) => x.mode === 'race' && x.lapValid === d.at.lapValid)).toBe(true);
+      if (k !== 'lift') {
+        const from = d.samples.findIndex((x) => x.away);
+        expect(from).toBeGreaterThan(0);
+        expect(d.samples.slice(from).every((x) => x.away && x.stallT === 0 && Math.abs(x.v) < STALL.stopV)).toBe(true);
+        expect(recov(d.ev)).toEqual([]);
+      }
+    }
+  });
+
+  it('dropped at ~8 m/s just out of the pits (the playtest-4 case): it coasts and is held, with no de-slot', () => {
+    for (const k of ['halfOpen', 'closed'] as const) {
+      const r0 = race([human('p')]);
+      const d = drop(r0.T.PIT_OUT1 + 1, r0.T.PIT_OUT1 + 2, 8, LINK[k]);
+      expect(d.at.v).toBeGreaterThan(7.5);
+      expect(d.at.v).toBeLessThan(10);
+      expect(d.deslots).toEqual([]);
+      expect(d.samples.every((x) => x.mode === 'race')).toBe(true);
+      expect(d.p.away).toBe(true);
+      expect(d.p.lapValid).toBe(d.at.lapValid);
+      expect(recov(d.ev)).toEqual([]);
+    }
+  });
+});
