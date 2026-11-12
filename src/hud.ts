@@ -361,9 +361,23 @@ export class Hud {
   }
 }
 
-/** Whole seconds left on a stopped-on-track warning (3, 2, 1), or 0 when none is running (#69). */
-export function stallLeft(c: { stallT: number; mode: string; finished: boolean }): number {
-  if (!(c.stallT > 0) || c.mode !== 'race' || c.finished) return 0;
+/**
+ * Whether the race core's stopped-on-track count is paused for this car right now (#82): it is rolling backwards at
+ * STALL.stopV or more. This is exactly the condition under which Race.stallUpdate() (src/race.ts) does not add the step's
+ * time to a running episode (`if (c.v > -STALL.stopV) c.stallT += dt`); a copy, so the server bundle does not change, and
+ * test/stall.test.ts pins the two together frame by frame. Reverse gear alone (revOn) is NOT the pause: the standstill that
+ * engages reverse, or a car in reverse stopped against the car it backed into, still counts.
+ */
+export function stallPaused(c: { v: number }): boolean { return c.v <= -STALL.stopV; }
+
+/**
+ * Whole seconds left on a stopped-on-track warning (3, 2, 1), or 0 when none is running (#69). Also 0 exactly while the count
+ * is paused because the car is backing up (#82, stallPaused): backing up is the recovery manoeuvre, so a frozen tow countdown
+ * is never shown; and a count that is running is never hidden, so the warning stays up in reverse gear at a standstill (while
+ * reverse engages, or blocked by a car behind). When the car stops again the warning returns with the time that is left.
+ */
+export function stallLeft(c: { stallT: number; mode: string; finished: boolean; v: number }): number {
+  if (!(c.stallT > 0) || c.mode !== 'race' || c.finished || stallPaused(c)) return 0;
   return Math.max(1, Math.min(Math.ceil(STALL.grace), Math.ceil(STALL.grace - c.stallT - 1e-9)));
 }
 

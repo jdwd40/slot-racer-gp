@@ -4,9 +4,10 @@
 import { describe, it, expect } from 'vitest';
 import { createHash } from 'node:crypto';
 import { Race, Car, LAPS, PEN, STALL, AWAY, AWAY_REJOIN, BRAKE as BRAKE_DECEL, type Controls, type Input, type RosterEntry, type WireEvent, type RaceSnapshot } from '../src/race';
-import { stallLeft } from '../src/hud';
+import { stallLeft, stallPaused } from '../src/hud';
 import { applySnapshot, localEvent, mirrorRace } from '../src/net/mirror';
 import { FINISH_S } from '../src/track';
+import { STEP } from '../src/timing';
 import { drive } from './server/bot';
 
 const DT = 1 / 60;
@@ -980,6 +981,164 @@ describe('the pit entrance (review NB1)', () => {
     // nothing counted back: the same approach number, the same furthest point, the same lap count
     expect([r.apprLap(p), p.hiU, p.crossed]).toEqual([appr, hiU, crossed]);
   });
+});
+
+describe('the warning while reversing (#82)', () => {
+  it('stallLeft(): hidden exactly while the count is paused (backing up at STALL.stopV or more), never for reverse gear alone', () => {
+    const c = { stallT: 0.82, mode: 'race', finished: false, revOn: false, v: 0 };
+    const at = (o: Partial<typeof c>): number => stallLeft({ ...c, ...o });
+    expect(stallLeft(c)).toBe(3);
+    // backing up, in reverse gear or rolling back after it, at the count's own threshold or more: paused, so hidden
+    expect(at({ revOn: true, v: -3 })).toBe(0);
+    expect(at({ v: -3 })).toBe(0);
+    expect(at({ v: -STALL.stopV })).toBe(0);
+    // reverse gear at a standstill (engaging, or stopped against a car behind) still counts, so the warning stays up
+    expect(at({ revOn: true, v: 0 })).toBe(3);
+    expect(at({ revOn: true, v: -STALL.stopV + 0.01 })).toBe(3);
+    expect(at({ v: -STALL.stopV + 0.01 })).toBe(3);
+    // reverse over, stallT still 0.82: the warning is back with the remaining whole seconds, not a fresh count
+    expect(at({ revOn: false, v: 0 })).toBe(3);
+    expect(at({ stallT: 1.4, v: 0 })).toBe(2);
+    expect(at({ stallT: 2.5, v: -0.2 })).toBe(1);
+    // no episode: nothing, reversing or not
+    expect(at({ stallT: 0, revOn: true, v: -3 })).toBe(0);
+    expect(stallPaused({ v: -STALL.stopV })).toBe(true);
+    expect(stallPaused({ v: -STALL.stopV + 1e-6 })).toBe(false);
+  });
+
+  /** one race step: what Race.update() sub-steps a frame to (the room server's STEP, 1/60 s, is two of them) */
+  const SUB = 1 / 120;
+  type Watched = { ev: WireEvent[]; counted: number; paused: number; partial: number; hiddenT: number; recAt: number };
+  /**
+   * Step `sec` seconds in frames of `dt` and check, every frame, that the HUD's warning is shown exactly when the race core's
+   * count runs. While an episode runs (on the racing lane, stallT > 0 after the step): a frame whose whole time was counted
+   * (or that starts the episode) shows the warning, a frame that counted nothing hides it, and stallPaused() says the same.
+   * A recovery must come with the warning on screen the frame before. `mirror` (an online mirror fed the snapshots) must agree
+   * frame for frame. At one race step per frame that is exact. The HUD only sees the state after a frame, so at a longer frame
+   * (the server's STEP) the frame in which the car crosses STALL.stopV may count part of its time ('partial'): at most one
+   * sub-step of it can be counted with the warning hidden (hiddenT, in seconds of counted time).
+   */
+  function watch(r: Race, p: Car, inputs: In, sec: number, mirror?: Race, dt = SUB): Watched {
+    const ev: WireEvent[] = [];
+    let counted = 0, paused = 0, partial = 0, hiddenT = 0, lastShown = stallLeft(p), recAt = -1;
+    const t0 = r.raceTime;
+    for (let i = 0; i < Math.round(sec / dt); i++) {
+      const before = p.stallT;
+      r.update(dt, typeof inputs === 'function' ? inputs(r) : inputs);
+      const e = r.drainEvents(); ev.push(...e);
+      if (mirror) {
+        applySnapshot(mirror, JSON.parse(JSON.stringify(r.snapshot())) as RaceSnapshot);
+        expect(stallLeft(mirror.car(p.id)!)).toBe(stallLeft(p));
+      }
+      if (recov(e, p.id).length) { recAt = r.raceTime - t0; expect(lastShown).toBeGreaterThan(0); expect(stallLeft(p)).toBe(0); }
+      else if (p.mode === 'race' && p.stallT > 0) {
+        const inc = before === 0 ? dt : p.stallT - before;
+        const shown = stallLeft(p) > 0;
+        if (!shown) hiddenT += inc;
+        if (inc >= dt - 1e-9) { counted++; expect(shown).toBe(true); expect(stallPaused(p)).toBe(false); }
+        else if (inc === 0) { paused++; expect(shown).toBe(false); expect(stallPaused(p)).toBe(true); }
+        else { partial++; expect(dt).toBeGreaterThan(SUB); expect(shown ? 0 : inc).toBeLessThanOrEqual(SUB + 1e-9); }
+      }
+      lastShown = stallLeft(p);
+    }
+    return { ev, counted, paused, partial, hiddenT, recAt };
+  }
+
+  // stop for 1 s, back up on Brake for several seconds, release and stand still
+  function stopThenReverse(mirror = false): { r: Race; p: Car; ev: WireEvent[]; held: number } {
+    const r = race([human('p')]);
+    const p = r.car('p')!;
+    place(r, p, U(r, 175), 1, 0);
+    const m = mirror ? mirrorRace(JSON.parse(JSON.stringify(r.snapshot())) as RaceSnapshot) : undefined;
+    const ev = watch(r, p, {}, 1, m).ev;
+    expect(p.stallT).toBeGreaterThan(0.95); expect(p.stallT).toBeLessThan(1.05);
+    expect(stallLeft(p)).toBe(2);
+    // Brake at the standstill: 0.6 s to engage reverse (that standstill, and the roll up to STALL.stopV, still count and
+    // show), then backing up at REV.speed: paused and hidden
+    let held = -1, minV = 0;
+    const back = watch(r, p, () => { minV = Math.min(minV, p.v); return { p: BRAKE }; }, 4, m);
+    ev.push(...back.ev);
+    expect(back.paused).toBeGreaterThan(3 * 60);
+    expect(back.hiddenT).toBe(0);
+    expect(minV).toBeLessThan(-2.9);         // really backed up, at about REV.speed
+    held = p.stallT;
+    expect(held).toBeGreaterThan(1.5); expect(held).toBeLessThan(STALL.grace - 0.5);
+    expect(p.revOn).toBe(true);
+    expect(stallLeft(p)).toBe(0);
+    expect(recov(ev)).toHaveLength(0);
+    // release: the car rolls to a stop; the count runs again below STALL.stopV, and the warning is back with what is left
+    ev.push(...watch(r, p, {}, 0.5, m).ev);
+    expect(p.v).toBeCloseTo(0, 5);
+    expect(p.revOn).toBe(false);
+    expect(p.stallT).toBeGreaterThan(held);
+    expect(p.stallT).toBeLessThan(held + 0.5);
+    expect(stallLeft(p)).toBe(Math.ceil(STALL.grace - p.stallT - 1e-9));
+    expect(stallLeft(p)).toBeLessThan(3);    // the remaining time, not a fresh 3 s
+    expect(recov(ev)).toHaveLength(0);
+    return { r, p, ev, held };
+  }
+
+  it('stop, reverse for seconds (count paused, warning hidden, no recovery), stop again: recovered once the 3 s of counting are used', () => {
+    const { r, p, ev } = stopThenReverse();
+    const left = STALL.grace - p.stallT;
+    const rest = watch(r, p, {}, 3);
+    const at = rest.recAt;
+    expect(recov(rest.ev, 'p')).toHaveLength(1);
+    expect(rest.hiddenT).toBe(0);
+    expect(Math.abs(at - left)).toBeLessThanOrEqual(SUB + 1e-9);
+    expect(recov(ev)).toHaveLength(0);
+    expect(p).toMatchObject({ mode: 'service', stallT: 0 });
+    expect(stallLeft(p)).toBe(0);
+  });
+
+  it('stop, reverse, stop again, then drive off: the episode ends and the car is never recovered', () => {
+    const { r, p, ev } = stopThenReverse();
+    ev.push(...watch(r, p, { p: UP }, 1.2).ev);
+    expect(p.stallT).toBe(0);
+    expect(stallLeft(p)).toBe(0);
+    // a later stop would be a fresh episode with the full 3 s (the drive-off test above); here it just keeps going
+    expect(recov(ev)).toHaveLength(0);
+    expect(p.mode).toBe('race');
+  });
+
+  for (const gap of [0, 0.3, 1.5]) {
+    it(`reverse into a parked car ${gap} m behind: the count runs while stopped against it, and the warning stays up to the tow`, () => {
+      const r = race([human('p'), ai('x')]);
+      parkAI(r);
+      const p = r.car('p')!, x = r.car('x')!;
+      const u0 = U(r, 175);
+      place(r, p, u0, 1, 0);
+      place(r, x, u0 - r.T.CAR_LEN - gap, 1, 0);
+      const m = mirrorRace(JSON.parse(JSON.stringify(r.snapshot())) as RaceSnapshot);
+      watch(r, p, {}, 0.5, m);
+      expect(p.stallT).toBeGreaterThan(0.45);
+      let revShown = 0;
+      const w = watch(r, p, () => { if (p.revOn && p.mode === 'race' && stallLeft(p) > 0) revShown++; return { p: BRAKE }; }, 4, m);
+      expect(revShown).toBeGreaterThan(30);    // reverse gear engaged, the car stopped against x, the warning up...
+      expect(recov(w.ev, 'p')).toHaveLength(1); // ...but the car could not back away: the count ran out and it was towed
+      expect(w.hiddenT).toBe(0);               // never with the warning hidden (watch() also checks the frame before the tow)
+      expect(w.counted).toBeGreaterThan(60);
+      expect(p.mode).toBe('service');
+    });
+  }
+
+  for (const dt of [SUB, STEP]) {
+    it(`back-and-forth with reverse, online mirror, frames of 1/${Math.round(1 / dt)} s: shown iff the count runs, to the recovery`, () => {
+      const r = race([human('p')]);
+      const p = r.car('p')!;
+      place(r, p, U(r, 175), 1, 0);
+      const m = mirrorRace(JSON.parse(JSON.stringify(r.snapshot())) as RaceSnapshot);
+      let t = 0;
+      const w = watch(r, p, () => { t += dt; return { p: t % 1.45 < 1.1 ? BRAKE : UP }; }, 12, m, dt);
+      expect(w.paused).toBeGreaterThan(30);
+      expect(w.counted).toBeGreaterThan(60);
+      // exact at one race step per frame; at the server's STEP only the crossing frames may hide one sub-step each
+      if (dt === SUB) { expect(w.partial).toBe(0); expect(w.hiddenT).toBe(0); }
+      else expect(w.hiddenT).toBeLessThanOrEqual(w.partial * SUB + 1e-9);
+      expect(recov(w.ev, 'p').length).toBeGreaterThanOrEqual(1);   // recovered (and, back on track doing it again, again)
+    });
+  }
+
 });
 
 describe('state on the wire and determinism', () => {

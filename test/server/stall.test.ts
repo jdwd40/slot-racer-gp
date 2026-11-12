@@ -119,7 +119,7 @@ describe('stopped-on-track recovery on the room server (#69)', () => {
       for (let i = 1; i < counting.length; i++) expect(counting[i].stallT).toBeGreaterThanOrEqual(counting[i - 1].stallT);
       expect(counting.at(-1)!.stallT).toBeGreaterThan(2.8);
       expect(counting.at(-1)!.stallT).toBeLessThan(3);
-      expect(new Set(counting.map((x) => stallLeft({ stallT: x.stallT, mode: 'race', finished: false })))).toEqual(new Set([3, 2, 1]));
+      expect(new Set(counting.map((x) => stallLeft({ stallT: x.stallT, mode: 'race', finished: false, v: 0 })))).toEqual(new Set([3, 2, 1]));
       // every client: the same bytes from the start of the race, one recovery event naming seat 0, one envelope
       const race = (q: FakePeer): string[] => q.raw.slice(q.msgs.findIndex((m) => m.t === 'state'));
       for (const p of peers) {
