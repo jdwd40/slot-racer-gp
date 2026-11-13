@@ -251,3 +251,39 @@ describe('sign-in when the session store fails', () => {
     }
   });
 });
+
+describe('session lifetime', () => {
+  it('is absolute from sign-in: using a session never moves its stored expiry forward (no touch writes)', async () => {
+    const l = await login('alice');
+    expect(l.status).toBe(200);
+    const cookie = cookieOf(l);
+    const sid = decodeURIComponent(cookie.split('=')[1]).replace(/^s:/, '').split('.')[0];
+    const before = db.sessions.get(sid)!.expires;
+    const tries = db.attempts.length;
+    await new Promise((r) => setTimeout(r, 30));
+    for (let i = 0; i < 3; i++) expect(await me(cookie)).toMatchObject({ account: { username: 'alice' }, session: 'active' });
+    expect(db.attempts.slice(tries)).not.toContain('session.touch');
+    expect(db.sessions.get(sid)!.expires).toBe(before);
+  });
+});
+
+describe('a socket that closes while its sign-in check is pending', () => {
+  it('never creates a room from a message queued behind the check (no seat that nothing would release)', async () => {
+    const l = await login('bob');
+    const cookie = cookieOf(l);
+    const c = await socket(cookie);
+    const p = db.pool as unknown as { query: (sql: string, a?: unknown[]) => Promise<unknown> };
+    const real = p.query;
+    // hold the session check until the socket has gone
+    p.query = (sql, a) => (/FROM sessions s JOIN unnest/.test(sql) ? new Promise((r) => setTimeout(r, 250)).then(() => real(sql, a)) : real(sql, a));
+    try {
+      const rooms = mgr.stats().rooms;
+      c.send({ t: 'create', name: 'X', mode: 'solo', settings: {} });
+      c.send({ t: 'create', name: 'X', mode: 'solo', settings: {} });
+      await new Promise((r) => setTimeout(r, 50));
+      c.close();
+      await new Promise((r) => setTimeout(r, 500));
+      expect(mgr.stats().rooms).toBe(rooms);
+    } finally { p.query = real; }
+  });
+});

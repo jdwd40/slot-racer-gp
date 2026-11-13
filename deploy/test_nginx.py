@@ -74,6 +74,19 @@ class GzipConfig(unittest.TestCase):
         (ws,) = blocks(server, r'location = /ws')
         self.assertIn('proxy_set_header Sec-WebSocket-Extensions "";', top_level(ws))
 
+    def test_locations_with_add_header_repeat_the_security_headers(self):
+        # nginx drops every server-level add_header in a location that has one of its own
+        server = tls_server(ONLINE)
+        wanted = [d for d in top_level(server) if d.startswith('add_header ')]
+        self.assertEqual(len(wanted), 3)
+        for loc in re.findall(r'location[^{]*\{', server):
+            for body in blocks(server, re.escape(loc[:-1].rstrip())):
+                directives = top_level(body)
+                if any(d.startswith('add_header ') for d in directives):
+                    with self.subTest(loc):
+                        for d in wanted:
+                            self.assertIn(d, directives)
+
     def test_static_rollback_has_no_proxy_routes(self):
         text = STATIC.read_text()
         self.assertNotIn('proxy_pass', text)

@@ -6,7 +6,6 @@ export const LAPS = 13;
 export const ACC = 30, VMAX = 26, COAST = 9, BRAKE = 30, DRAG = 0.006;
 export const AI_GRIP = 36;   // cornering speeds the AI aims for
 export const GRIP = 52;      // real grip of the slot (well above the AI's target, so cars stick)
-/** fuel per unit distance at nominal throttle (scaled to the lap length, by default the displayed track's) */
 /** Fuel burned per unit of track for a lap of length L. L is required: a default read from the displayed track would let it reach a race. */
 export function fuelRate(L: number): number { return 1 / (L * 7.4); }
 export const REFUEL_RATE = 0.2;           // tank per second
@@ -262,7 +261,7 @@ export interface Car {
   fuel: number; slip: number; latRatio: number; wobble: number;
   off: OffState | null; recoverT: number; towT: number;
   bay: number; bayT: number; serviceT: number; penalty: number; fuelAtBay: number;
-  crossed: number; lapsDone: number; lapStart: number; lastLap: number; bestLap: number;
+  crossed: number; lapsDone: number; lastLap: number; bestLap: number;
   /** precise (sub-step) race time of the last timing-line crossing */
   lapStartT: number;
   /** true while the current lap has had no de-slot, tow, pit visit or reset */
@@ -561,7 +560,7 @@ export class Race {
         mode: 'grid', d: g.side * this.T.LANE_HALF, yawOff: 0, throttle: 0, brake: 0,
         fuel: 1, slip: 0, latRatio: 0, wobble: 0, off: null, recoverT: 0, towT: 0,
         bay: g.di, bayT: 0, serviceT: 0, penalty: 0, fuelAtBay: 0,
-        crossed: 0, lapsDone: 0, lapStart: 0, lastLap: 0, bestLap: 0, lapStartT: 0, lapValid: true, sectors: 0,
+        crossed: 0, lapsDone: 0, lastLap: 0, bestLap: 0, lapStartT: 0, lapValid: true, sectors: 0,
         finished: false, finishTime: 0, pitStops: 0,
         squeezeHold: false, yielding: false, waitingClear: false,
         skill: P.skill, lapse: 0, mistakeT: this.rnd(P.mistakeEvery[0], P.mistakeEvery[1]), pitPlan: false, refuelTarget: 1, changeCooldown: 0,
@@ -1085,7 +1084,6 @@ export class Race {
           const to = c.laneSide > 0 ? -1 : 1;
           const defensive = c.defendPending; c.defendPending = false;
           const clear = this.laneClear(c, to);
-          if (defensive) { this.dbg.defendReq++; if (!clear) this.dbg.defendNoGap++; else if (!this.defendSafe(c, to, sw)) this.dbg.defendUnsafe++; else this.dbg.defendDone++; }
           if (clear && (!defensive || this.defendSafe(c, to, sw))) {
             c.change = { from: c.laneSide, to, s0: sw.s0, s1: sw.s1 };
             c.changeCooldown = 3;
@@ -1381,7 +1379,6 @@ export class Race {
       const valid = c.lapValid && c.sectors === 7 && c.crossed >= 2;
       if (c.crossed >= 2 && !c.finished) {
         const lt = tCross - c.lapStartT;
-        c.lapStart = this.raceTime;
         c.lapsDone = c.crossed - 1;
         c.lastLap = lt;
         const best = valid && (c.bestLap === 0 || lt < c.bestLap);
@@ -2062,8 +2059,8 @@ export class Race {
     this.emit({ type: 'offence', car: c, other, n: c.offences, cause, stop });
   }
 
-  /** Judge a fresh rear-end impact (rear closing on front at rel m/s) and attribute it. */
-  judge(rear: Car, front: Car, rel: number): void {
+  /** Judge a fresh rear-end impact (rear closing on front faster than PEN.impactRel) and attribute it. */
+  judge(rear: Car, front: Car): void {
     if (rear.mode !== 'race' || front.mode !== 'race') return;          // pit-lane shuffles don't count
     if (rear.retire || front.retire) return;                               // nobody is driving a retired car, so no one is to blame
     if (Math.abs(rear.z - front.z) > 1) return;                            // different bridge levels (cannot touch anyway)
@@ -2088,7 +2085,6 @@ export class Race {
   /** pairs currently in contact (indexed a.idx*4+b.idx, a<b): a new incident needs clear separation first */
   touching: boolean[] = [];
   /** diagnostics for tuning: defensive decisions made / executed / rejected for safety / rejected for no gap */
-  dbg = { defendReq: 0, defendDone: 0, defendUnsafe: 0, defendNoGap: 0 };
 
   collide(): void {
     // a car held for an away driver (#74) is out of collisions, like a de-slotted, towed or parked one
@@ -2113,7 +2109,7 @@ export class Race {
       const fresh = !this.touching[key];
       this.touching[key] = true;
       // contact with a reversing car is resolved but never judged as a rear-end offence
-      if (fresh && rel > PEN.impactRel && !backing) this.judge(rear, front, rel);
+      if (fresh && rel > PEN.impactRel && !backing) this.judge(rear, front);
       if (rel > 0) {
         const vc = (rear.v + front.v) / 2, e = 0.35;
         rear.v = (vc - (e * rel) / 2) * 0.93;
