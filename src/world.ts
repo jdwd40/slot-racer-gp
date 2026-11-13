@@ -2,7 +2,7 @@ import * as THREE from 'three';
 import * as T from './track';
 import { Y0, std, mesh, canvasTex, noise, ribbon, wall, boxAt, groupAt, figure, textTex, mergeStatic, disposeObject } from './gfx';
 import { buildScenery, matTexture, tableTexture, TEAM_COLS } from './scenery';
-export { arrowGeometry, ribbon, wall, v3 } from './gfx';
+export { arrowGeometry } from './gfx';
 
 export interface World {
   root: THREE.Group;

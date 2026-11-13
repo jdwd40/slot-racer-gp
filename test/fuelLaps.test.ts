@@ -143,6 +143,21 @@ describe('refill', () => {
     expect(r.laps).toBeCloseTo(d.fuel / (nominal * FALLBACK_BURN * L), 9);
   });
 
+  it('counts every stop: the refill ends once the car burns fuel again, and a pause in the fill is still the same stop', () => {
+    for (const q of [false, true]) {
+      const d = new Drive(new FuelLapsEstimator(), q);
+      d.run(1, 1.2);
+      d.stand(1, 0.2); d.stand(0.5); d.stand(1, 0.2);   // one stop, the fill paused half-way
+      expect(d.est.refills).toBe(1);
+      d.run(1, 1.2);
+      d.stand(2, 0.2);
+      expect(d.est.refills).toBe(2);
+      d.run(1, 1.2);
+      d.stand(2, 0.2);
+      expect(d.est.refills).toBe(3);
+    }
+  });
+
   it('a slow top-up that rises under 0.001 per reading is still one refill (judged against the lowest reading)', () => {
     const d = new Drive();
     d.run(1, 1.2);

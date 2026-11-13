@@ -11,7 +11,7 @@ export type Conn = 'offline' | 'connecting' | 'connected' | 'reconnecting';
  * `outdated`: a reconnect's hello was refused for its protocol (the server was upgraded or rolled back meanwhile; the page
  * asks /api/health which, #80).
  */
-export type EndReason = 'left' | 'expired' | 'closed' | 'shutdown' | 'superseded' | 'lost' | 'outdated';
+export type EndReason = 'left' | 'expired' | 'closed' | 'shutdown' | 'superseded' | 'outdated';
 
 export interface Seat { room: string; participant: string; token: string; code: string; }
 
@@ -92,6 +92,9 @@ export class NetSession {
     this.closing = false; this.ended = null;
     this.setConn('connecting');
     try { await this.client.connect(); } catch (e) {
+      // a refused hello leaves its socket open until the server closes it: give it up now, or that close would look like a
+      // dropped seat and start a reconnect nobody asked for (and lose the stored seat)
+      this.client.drop();
       this.setConn('offline');
       const msg = String((e as Error).message);
       return msg.includes('protocol') ? { ok: false, code: 'protocol' } : { ok: false, code: 'unreachable' };
@@ -173,9 +176,15 @@ export class NetSession {
       this.reconnects++;
       try {
         await this.client.connect();
+        // given up while connecting (page closing, seat expired): never ask for the seat back
+        if ((this.closing || this.ended) && this.ended !== 'left') break;
         const r = await this.client.request({ t: 'resume', room: seat.room, participant: seat.participant, token: seat.token });
-        // given up (left, closed) while this attempt was in flight: the seat is not taken back
-        if (this.closing || this.ended) break;
+        if (this.closing || this.ended) {
+          // the driver pressed Leave while this attempt was under way: hand the seat back now, so the car retires (or the lobby
+          // seat goes) at once instead of being held through the grace period as if the link had only dropped
+          if (r.t === 'joined' && this.ended === 'left') this.client.send({ t: 'leave' });
+          break;
+        }
         if (r.t === 'joined') { this.held = { up: false, down: false }; this.adopt(r); return; }
         const n = r as Extract<ServerMsg, { t: 'nack' }>;
         if (n.code === 'expired' || n.code === 'forbidden' || n.code === 'not_found') { this.client.drop(); this.finish('expired', n.detail); return; }
@@ -228,9 +237,12 @@ export class NetSession {
   rematch(): void { this.command({ t: 'rematch' }); }
   /** Give the seat up on purpose (the car retires if racing); no reconnection follows. */
   leave(): void {
-    if (this.conn === 'connected') this.client.send({ t: 'leave' });
+    const was = this.conn;
+    if (was === 'connected') this.client.send({ t: 'leave' });
     this.finish('left');
-    setTimeout(() => this.client.close(), 200);
+    // a reconnect attempt under way is not cut short: it hands a resumed seat back with `leave` and then gives its socket
+    // up itself (reconnect()), however long its resume takes to answer
+    if (was !== 'reconnecting') setTimeout(() => this.client.close(), 200);
   }
   /**
    * The page has heard nothing it expected for too long (#43): treat the socket as dead and resume, through the same

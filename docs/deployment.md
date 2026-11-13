@@ -1,5 +1,7 @@
 # Static deployment: slotrush.jdwd40.com
 
+> **Current state.** DNS and TLS are live, and every deploy proves them with an HTTPS preflight (`deploy/run.sh`). Since online play was activated (2026-11-09) the installed site file is `deploy/nginx/slotrush.jdwd40.com.online.conf` (it adds `/api/` and `/ws`); `deploy/nginx/slotrush.jdwd40.com.conf` is the static-only rollback. Passages below written before launch (NXDOMAIN, "no Node process required") are kept as the record of the original setup.
+
 ## Scope and verified target
 
 This is a **static browser game**. No production Node process, multiplayer backend,

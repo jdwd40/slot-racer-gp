@@ -1,5 +1,7 @@
 # Slot Rush GP — Architecture & Deployment Readiness Audit
 
+> **Historical snapshot at `6c8a7da` (2026-10-28), superseded.** Since then the game gained CI, a regression suite, an authoritative online room server with PostgreSQL accounts and careers, and the Tesana SDK was removed. Statements below such as "no backend", "no tests" and "no CI" were true only then. For the current design start at the [README](../README.md).
+
 Date: 2026-10-28. Scope: the working tree at commit `6c8a7da` plus the uncommitted practice/championship/leaderboard and collision-penalty work (`git status` lists seven modified files and two new files, `src/ghost.ts` and `src/records.ts`). This is an audit only; no gameplay code was changed.
 
 Severity scale: **Critical** (will break the deployment or the product), **High** (must be fixed before going live or before starting multiplayer), **Medium** (fix soon, limited blast radius), **Low** (hygiene). Each finding is marked **Confirmed** (observed in code or by running something) or **Risk** (plausible, not observed).

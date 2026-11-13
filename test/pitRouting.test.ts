@@ -531,7 +531,7 @@ describe('HUD route text', () => {
     r.requestLane(me(r).id);
     expect(chip(INSIDE)).toBe('hud.routeInsideStay');
     expect(chip(OUTSIDE)).toBe('hud.routeInsideMove');
-    for (const id of ['hud.routeOutsideMove', 'hud.routeOutsideStay', 'hud.routeInsideMove', 'hud.routeInsideStay', 'hud.pitFuelToo', 'msg.routeInside', 'msg.routeOutside', 'msg.routeBlocked', 'msg.pitFuelToo']) expect(t(id)).not.toBe(id);
+    for (const id of ['hud.routeOutsideMove', 'hud.routeOutsideStay', 'hud.routeInsideMove', 'hud.routeInsideStay', 'msg.routeInside', 'msg.routeOutside', 'msg.routeBlocked', 'msg.pitFuelToo']) expect(t(id)).not.toBe(id);
   });
   it('reads the lane a committed change will end in', () => {
     const { r, P } = solo();
