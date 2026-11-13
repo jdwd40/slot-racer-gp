@@ -423,7 +423,7 @@ function speedwayScenery(root: THREE.Group, c: SceneryCtx): void {
     const wallM = mesh(new THREE.CylinderGeometry(2.6, 2.6, 1.3, 8, 1, true), std(0x1f4fbf, 0.7, 0, { side: THREE.DoubleSide }), castRecv); wallM.position.y = 0.65; g.add(wallM);
     placeAt(root, g, sp2.x, sp2.y, Math.random() * 6);
   }
-  // flag row along the outside of the highbank
+  // desk clutter around the highbank
   const hw = B.w / 2 + 15, hh = B.h / 2 + 15;
   placeAt(root, deskLamp(), B.cx + hw + 9, B.cy + hh - 4, -2.2);
   placeAt(root, mug(0x22b04b), B.cx - hw - 6, B.cy - hh + 9, 0.9);

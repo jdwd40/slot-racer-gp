@@ -4,7 +4,7 @@ Cars arriving at an occupied stop-and-go box, a busy pit lane or a car leaving i
 
 ## Ownership
 
-`Race.pit` (`src/pit.ts`, `PitTraffic`) owns all pit traffic state. `PitTraffic.update()` runs at the start of every simulation step, before any car moves. It works from a snapshot of where every car is, so the order of the car array, the frame rate and whether a car is human or AI never decide who goes first. There is no networking, so there is no client that could be offline or late. The HUD reads `Car.pitWait`, `Car.pitHold` and `Race.pit`, and keeps no queue of its own. The squeeze-section queue (`squeezeQ`) is not used here.
+`Race.pit` (`src/pit.ts`, `PitTraffic`) owns all pit traffic state. `PitTraffic.update()` runs at the start of every simulation step, before any car moves. It works from a snapshot of where every car is, so the order of the car array, the frame rate and whether a car is human or AI never decide who goes first. Online, the room server runs this same step authoritatively and browsers only send pedals and actions, so no client that is offline or late can change the order. The HUD reads `Car.pitWait`, `Car.pitHold` and `Race.pit`, and keeps no queue of its own. The squeeze-section queue (`squeezeQ`) is not used here.
 
 | Resource | Holder | Granted | Released (`why`) |
 | --- | --- | --- | --- |

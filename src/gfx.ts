@@ -9,7 +9,6 @@ import * as T from './track';
 export const Y0 = 0.05;
 
 // 2D (x, y-north) -> three (x, h, -y)
-export function v3(x: number, y: number, h = 0): THREE.Vector3 { return new THREE.Vector3(x, h, -y); }
 
 export function std(color: number, rough = 0.7, metal = 0, extra: THREE.MeshStandardMaterialParameters = {}): THREE.MeshStandardMaterial {
   return new THREE.MeshStandardMaterial({ color, roughness: rough, metalness: metal, ...extra });

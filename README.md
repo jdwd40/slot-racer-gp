@@ -19,7 +19,7 @@ npm run build:server && npm run server   # optional room server on 127.0.0.1:878
 ## Checks
 
 ```bash
-npm run typecheck  # tsc --noEmit over src/ and test/
+npm run typecheck  # tsc --noEmit over src/, server/, test/, scripts/*.ts and the build configs
 npm test           # vitest run: the regression suite, once, no watch mode
 npm run check:browser  # bounded real-browser checks, about 11 minutes; not part of CI
 npm run test:db    # database tests against a private local PostgreSQL (.local-pg/); CI runs them on PostgreSQL 17
@@ -39,9 +39,13 @@ The build output is plain HTML/JS/CSS; serve the `dist/` folder from any static 
 - `src/` — TypeScript source (`src/main.ts` is the entry; `src/race.ts` and `src/track.ts` are the simulation; `src/net/` is the online protocol and client, `src/online.ts` the online gate).
 - `server/` — the online room server; `deploy/server/` its systemd unit and environment example.
 - `assets/ui/strings.json` — all player-visible text.
-- `docs/architecture-audit.md` — architecture and deployment audit.
+- `docs/architecture-audit.md` — the first architecture and deployment audit (2026-10-28, historical).
+- `docs/deployment.md` — static deployment, CI artifact handoff and rollback.
+- `docs/multiplayer-core.md` — the multiplayer race core: seeded, multi-human `Race` (#21).
 - `docs/timing.md` — simulation timing policy and its test evidence.
 - `docs/graphics.md` — graphics presets, the automatic fallback to Low, their trade-offs and measurements.
+- `docs/responsive.md` — layouts for phones and tablets.
+- `docs/player-marker.md` — the player marker in the full-circuit view.
 - `docs/touch.md` — touch controls, the shared input layer and their evidence.
 - `docs/reverse.md` — hold-Brake reverse: tuning, recovery limits, race-integrity rules and evidence.
 - `docs/penalties.md` — service obligations: deferral, deadlines, disqualification, results and save compatibility.
@@ -52,5 +56,7 @@ The build output is plain HTML/JS/CSS; serve the `dist/` folder from any static 
 - `docs/auto-bay.md` — race-long bay ownership, automatic fuel visits to the car's own bay, the fresh-Throttle departure, stopped-on-track recovery to the bay (#69), and their evidence.
 - `docs/online-client.md` — online lobbies and the online race client; `docs/online-client-evidence.md` — its evidence.
 - `docs/online-server.md` — the online room server: rules, protocol, timing policy, accounts, configuration, resource limits, activation and rollback runbook; `docs/online-evidence.md` — its evidence.
+- `docs/accounts.md` — player accounts and driver profiles; `docs/accounts-evidence.md` — its evidence.
+- `docs/career.md` — career points, personal bests and race history; `docs/career-evidence.md` — its evidence.
 - `docs/validation.md` — repeatable browser checks, results and the remaining hardware validation.
-- `scripts/` — the browser check and its frame-time statistics.
+- `scripts/` — the browser and online checks, frame-time and tick statistics, the room server build/pack/smoke/load scripts and the local PostgreSQL runner.

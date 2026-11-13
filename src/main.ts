@@ -14,7 +14,7 @@ import { GhostRecorder, GhostPlayer } from './ghost';
 import { FixedStepper, STEP, MAX_GAP, Pose, blendPose } from './timing';
 import { PRESETS, PresetId, pixelRatioFor, savedPreset, savePreset } from './graphics';
 import { AutoQuality } from './autoQuality';
-import { NetSession, loadSeat, refusalText, type Conn, type ResultView, type Seat, type EndReason } from './net/session';
+import { NetSession, loadSeat, refusalText, type Conn, type ResultView, type EndReason } from './net/session';
 import { AccountClient, accountKey, type AuthError, type AuthState } from './net/account';
 import { SnapBuffer, applySnapshot, localEvent, mirrorRace } from './net/mirror';
 import { LIVERIES as NET_LIVERIES, LIMITS, type AwardsView, type CareerStats, type ChampionshipTag, type LiveryId, type PublicRoom, type ServerMsg } from './net/protocol';

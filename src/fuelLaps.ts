@@ -85,7 +85,8 @@ export class FuelLapsEstimator {
     if (x.L !== this.L) { this.reset(); this.L = x.L; }
     const fuel = Math.max(0, x.fuel);
     const p = this.last;
-    const refill = !!p && fuel > this.minFuel + SNAP_EPS + 1e-9;
+    const floor = this.minFuel;   // the lowest reading before this one (the branches below move it)
+    const refill = !!p && fuel > floor + SNAP_EPS + 1e-9;
     if (!p) this.startSegment(fuel);
     else if (refill) {
       // refill: the stint ends here; the in-lap is not a burn sample
@@ -108,7 +109,8 @@ export class FuelLapsEstimator {
         if (this.openDist >= CHUNK_LAPS * x.L) this.closeChunk(fuel, nominal);
       }
     }
-    this.refilling = refill || (this.refilling && fuel >= this.minFuel);
+    // a refill stays one refill through flat readings while the tank fills; it ends once the car burns fuel again
+    this.refilling = refill || (this.refilling && fuel >= floor);
     this.last = { fuel, u: x.u, L: x.L, now: x.now };
     return this.reading(fuel, x.L);
   }

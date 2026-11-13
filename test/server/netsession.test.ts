@@ -302,6 +302,45 @@ describe('NetSession against the real server', () => {
     p.s.leave();
   }, 60000);
 
+  it('a resume refused for its protocol keeps the stored seat and starts no reconnect of its own', async () => {
+    const p = player();
+    expect(await p.s.create('P', 'multiplayer', { track: 'circuit-1' })).toEqual({ ok: true });
+    const seat = loadSeat(p.kv)!;
+    p.s.close();
+    const q = player(p.kv);
+    const connect = q.s.client.connect.bind(q.s.client);
+    q.s.client.connect = () => connect(999);   // a page built for another protocol
+    expect(await q.s.resume(seat)).toMatchObject({ ok: false, code: 'protocol' });
+    await sleep(400);   // the server closes the refused socket: that close is not a dropped seat
+    expect(q.conns).not.toContain('reconnecting');
+    expect(q.s.reconnects).toBe(0);
+    expect(loadSeat(p.kv)).toEqual(seat);
+    // and the seat is still there for a page that speaks the protocol
+    const r = player(p.kv);
+    expect(await r.s.resume(loadSeat(p.kv)!)).toEqual({ ok: true });
+    r.s.leave();
+  });
+
+  it('Leave pressed while reconnecting gives the seat up at once (not held through the grace period)', async () => {
+    const a = player(), b = player();
+    await a.s.create('A', 'multiplayer', { track: 'circuit-1' });
+    await b.s.join(a.s.room!.code, 'B');
+    await until(() => a.s.room!.participants.length === 2);
+    // press Leave while the reconnect's first attempt is under way (its socket has just opened)
+    const connect = b.s.client.connect.bind(b.s.client);
+    let armed = false;
+    b.s.client.connect = async (v) => { await connect(v); if (armed) { armed = false; b.s.leave(); } };
+    // and its resume is slow to go through (well past leave()'s own 200 ms socket close): it is still handed back
+    const request = b.s.client.request.bind(b.s.client);
+    b.s.client.request = async (m) => { await sleep(500); return request(m); };
+    armed = true;
+    b.s.client.ws!.close(4000, 'test drop');
+    await until(() => b.ends.includes('left'));
+    // well inside the grace period (cfg.graceS) the host's lobby has only the host
+    await until(() => a.s.room!.participants.length === 1, (cfg.graceS * 1000) / 2);
+    a.s.leave();
+  });
+
   it('a missing room and an incompatible protocol are refused with a reason', async () => {
     const p = player();
     expect(await p.s.join('ZZZZZZ', 'X')).toMatchObject({ ok: false, code: 'not_found' });

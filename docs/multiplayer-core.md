@@ -45,7 +45,7 @@ All on the build host (Linux, no GPU). Browser runs use Chromium with SwiftShade
   - Finishing: a first finish does not end the race, and a second human keeps control for 10 s afterwards. The race closes once with one `final` event. The finish window classifies cars in a fixed order (a breach becomes DQ), each once, and releases their pit resources. The time limit sets DNF `timeout`. A DQ at the flag for an unserved stop-and-go still applies. Live results with estimates never become final, and the championship record is built from `final`. A solo race still closes 3.2 s after the solo finish.
   - Authoritative state: snapshots and wire events from 30 s of a 2-human/2-AI race round-trip through JSON. They contain only driver IDs and no local-player key. Seeded races are reproducible and never call `Math.random`.
   - Concurrent circuits: a Clubman Park race and a Speedway race are stepped in turn while the displayed track changes every step. Their snapshots equal those of each race run alone.
-  - Headless: `race.ts`, `pit.ts` and `track.ts` import only each other and use no browser globals. A race runs to `final` in Node with no `window` or `document`.
+  - Headless: `race.ts`, `pit.ts` and `track.ts` import only each other (and, since #74, `traffic.ts`) and use no browser globals. A race runs to `final` in Node with no `window` or `document`.
 - `npm run build`: OK.
 - Browser checks (`node scripts/browser-check.mjs`, SwiftShader, diagnostics only): see the table below. The new `localslot` scenario puts the local driver in slot 2 and checks the camera, marker, HUD, fuel readout, own bay, motor volume and personal toast, then checks that slot 0 restores the solo grid.
 

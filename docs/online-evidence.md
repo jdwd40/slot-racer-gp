@@ -1,5 +1,7 @@
 # Online room server: evidence (#22)
 
+> **Historical record (written before activation).** Production multiplayer has since been switched on (2026-11-09) and the deployed client is built with `VITE_ONLINE=1`. The current state, release history and runbooks are in [online-server.md](online-server.md); the "not done" statements below describe the time this evidence was taken.
+
 Design, rules and runbook: [online-server.md](online-server.md). **Local proof and production activation are reported separately, and production activation has not happened.**
 
 ## Production activation: not done
