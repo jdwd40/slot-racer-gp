@@ -82,6 +82,8 @@ describe.skipIf(!URL_)('PostgreSQL interruption during an active race (server pr
         SLOTRUSH_SESSION_SECRET: 'dbrestart-session-secret-0123456789abcdef', SLOTRUSH_SPOOL_DIR: spool,
         // a quick race: wall clock x20, with the catch-up budget to match
         SLOTRUSH_TIME_SCALE: '20', SLOTRUSH_MAX_CATCHUP_STEPS: '6', SLOTRUSH_SNAPSHOT_HZ: '10', SLOTRUSH_MSG_RATE: '300', SLOTRUSH_MSG_BURST: '400',
+        // health re-probes the database on every request, so a reading right after the cut is not the cached pre-cut one (#98)
+        SLOTRUSH_HEALTH_DB_CACHE_MS: '0',
       },
       stdio: ['ignore', 'pipe', 'pipe'],
     });

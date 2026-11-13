@@ -43,6 +43,12 @@ export interface Config {
   timeScale: number;
   databaseUrl: string | null;
   dbPoolMax: number;
+  /**
+   * how long /api/health reuses its last database status (SLOTRUSH_HEALTH_DB_CACHE_MS, default 2000; #98). One probe runs at
+   * a time whatever the request rate, so health never crowds the small pool. 0: probe on every request (concurrent requests
+   * still share one probe), which `testConfig` uses so tests see a schema change at once
+   */
+  healthDbCacheMs: number;
   sessionSecret: string | null;
   cookieSecure: boolean;
   /** career points for 1st, 2nd, 3rd... (SLOTRUSH_CAREER_POINTS, default 10,6,4); the scoring version follows from them */
@@ -119,6 +125,7 @@ export function loadConfig(env: Env = process.env): Config {
     timeScale,
     databaseUrl,
     dbPoolMax: int(env, 'SLOTRUSH_DB_POOL_MAX', 3, 1, 20),
+    healthDbCacheMs: int(env, 'SLOTRUSH_HEALTH_DB_CACHE_MS', 2000, 0, 60000),
     sessionSecret,
     cookieSecure: bool(env, 'SLOTRUSH_COOKIE_SECURE', mode === 'production'),
     careerPoints, spoolDir,
@@ -127,7 +134,7 @@ export function loadConfig(env: Env = process.env): Config {
   };
 }
 
-/** Defaults for tests: no database, quick timeouts can be overridden per test. */
+/** Defaults for tests: no database, quick timeouts can be overridden per test; health's database status is not cached. */
 export function testConfig(over: Partial<Config> = {}): Config {
-  return { ...loadConfig({ NODE_ENV: 'test' }), ...over };
+  return { ...loadConfig({ NODE_ENV: 'test' }), healthDbCacheMs: 0, ...over };
 }

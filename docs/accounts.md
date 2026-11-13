@@ -146,6 +146,7 @@ every room entry, so a sign-out, expiry or reset elsewhere also ends a socket's 
 | Registrations per address | 10 per hour |
 | "Per address" | an IPv6 client counts by its /64, an IPv4 client per address ([online-server.md](online-server.md), *Per-address limit key*, #97) |
 | Renames per account | 10 per minute |
+| Career reads (`GET /api/profile/stats`) per address | 60 per minute, counted before the session read (#98) |
 | Hash flood | one Argon2id hash at a time, 16 queued, then `503 busy` |
 | Bodies | 4 KB, exact fields |
 | Errors | fixed codes (`invalid_credentials`, `username_taken`, `rate`...); unknown users cost the same hash work; internal errors are `500 internal` with no detail |

@@ -162,11 +162,32 @@ export async function migrate(pool: Pool): Promise<string[]> {
   }
 }
 
-/** The schema check the service runs at start: every migration it knows must be applied, unchanged. */
-export async function schemaStatus(pool: Pool): Promise<{ current: boolean; applied: string[]; missing: string[] }> {
-  await ensureTable(pool).catch(() => undefined);
-  const rows = (await pool.query<{ id: string; checksum: string }>('SELECT id, checksum FROM schema_migrations ORDER BY id')).rows;
+type SchemaStatus = { current: boolean; applied: string[]; missing: string[] };
+function statusOf(rows: { id: string; checksum: string }[]): SchemaStatus {
   const map = new Map(rows.map((r) => [r.id, r.checksum]));
   const missing = MIGRATIONS.filter((m) => map.get(m.id) !== checksum(m)).map((m) => m.id);
   return { current: !missing.length, applied: rows.map((r) => r.id), missing };
+}
+const STATUS_SQL = 'SELECT id, checksum FROM schema_migrations ORDER BY id';
+
+/**
+ * The schema check the service runs at start (and `admin status`): every migration it knows must be applied, unchanged.
+ * It first creates the empty bookkeeping table if it is missing, as it always has; /api/health uses `readSchemaStatus`.
+ */
+export async function schemaStatus(pool: Pool): Promise<SchemaStatus> {
+  await ensureTable(pool).catch(() => undefined);
+  return statusOf((await pool.query<{ id: string; checksum: string }>(STATUS_SQL)).rows);
+}
+
+/**
+ * The same check, read-only: one SELECT and no DDL, for the public health endpoint (#98). A database where no migration
+ * has ever run (no `schema_migrations` table, SQLSTATE 42P01) reads as nothing applied, not as a failure.
+ */
+export async function readSchemaStatus(pool: Pick<Pool, 'query'>): Promise<SchemaStatus> {
+  try {
+    return statusOf((await pool.query<{ id: string; checksum: string }>(STATUS_SQL)).rows);
+  } catch (e) {
+    if ((e as { code?: unknown } | null)?.code !== '42P01') throw e;
+    return statusOf([]);
+  }
 }

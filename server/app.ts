@@ -10,7 +10,7 @@ import { Accounts, Busy, checkPassword, checkUsername } from './accounts';
 import type { Config } from './config';
 import { dbErrorFields } from './db';
 import type { Logger } from './log';
-import { schemaStatus, SCHEMA_VERSION } from './migrations';
+import { readSchemaStatus, SCHEMA_VERSION } from './migrations';
 import type { Peer, Room } from './room';
 import type { RoomManager } from './rooms';
 import { PgSessionStore, type SessionAccount } from './sessionStore';
@@ -47,6 +47,8 @@ const BODY_MAX = 4096;
 const MAX_RATE_STRIKES = 3;
 const SESSION_CHECK_MS = 10000;
 const COOKIE = 'srsid';
+/** GET /api/profile/stats per client address (its limit key: an IPv6 /64, server/netkey.ts) per minute (#98) */
+export const STATS_PER_MINUTE = 60;
 
 /** A fixed-window counter per key (an address, a username, an account): at most `max` hits per `ms`. Memory is bounded. */
 export class RateWindow {
@@ -67,6 +69,29 @@ export class RateWindow {
   clear(key: string): void { this.m.delete(key); }
 }
 
+export type DbState = 'ok' | 'down' | 'outdated';
+
+/**
+ * Health's view of the database (#98): the last probe's answer, reused for `ttlMs`, with at most one probe in flight.
+ * Requests that arrive while a probe runs wait for that probe instead of starting their own, so any burst of health
+ * requests costs at most one query per window. A failed probe is `down`, cached like any other answer, so an outage shows
+ * within `ttlMs` (plus the probe's own timeout) of its start, and recovery within `ttlMs` of the database answering again.
+ */
+export class DbStatusCache {
+  private last: { state: DbState; at: number } | null = null;
+  private inflight: Promise<DbState> | null = null;
+  constructor(private probe: () => Promise<DbState>, private ttlMs: number, private now: () => number = () => Date.now()) {}
+  get(): Promise<DbState> {
+    if (this.last && this.now() - this.last.at < this.ttlMs) return Promise.resolve(this.last.state);
+    this.inflight ??= this.probe().catch((): DbState => 'down').then((state) => {
+      this.last = { state, at: this.now() };
+      this.inflight = null;
+      return state;
+    });
+    return this.inflight;
+  }
+}
+
 export function createApp({ cfg, log, manager, pool = null, sessionCheckMs = SESSION_CHECK_MS, scoring = makeScoring(cfg.careerPoints), pendingResults = () => 0, unsavedResults = () => 0 }: AppDeps): App {
   const started = Date.now();
   const accounts = pool ? new Accounts(pool) : null;
@@ -80,6 +105,10 @@ export function createApp({ cfg, log, manager, pool = null, sessionCheckMs = SES
   const registrations = new RateWindow(10, 3600000, manager.now);
   const userFails = new RateWindow(10, 15 * 60000, manager.now);
   const renames = new RateWindow(10, 60000, manager.now);
+  // career reads per address: about six queries each on a three-connection pool (#98); far above any real use of the screen
+  const statsReads = new RateWindow(STATS_PER_MINUTE, 60000, manager.now);
+  // health's database status: read-only (no DDL), cached briefly, one probe at a time (#98)
+  const dbStatus = pool ? new DbStatusCache(async () => ((await readSchemaStatus(pool)).current ? 'ok' : 'outdated'), cfg.healthDbCacheMs) : null;
   let conns = 0;
   /** every open signed-in socket, so a session that ends also ends the sign-in of the sockets opened with it */
   const signedIn = new Set<SocketAuth>();
@@ -131,10 +160,7 @@ export function createApp({ cfg, log, manager, pool = null, sessionCheckMs = SES
   });
 
   async function health(): Promise<{ status: number; body: Record<string, unknown> }> {
-    let db: 'disabled' | 'ok' | 'down' | 'outdated' = 'disabled';
-    if (pool) {
-      try { db = (await schemaStatus(pool)).current ? 'ok' : 'outdated'; } catch { db = 'down'; }
-    }
+    const db: 'disabled' | DbState = dbStatus ? await dbStatus.get() : 'disabled';
     const mem = process.memoryUsage();
     const cpu = process.cpuUsage();
     const st = manager.stats();
@@ -326,6 +352,8 @@ export function createApp({ cfg, log, manager, pool = null, sessionCheckMs = SES
   async function stats(req: Req, res: ServerResponse): Promise<void> {
     if (!accounts || !pool) { json(res, 503, { error: 'accounts_unavailable' }); return; }
     if (req.method !== 'GET') { json(res, 405, { error: 'method' }); return; }
+    // counted before the session read, which is a query too
+    if (!statsReads.hit(limitKey(clientIp(req)))) { json(res, 429, { error: 'rate' }); return; }
     if (!await loadSession(req, res)) return;
     const acct = req.session?.account;
     if (!acct) {
