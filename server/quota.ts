@@ -9,8 +9,10 @@
 //
 // Guests have no identity of their own (a new socket is a new guest), so the address is what bounds them; the account
 // limit bounds a signed-in player who also has several addresses (phone and Wi-Fi). The address is the one the WebSocket
-// layer established (X-Real-IP only from the loopback Nginx: server/app.ts), never anything the client sends.
+// layer established (X-Real-IP only from the loopback Nginx: server/app.ts), never anything the client sends, and an IPv6
+// address is charged by its /64 (server/netkey.ts), since one host normally holds the whole /64.
 import type { ErrorCode } from '../src/net/protocol';
+import { limitKey } from './netkey';
 
 export interface QuotaLimits {
   /** rooms open at once per address / per account */
@@ -33,8 +35,8 @@ export class CreateQuota {
 
   constructor(private lim: QuotaLimits, private now: () => number) {}
 
-  /** The keys a create from this address and account is charged to. */
-  static keys(ip: string, accountId: string | null): string[] { return accountId ? [`ip:${ip}`, `acct:${accountId}`] : [`ip:${ip}`]; }
+  /** The keys a create from this address and account is charged to. The address is charged by its limit key (an IPv6 /64). */
+  static keys(ip: string, accountId: string | null): string[] { const a = `ip:${limitKey(ip)}`; return accountId ? [a, `acct:${accountId}`] : [a]; }
 
   /** Why a create with these keys may not happen now, or null. Nothing is counted: only rooms actually created are. */
   check(keys: readonly string[]): QuotaRefusal | null {

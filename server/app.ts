@@ -16,6 +16,7 @@ import type { RoomManager } from './rooms';
 import { PgSessionStore, type SessionAccount } from './sessionStore';
 import { makeScoring, type Scoring } from './career';
 import { careerStats } from './stats';
+import { limitKey } from './netkey';
 import type { DurationStats } from './tickstats';
 
 export interface AppDeps {
@@ -236,7 +237,7 @@ export function createApp({ cfg, log, manager, pool = null, sessionCheckMs = SES
       if (!d.ok) { json(res, 400, { error: 'invalid_name', detail: d.error }); return; }
       displayName = d.name;
     }
-    const ip = clientIp(req);
+    const ip = limitKey(clientIp(req));   // the address's limit key: its /64 for IPv6 (server/netkey.ts)
     const ukey = (b.username as string).toLowerCase();
     if (manager.limited(`auth:${ip}`) || (what === 'login' && userFails.blocked(ukey))) { json(res, 429, { error: 'rate' }); return; }
     if (what === 'register' && !registrations.hit(ip)) { json(res, 429, { error: 'rate' }); return; }
@@ -360,10 +361,12 @@ export function createApp({ cfg, log, manager, pool = null, sessionCheckMs = SES
     if (url !== '/ws') { reject(socket, 404, 'Not Found'); return; }
     if (!originOk(req)) { log.warn('ws.origin_rejected', { origin: String(req.headers.origin ?? '').slice(0, 100) }); reject(socket, 403, 'Forbidden'); return; }
     const ip = clientIp(req);
-    if (conns >= cfg.maxConnections || (perIp.get(ip) ?? 0) >= cfg.maxConnectionsPerIp) { reject(socket, 503, 'Service Unavailable'); return; }
-    conns++; perIp.set(ip, (perIp.get(ip) ?? 0) + 1);
+    // connections are counted per limit key (an IPv6 /64, an IPv4 address: server/netkey.ts); the room layer keys `ip` itself
+    const key = limitKey(ip);
+    if (conns >= cfg.maxConnections || (perIp.get(key) ?? 0) >= cfg.maxConnectionsPerIp) { reject(socket, 503, 'Service Unavailable'); return; }
+    conns++; perIp.set(key, (perIp.get(key) ?? 0) + 1);
     let counted = true;
-    const release = (): void => { if (!counted) return; counted = false; conns--; const n = (perIp.get(ip) ?? 1) - 1; if (n > 0) perIp.set(ip, n); else perIp.delete(ip); };
+    const release = (): void => { if (!counted) return; counted = false; conns--; const n = (perIp.get(key) ?? 1) - 1; if (n > 0) perIp.set(key, n); else perIp.delete(key); };
     socket.once('close', release);
     void runSession(req, {}).then(() => {
       const acct = req.session?.account ?? null;

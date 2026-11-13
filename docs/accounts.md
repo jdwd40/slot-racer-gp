@@ -141,6 +141,7 @@ every room entry, so a sign-out, expiry or reset elsewhere also ends a socket's 
 | Failed sign-ins per address | 20 per minute (shared with room-code guessing) |
 | Failed sign-ins per username | 10 per 15 minutes, from any address (a lock against distributed guessing; it also briefly blocks the owner, which is the documented trade-off) |
 | Registrations per address | 10 per hour |
+| "Per address" | an IPv6 client counts by its /64, an IPv4 client per address ([online-server.md](online-server.md), *Per-address limit key*, #97) |
 | Renames per account | 10 per minute |
 | Hash flood | one Argon2id hash at a time, 16 queued, then `503 busy` |
 | Bodies | 4 KB, exact fields |
