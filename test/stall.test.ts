@@ -1878,7 +1878,7 @@ describe('a car shoved by a car with contact grace (#76)', () => {
   function impacts(r: Race): string[] {
     const seen: string[] = [];
     const judge = r.judge.bind(r);
-    r.judge = (rear: Car, front: Car, rel: number) => { seen.push(`${rear.id}>${front.id}`); judge(rear, front, rel); };
+    r.judge = (rear: Car, front: Car) => { seen.push(`${rear.id}>${front.id}`); judge(rear, front); };
     return seen;
   }
   /** middle and front stopped nose-to-tail ahead of where the rear car will be, on lane `side` from track position `s` */

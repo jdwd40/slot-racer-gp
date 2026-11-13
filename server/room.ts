@@ -6,7 +6,7 @@ import { DRIVERS, Race, type DriverId, type Input, type RosterEntry, type WireEv
 import { isTrackId, trackById, TRACK_IDS } from '../src/track';
 import { STEP } from '../src/timing';
 import {
-  LIMITS, LIVERIES, cleanName, isLivery, neutral,
+  LIMITS, LIVERIES, cleanName, neutral,
   type ChampionshipTag, type ClientMsg, type ErrorCode, type LiveryId, type Mode, type PublicAi, type PublicParticipant,
   type AwardsView, type AwardSync, type PublicRoom, type RoomSettings, type RoomState, type ServerMsg,
 } from '../src/net/protocol';
@@ -679,4 +679,3 @@ const DEFAULT_SCORING = makeScoring();
 export function liveryColor(id: LiveryId): number { return LIVERIES.find((l) => l.id === id)!.color; }
 const iso = (ms: number): string => new Date(ms).toISOString();
 const round3 = (x: number): number => Math.round(x * 1000) / 1000;
-export { isLivery };

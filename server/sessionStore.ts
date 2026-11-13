@@ -34,9 +34,12 @@ export class PgSessionStore extends session.Store {
   override destroy(sid: string, cb?: (err?: unknown) => void): void {
     this.pool.query('DELETE FROM sessions WHERE sid = $1', [sid]).then(() => cb?.(), (e) => cb?.(e));
   }
-  override touch(sid: string, s: session.SessionData, cb?: (err?: unknown) => void): void {
-    this.pool.query('UPDATE sessions SET expires_at = $2 WHERE sid = $1', [sid, this.expiry(s)]).then(() => cb?.(), (e) => cb?.(e));
-  }
+  /**
+   * Sessions last 30 days from sign-in, never longer (docs/accounts.md). express-session resets the cookie's expiry on every
+   * request and calls `touch` for an unchanged session; with `rolling: false` the browser's cookie keeps its original expiry,
+   * so moving the stored expiry forward here would let a copied cookie live on indefinitely. Nothing to do.
+   */
+  override touch(_sid: string, _s: session.SessionData, cb?: (err?: unknown) => void): void { cb?.(); }
   /**
    * Of these (session, account) bindings, the session IDs that still exist, have not expired and still belong to that
    * account. Logout, a new sign-in (which replaces the session ID), expiry and the owner's password reset all drop a

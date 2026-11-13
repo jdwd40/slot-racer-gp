@@ -79,11 +79,6 @@ export class Accounts {
     return { id: row.id, username: row.username };
   }
 
-  async byId(id: string): Promise<Account | null> {
-    const r = await this.pool.query<Account>('SELECT id::text, username FROM accounts WHERE id = $1', [id]);
-    return r.rows[0] ?? null;
-  }
-
   /**
    * The driver profile of an account (the caller passes the id from the authenticated session, never from a request). An
    * account without a profile row (made by a release before migration 002) reads as its username.

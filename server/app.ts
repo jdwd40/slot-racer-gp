@@ -477,6 +477,9 @@ export function createApp({ cfg, log, manager, pool = null, sessionCheckMs = SES
     }
 
     function dispatch(m: ClientMsg): Promise<void> | void {
+      // a message queued behind a session check (the backlog) may replay after the socket closed: a closed socket never
+      // creates, joins or resumes a seat (its close already ran, so that seat would never be released)
+      if (ws.readyState !== ws.OPEN) return;
       if (!hello) {
         if (m.t !== 'hello') { send({ t: 'nack', ref: m.t, code: 'hello_required' }); return; }
         if (m.v !== PROTOCOL_VERSION || m.proto !== PROTOCOL_NAME) {
