@@ -1,7 +1,7 @@
 // The shared protocol parser, the browser's online gate, server configuration bounds, and the race-core additions the
 // server relies on: frozen shared tracks, strict track ids, retire() and the live run-on.
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { LIMITS, PROTOCOL_VERSION, cleanName, parseClientMessage } from '../../src/net/protocol';
+import { LIMITS, PROTOCOL_VERSION, checkDisplayName, cleanName, parseClientMessage } from '../../src/net/protocol';
 import { probeOnline } from '../../src/online';
 import { loadConfig } from '../../server/config';
 import { createLogger, redact } from '../../server/log';
@@ -46,6 +46,31 @@ describe('protocol parser', () => {
     expect(cleanName('  Ann\u0000  ‮B  ')).toBe('Ann B');
     expect(cleanName('​​')).toBe(null);
     expect([...cleanName('x'.repeat(40))!].length).toBe(LIMITS.nameMax);
+  });
+
+  it('guest names follow the account name rules: invisible characters gone, NFC, never an AI suffix (#99)', () => {
+    // the AI suffix in any case or spacing, with trailing spaces or invisible characters, is removed and the rest kept
+    for (const raw of ['X (AI)', 'X(ai)', 'X (AI)   ', 'X ( Ai )', 'X (AI)\u200b', 'X (AI)\ufeff\u2060', 'X\u2063 (AI) (ai)', '\ufeffX (AI)\u2064 ']) {
+      expect(cleanName(raw), JSON.stringify(raw)).toBe('X');
+    }
+    expect(cleanName('Gold Flash (AI)')).toBe('Gold Flash');
+    // a cut at 16 code points that lands on the suffix is caught too
+    expect(cleanName('Abcdefghijkl(AI)zz')).toBe('Abcdefghijkl');
+    // nothing left: refused like a blank name
+    expect(cleanName('(AI)')).toBe(null);
+    expect(cleanName(' ( ai ) \u200b')).toBe(null);
+    // zero-width, BOM and U+2060-2065 are stripped
+    expect(cleanName('A\u200bn\u200cn\u200d\ufeff')).toBe('Ann');
+    expect(cleanName('B\u2060o\u2061b\u2062\u2063\u2064\u2065')).toBe('Bob');
+    expect(cleanName('\ufeff\u2060')).toBe(null);
+    // NFC: a decomposed e + combining acute becomes the single precomposed character
+    expect(cleanName('Ame\u0301lie')).toBe('Am\u00e9lie');
+    expect([...cleanName('e\u0301'.repeat(16))!].length).toBe(16);
+    // ordinary names, including non-Latin and "AI" not as a bracketed suffix, are unchanged
+    for (const ok of ['Ann', 'Zoë', 'Łukasz', '山田太郎', 'Алексей', 'محمد', 'Kai', 'AI Fan', '(AI) Fan', 'Mai (AIR)', '<b>hi</b>']) expect(cleanName(ok)).toBe(ok);
+    // the same filter as account names: a name both accept is the same string
+    for (const raw of ['  Zo\u0308e  \u2060', 'A\u202eB', 'C\u2066D\u2069']) expect(cleanName(raw)).toBe((checkDisplayName(raw) as { name: string }).name);
+    expect(checkDisplayName('X (AI)')).toEqual({ ok: false, error: 'reserved' });
   });
 });
 

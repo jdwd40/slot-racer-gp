@@ -129,6 +129,19 @@ describe('private rooms and seats', () => {
     expect(room.handle(ids[0], { t: 'settings', settings: { track: 'circuit-1' } }, h.now)).toMatchObject({ code: 'bad_state' });
   });
 
+  it('a guest is listed under the cleaned name: no AI suffix, no invisible characters, NFC (#99)', () => {
+    const h = harness();
+    const { room, peers } = lobby(h, 3, { aiFill: true }, ['Gold Flash (AI)', '\ufeffAme\u0301lie\u200b\u2060', 'X(ai) \u2063']);
+    const names = ['Gold Flash', 'Am\u00e9lie', 'X'];
+    expect(room.publicRoom().participants.map((p) => p.name)).toEqual(names);
+    // the earlier seats see it in the broadcast room (the last joiner gets the room in its private reply)
+    for (const p of peers.slice(0, 2)) expect(pub(p).participants.map((q) => q.name)).toEqual(names);
+    // the server's own AI fill keeps its marker
+    expect(room.publicRoom().ai.map((a) => a.name)).toEqual([expect.stringMatching(/^\S.* \(AI\)$/)]);
+    // a name with nothing left is refused as a blank name, and the roster is unchanged
+    expect(h.mgr.join(new FakePeer(), '10.0.0.8', { code: room.code, name: '(AI)\u200b', accountId: null })).toMatchObject({ ok: false, code: 'malformed', detail: 'name' });
+    expect(room.publicRoom().participants.map((p) => p.name)).toEqual(names);
+  });
   it('a multiplayer room needs two humans; a display name grants nothing: same names are separate seats and resume needs the token', () => {
     const h = harness();
     const { room, ids, tokens } = lobby(h, 1);

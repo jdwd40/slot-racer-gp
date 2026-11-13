@@ -218,33 +218,49 @@ export function parseClientMessage(raw: unknown): Parsed {
   return { ok: true, msg: v as ClientMsg };
 }
 
-/** A display name as shown to others: control characters stripped, whitespace collapsed, 1-16 characters. Never an identity. */
-export function cleanName(raw: string): string | null {
+/**
+ * The character clean-up shared by guest names (cleanName) and account driver names (checkDisplayName): Unicode NFC;
+ * control, zero-width, word-joiner/invisible-operator (U+2060-2065), bidirectional and BOM (U+FEFF) characters removed;
+ * runs of whitespace collapsed to one space; trimmed. No length rule: each caller applies its own.
+ */
+export function tidyName(raw: string): string {
   // eslint-disable-next-line no-control-regex
-  const s = raw.replace(/[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u2028-\u202e\u2066-\u2069]/g, '').replace(/\s+/g, ' ').trim();
-  const chars = [...s];
-  if (!chars.length) return null;
-  return chars.slice(0, LIMITS.nameMax).join('');
+  return raw.normalize('NFC').replace(/[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u2028-\u202e\u2060-\u2069\ufeff]/g, '').replace(/\s+/g, ' ').trim();
+}
+
+/** A name ending in "(AI)" (any case, any spaces) poses as an AI car; only the server's AI fill may carry it. */
+const AI_SUFFIX = /\(\s*ai\s*\)$/i;
+export const isReservedName = (tidy: string): boolean => AI_SUFFIX.test(tidy);
+
+/**
+ * A guest's name as shown to others: tidied as tidyName, cut to LIMITS.nameMax (16) code points, and any "(AI)" suffix
+ * removed (repeatedly, so "X (AI) (AI)" and a cut that lands on "(AI)" are covered) so a guest never shows as an AI car.
+ * The rest of the name is kept rather than replaced, the least surprising outcome. null when nothing is left (blank,
+ * invisible-only or "(AI)" alone): callers refuse that exactly as a blank name. Never an identity.
+ */
+export function cleanName(raw: string): string | null {
+  let s = [...tidyName(raw)].slice(0, LIMITS.nameMax).join('').trim();
+  while (isReservedName(s)) s = s.replace(AI_SUFFIX, '').trim();
+  return s || null;
 }
 
 export type DisplayNameCheck = { ok: true; name: string } | { ok: false; error: 'blank' | 'too_long' | 'reserved' | 'type' };
 
 /**
  * A signed-in driver's saved display name (the profile), checked the same way in the browser and on the server. It is
- * public race information and never an identity (the account ID is). Rules (docs/accounts.md): Unicode NFC; control, zero-
- * width and bidirectional-override characters removed; runs of whitespace collapsed to one space; trimmed; then 1 to
+ * public race information and never an identity (the account ID is). Rules (docs/accounts.md): tidyName (shared with guest
+ * names: NFC; control, zero-width, invisible, BOM and bidirectional characters removed; whitespace collapsed; trimmed), then 1 to
  * LIMITS.nameMax (16) characters, counted as code points. Unlike cleanName, an over-long name is refused, not cut.
  * Names that pose as the AI field ("... (AI)") are refused. Any other text, including HTML-like text, is allowed and is
  * always rendered as text.
  */
 export function checkDisplayName(raw: unknown): DisplayNameCheck {
   if (typeof raw !== 'string' || raw.length > 256) return { ok: false, error: 'type' };
-  // eslint-disable-next-line no-control-regex
-  const s = raw.normalize('NFC').replace(/[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u2028-\u202e\u2060-\u2069\ufeff]/g, '').replace(/\s+/g, ' ').trim();
+  const s = tidyName(raw);
   const n = [...s].length;
   if (!n) return { ok: false, error: 'blank' };
   if (n > LIMITS.nameMax) return { ok: false, error: 'too_long' };
-  if (/\(\s*ai\s*\)\s*$/i.test(s)) return { ok: false, error: 'reserved' };
+  if (isReservedName(s)) return { ok: false, error: 'reserved' };
   return { ok: true, name: s };
 }
 
