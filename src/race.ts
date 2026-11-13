@@ -1192,7 +1192,10 @@ export class Race {
     }
     if (c.u > c.hiU) c.hiU = c.u;
     this.laps(c, dt, ds, s0);
-    if (c.revMark !== null && c.u >= c.revMark) c.revMark = null;
+    // back at the furthest point reached before backing up (or never got away from it: a reverse blocked at once by the car
+    // behind leaves u at the mark, and the step that clears it has no forward travel): the car rejoins the squeeze queue at its
+    // physical place here too, unless it is still rolling backwards (#100)
+    if (c.revMark !== null && c.u >= c.revMark) { if (ds >= 0) this.rejoinSqueeze(c); c.revMark = null; }
   }
 
   // ---------------------------------------------------------------- automatic pit service (player only)

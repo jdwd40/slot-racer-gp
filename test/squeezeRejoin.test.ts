@@ -233,3 +233,15 @@ describe('cars that never leave the queue (#100)', () => {
     expect(ids(r)).toEqual(['c', 'a', 'b']);
   });
 });
+
+describe('a reverse blocked at once by the car behind (#100 review)', () => {
+  it('rejoins the queue when the driver lets go of Brake and drives on, though it never moved back', () => {
+    const r = race(['p', 'b']); const [p, b] = r.cars; const E = r.T.SQ_ENTRY;
+    place(r, p, E + 14, 1); place(r, b, E + 14 - r.T.CAR_LEN, 1);
+    r.squeezeQ.length = 0; r.squeezeQ.push(p, b);
+    run(r, { p: BRAKE }, REV.engage + 0.1, () => p.revOn); expect(p.revOn).toBe(true);
+    run(r, { p: BRAKE }, 0.5); expect(ids(r)).toEqual(['b']);
+    run(r, { p: UP }, 0.5); expect(r.T.inRange(r.s(p), E, r.T.SQ_EXIT)).toBe(true);
+    expect(ids(r)).toEqual(['p', 'b']);
+  });
+});
