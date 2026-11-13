@@ -1774,9 +1774,10 @@ function frame(now: number): void {
   ghost.update(race.raceTime - (1 - alpha) * STEP, screen === 'race' ? dt : 0);
   syncArrows(time);
   syncAudio();
-  hud.root.style.display = screen === 'race' || screen === 'pause' || screen === 'results' || screen === 'netwait' ? '' : 'none';
+  // the HUD is refreshed only while shown (#102); the frame that shows it again refreshes it before it is painted
+  const hudShown = screen === 'race' || screen === 'pause' || screen === 'results' || screen === 'netwait';
   syncBanner();
-  hud.update(race, dt, time, { mode: mode === 'online' ? 'race' : mode, me: localId, pbMs, round: mode === 'champ' && champ ? `${champ.rounds.length + (champRoundSaved ? 0 : 1)}/${R.CHAMP_TRACKS.length}` : '' });
+  hud.frame(hudShown, race, dt, time, { mode: mode === 'online' ? 'race' : mode, me: localId, pbMs, round: mode === 'champ' && champ ? `${champ.rounds.length + (champRoundSaved ? 0 : 1)}/${R.CHAMP_TRACKS.length}` : '' });
   renderer.render(scene, camera);
 }
 requestAnimationFrame(frame);

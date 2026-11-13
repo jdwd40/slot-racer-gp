@@ -27,6 +27,8 @@ export class Hud {
   el: Record<string, HTMLElement> = {};
   cache: Record<string, string> = {};
   mini: HTMLCanvasElement; mctx: CanvasRenderingContext2D;
+  /** the minimap's static layers (panel, track, pit lane, banks, squeeze, switches, bridges, finish, P), at the minimap's backing size; see drawMiniStatic */
+  miniBg: HTMLCanvasElement; bgctx: CanvasRenderingContext2D;
   miniPts: { x: number; y: number }[] = [];
   miniPit: { x: number; y: number }[] = [];
   mScale = 1; mOx = 0; mOy = 0; mW = 230; mH = 200;
@@ -90,6 +92,8 @@ export class Hud {
     this.root.querySelectorAll<HTMLElement>('[id]').forEach((e) => (this.el[e.id] = e));
     this.mini = this.el['h-mini'] as HTMLCanvasElement;
     this.mctx = this.mini.getContext('2d')!;
+    this.miniBg = document.createElement('canvas');
+    this.bgctx = this.miniBg.getContext('2d')!;
     this.fitMini();
     this.relabel();
   }
@@ -117,7 +121,7 @@ export class Hud {
   }
   get moreOpen(): boolean { return this.el['h-tools'].classList.contains('open'); }
 
-  /** Recompute the minimap projection for the active track. */
+  /** Recompute the minimap projection for the active track and repaint its static layers. */
   rebuildMini(): void {
     const B = T.BOUNDS, pad = 14;
     this.mScale = Math.min((this.mW - pad * 2) / B.w, (this.mH - pad * 2) / B.h);
@@ -125,6 +129,7 @@ export class Hud {
     this.miniPts = []; this.miniPit = [];
     for (let s = 0; s <= T.L; s += 0.8) this.miniPts.push(this.mp(T.center(s)));
     for (let s = T.PIT_IN0; s <= T.PIT_OUT1; s += 0.5) this.miniPit.push(this.mp(T.point(s, T.pitD(s))));
+    this.drawMiniStatic();
   }
 
   mp(p: { x: number; y: number }): { x: number; y: number } { return { x: this.mOx + p.x * this.mScale, y: this.mOy - p.y * this.mScale }; }
@@ -155,6 +160,23 @@ export class Hud {
 
   goFlash(text: string): void {
     const e = this.el['h-go']; e.textContent = text; e.classList.remove('show'); void e.offsetWidth; e.classList.add('show');
+  }
+
+  /**
+   * The per-frame entry (src/main.ts frame()): show or hide the HUD, and refresh it only while it is shown (#102). Hidden on the
+   * title, menus, lobby, account, boards, championship and online results, where nothing reads it; the frame that shows it
+   * again runs update() before anything is painted, so standings, fuel and minimap are current from the first visible frame.
+   * While hidden only the toast keeps counting down, so one raised just before leaving the race does not reappear later.
+   * The fuel-laps estimator (#87) is fed by update(): every screen with a race running (race, pause, results, netwait) shows the HUD.
+   */
+  frame(shown: boolean, race: Race, dt: number, time: number, x?: HudExtra): void {
+    const display = shown ? '' : 'none';
+    if (this.root.style.display !== display) this.root.style.display = display;
+    if (shown) this.update(race, dt, time, x); else this.tickToast(dt);
+  }
+
+  tickToast(dt: number): void {
+    if (this.toastT > 0) { this.toastT -= dt; if (this.toastT <= 0) this.el['h-toast'].classList.remove('show'); }
   }
 
   update(race: Race, dt: number, time: number, x: HudExtra = { mode: 'race', pbMs: 0, round: '', me: SOLO_ID }): void {
@@ -302,7 +324,7 @@ export class Hud {
     const kids = lights.children;
     for (let i = 0; i < 5; i++) (kids[i] as HTMLElement).className = i < n ? 'on' : '';
 
-    if (this.toastT > 0) { this.toastT -= dt; if (this.toastT <= 0) this.el['h-toast'].classList.remove('show'); }
+    this.tickToast(dt);
     this.drawMini(race, time, p.id);
   }
 
@@ -333,8 +355,15 @@ export class Hud {
     if (e.hidden) e.hidden = false;
   }
 
-  drawMini(race: Race, time: number, me: DriverId): void {
-    const g = this.mctx;
+  /**
+   * Paint the minimap's static layers into miniBg (#102): everything that depends only on the track, the projection and the
+   * backing size, none of it on the race or the local driver. Called from rebuildMini, which runs on a track change and from
+   * fitMini on any CSS size or device-pixel-ratio change; drawMini copies it 1:1 each frame and draws only the cars on top.
+   */
+  drawMiniStatic(): void {
+    const bg = this.miniBg, g = this.bgctx;
+    if (bg.width !== this.mini.width || bg.height !== this.mini.height) { bg.width = this.mini.width; bg.height = this.mini.height; }
+    g.setTransform(this.mini.width / this.mW, 0, 0, this.mini.height / this.mH, 0, 0);
     g.clearRect(0, 0, this.mW, this.mH);
     g.fillStyle = 'rgba(10,14,20,0.72)';
     g.beginPath(); g.roundRect(0, 0, this.mW, this.mH, 12); g.fill();
@@ -374,6 +403,17 @@ export class Hud {
     const pe = this.mp(T.point(T.PIT_IN0, -2.4));
     g.fillStyle = '#22d3ee'; g.beginPath(); g.arc(pe.x, pe.y + 6, 7, 0, Math.PI * 2); g.fill();
     g.fillStyle = '#062a33'; g.font = 'bold 10px sans-serif'; g.textAlign = 'center'; g.textBaseline = 'middle'; g.fillText('P', pe.x, pe.y + 6.5);
+  }
+
+  drawMini(race: Race, time: number, me: DriverId): void {
+    const g = this.mctx;
+    // the static layers, pixel for pixel at the backing resolution (identity transform: no resampling, crisp at 2x)
+    g.save(); g.setTransform(1, 0, 0, 1, 0, 0);
+    g.clearRect(0, 0, this.mini.width, this.mini.height);
+    g.drawImage(this.miniBg, 0, 0);
+    g.restore();
+    // the full redraw left these set from the track lines; the dots' strokes keep them
+    g.lineJoin = 'round'; g.lineCap = 'round';
     // cars
     // the local driver's dot is drawn last, on top
     const cars = [...race.cars].sort((a, b) => (a.id === me ? 1 : 0) - (b.id === me ? 1 : 0));
