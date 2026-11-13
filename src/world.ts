@@ -2,6 +2,8 @@ import * as THREE from 'three';
 import * as T from './track';
 import { Y0, std, mesh, canvasTex, noise, ribbon, wall, boxAt, groupAt, figure, textTex, mergeStatic, disposeObject } from './gfx';
 import { buildScenery, matTexture, tableTexture, TEAM_COLS } from './scenery';
+import { DRIVERS, type Car, type DriverId, type Race } from './race';
+import { t } from './i18n';
 export { arrowGeometry } from './gfx';
 
 export interface World {
@@ -20,9 +22,35 @@ export interface World {
   bridgeMats: THREE.Material[];
 }
 
-/** How one service bay is drawn: its owner's colour, race number and tag, or a neutral unowned bay (num null). */
-export interface BayPaint { color: number; num: number | null; tag: string; mine: boolean; }
+/**
+ * How one service bay is drawn: its owner's colour, race number, pit-board tag and garage sign text, or a neutral unowned
+ * bay (num null).
+ */
+export interface BayPaint { color: number; num: number | null; tag: string; sign: string; mine: boolean; }
 const UNOWNED = 0x6b7280;
+
+/** Garage sign string ids for each driver slot's stock driver (slot 0 is the solo driver's: YOU). */
+const STOCK_SIGNS = ['hud.you', 'garage.sign1', 'garage.sign2', 'garage.sign3'];
+const stockSign = (k: number): string => t(STOCK_SIGNS[k] ?? 'hud.you');
+
+/**
+ * Paint for every bay from the race's owners (Car.bayHome): the owner's colour and number, its tag (the local driver's
+ * reads YOU) and its garage sign (YOU for the local driver, a stock rival's garage name, else its tag).
+ */
+export function bayPaints(race: Race, me: DriverId): BayPaint[] {
+  return race.T.BAYS.map((_, j) => {
+    const o = race.bayOwner(j);
+    if (!o) return { color: 0, num: null, tag: '', sign: '', mine: false };
+    const mine = o.id === me;
+    const k = DRIVERS.findIndex((d) => d.name === o.name);
+    const tag = (c: Car): string => (mine ? t('hud.you') : DRIVERS[k]?.tag ?? c.name.slice(0, 5).toUpperCase());
+    const sign = mine ? t('hud.you') : k > 0 ? stockSign(k) : tag(o);
+    return { color: o.color, num: o.num, tag: tag(o), sign, mine };
+  });
+}
+
+/** Garage sign above a bay's door: dark text on white. */
+function signTex(text: string): THREE.CanvasTexture { return textTex(128, 32, '#fff', '#111', text, 'bold 22px Arial'); }
 
 /** Pit board for a bay: bay number on a strip in the owner's colour, the owner's race number, and its tag. */
 function bayBoardTex(j: number, b: BayPaint): THREE.CanvasTexture {
@@ -358,6 +386,9 @@ export function buildWorld(): World {
   const bayTint: THREE.MeshStandardMaterial[][] = T.BAYS.map(() => []);
   const bayGlowMon: THREE.MeshStandardMaterial[] = [];
   const bayBoards: THREE.MeshStandardMaterial[] = [];
+  // per bay: the garage door band (owner's colour) and the sign above it (owner's name)
+  const bayBands: THREE.MeshStandardMaterial[] = [];
+  const baySigns: THREE.MeshStandardMaterial[] = [];
   const tint = (j: number, g: THREE.Group): THREE.Group => { bayTint[j].push((g.children[0] as THREE.Mesh).material as THREE.MeshStandardMaterial); return g; };
   for (let j = 0; j < T.BAYS.length; j++) {
     const bs = T.BAYS[j];
@@ -419,8 +450,10 @@ export function buildWorld(): World {
     const stripe = mesh(new THREE.BoxGeometry(len + 0.62, 0.14, 0.04), std(0xd42a22, 0.5)); stripe.position.set(0, 1.56, -0.99); gr.add(stripe);
     for (let j = 0; j < 4; j++) {
       const door = mesh(new THREE.BoxGeometry(2.2, 1.0, 0.04), std(0x15171b, 0.6)); door.position.set(T.BAYS[j] - mid, 0.52, -0.92); gr.add(door);
-      const band = mesh(new THREE.BoxGeometry(2.2, 0.12, 0.05), std(TEAM_COLS[j], 0.5)); band.position.set(T.BAYS[j] - mid, 1.12, -0.93); gr.add(band);
-      const sign = mesh(new THREE.BoxGeometry(0.9, 0.22, 0.03), std(0xffffff, 0.5, 0, { map: textTex(128, 32, '#fff', '#111', ['YOU', 'COMET', 'ARROW', 'VIPER'][j], 'bold 22px Arial') }));
+      const bandMat = std(TEAM_COLS[j], 0.5); bayBands.push(bandMat);
+      const band = mesh(new THREE.BoxGeometry(2.2, 0.12, 0.05), bandMat); band.position.set(T.BAYS[j] - mid, 1.12, -0.93); gr.add(band);
+      const signMat = std(0xffffff, 0.5, 0, { map: signTex(stockSign(j)) }); baySigns.push(signMat);
+      const sign = mesh(new THREE.BoxGeometry(0.9, 0.22, 0.03), signMat);
       sign.position.set(T.BAYS[j] - mid, 1.32, -0.93); gr.add(sign);
     }
     const hb = mesh(new THREE.BoxGeometry(len * 0.6, 0.7, 1.2), std(0x9fb7d9, 0.2, 0.4), castRecv); hb.position.set(0, 1.97, 0.1); gr.add(hb);
@@ -608,6 +641,11 @@ export function buildWorld(): World {
       bm.map?.dispose();
       bm.map = bayBoardTex(j, { ...b, color: col });
       bm.needsUpdate = true;
+      bayBands[j].color.setHex(col);
+      const sm = baySigns[j];
+      sm.map?.dispose();
+      sm.map = signTex(b.sign);
+      sm.needsUpdate = true;
     });
   };
   return { root, startLights, bayGlow, penGlow, crowd, bridgeMats, paintBays };
