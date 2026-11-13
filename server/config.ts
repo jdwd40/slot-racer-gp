@@ -2,6 +2,7 @@
 // Vite bundle). Every value is validated and bounded; a bad value stops the process with a message naming the variable.
 import { LIMITS } from '../src/net/protocol';
 import { parsePodium } from './career';
+import { LINK_AWAY_MS } from './room';
 import type { Level } from './log';
 
 export interface Config {
@@ -24,6 +25,10 @@ export interface Config {
   roomCreateWindowS: number;
   /** seconds a disconnected participant's seat is held for reconnection */
   graceS: number;
+  /**
+   * ms after which a connected driver's unrefreshed held pedals go neutral (SLOTRUSH_INPUT_TIMEOUT_MS, 250 to LINK_AWAY_MS - 1).
+   * Always below LINK_AWAY_MS (#103): the pedals are released before the seat is treated as away, never after it.
+   */
   inputTimeoutMs: number;
   /** race state broadcasts per second */
   snapshotHz: number;
@@ -96,6 +101,11 @@ export function loadConfig(env: Env = process.env): Config {
   try { careerPoints = parsePodium(env.SLOTRUSH_CAREER_POINTS); } catch { throw new Error('SLOTRUSH_CAREER_POINTS must be 1-8 comma-separated integers from 0 to 1000 (default 10,6,4)'); }
   const spoolDir = env.SLOTRUSH_SPOOL_DIR?.trim() || null;
   if (spoolDir && !spoolDir.startsWith('/')) throw new Error('SLOTRUSH_SPOOL_DIR must be an absolute path');
+  // the input timeout must end before the fixed away delay (#103): otherwise an away car would still be driven by held pedals
+  let inputTimeoutMs: number;
+  try { inputTimeoutMs = int(env, 'SLOTRUSH_INPUT_TIMEOUT_MS', LIMITS.inputTimeoutMs, 250, LINK_AWAY_MS - 1); } catch {
+    throw new Error(`SLOTRUSH_INPUT_TIMEOUT_MS must be an integer from 250 to ${LINK_AWAY_MS - 1}, below the ${LINK_AWAY_MS} ms away delay (LINK_AWAY_MS) (got ${JSON.stringify(env.SLOTRUSH_INPUT_TIMEOUT_MS)})`);
+  }
   if (mode === 'production' && databaseUrl && !spoolDir) throw new Error('SLOTRUSH_SPOOL_DIR is required in production with DATABASE_URL (results the database cannot take yet are queued there)');
   return {
     env: mode, host,
@@ -112,7 +122,7 @@ export function loadConfig(env: Env = process.env): Config {
     roomCreates: int(env, 'SLOTRUSH_ROOM_CREATES', 20, 1, 1000),
     roomCreateWindowS: int(env, 'SLOTRUSH_ROOM_CREATE_WINDOW_S', 600, 10, 86400),
     graceS: int(env, 'SLOTRUSH_RECONNECT_GRACE_S', 20, 5, 120),
-    inputTimeoutMs: int(env, 'SLOTRUSH_INPUT_TIMEOUT_MS', LIMITS.inputTimeoutMs, 250, 5000),
+    inputTimeoutMs,
     snapshotHz: int(env, 'SLOTRUSH_SNAPSHOT_HZ', 20, 5, 60),
     maxCatchUpSteps: int(env, 'SLOTRUSH_MAX_CATCHUP_STEPS', 6, 1, 60) * Math.ceil(timeScale),
     overloadAbortMs: int(env, 'SLOTRUSH_OVERLOAD_ABORT_MS', 5000, 500, 60000),

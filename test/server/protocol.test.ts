@@ -3,7 +3,8 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { LIMITS, PROTOCOL_VERSION, checkDisplayName, cleanName, parseClientMessage } from '../../src/net/protocol';
 import { probeOnline } from '../../src/online';
-import { loadConfig } from '../../server/config';
+import { loadConfig, testConfig } from '../../server/config';
+import { LINK_AWAY_MS } from '../../server/room';
 import { createLogger, redact } from '../../server/log';
 import { Race, PEN, RUN_OUT_MAX } from '../../src/race';
 import * as T from '../../src/track';
@@ -112,6 +113,18 @@ describe('server configuration and logging', () => {
     expect(() => loadConfig({ SLOTRUSH_ROOM_CAP: '500' })).toThrow(/ROOM_CAP/);
     expect(() => loadConfig({ SLOTRUSH_RECONNECT_GRACE_S: '1' })).toThrow(/GRACE/);
     expect(() => loadConfig({ SLOTRUSH_ALLOWED_ORIGINS: 'javascript:alert(1)' })).toThrow(/origin/);
+  });
+  it('keeps the input timeout below the away delay (#103): the default is unchanged, a value at or above LINK_AWAY_MS is refused', () => {
+    expect(LINK_AWAY_MS).toBe(1500);
+    expect(LIMITS.inputTimeoutMs).toBe(1000);
+    expect(loadConfig({}).inputTimeoutMs).toBe(1000);
+    expect(testConfig().inputTimeoutMs).toBe(1000);
+    expect(loadConfig({ NODE_ENV: 'production', SLOTRUSH_ALLOWED_ORIGINS: 'https://slotrush.jdwd40.com' }).inputTimeoutMs).toBe(1000);
+    expect(loadConfig({ SLOTRUSH_INPUT_TIMEOUT_MS: '250' }).inputTimeoutMs).toBe(250);
+    expect(loadConfig({ SLOTRUSH_INPUT_TIMEOUT_MS: String(LINK_AWAY_MS - 1) }).inputTimeoutMs).toBe(LINK_AWAY_MS - 1);
+    for (const bad of [String(LINK_AWAY_MS), '2000', '5000', '249', '1000.5', 'soon']) {
+      expect(() => loadConfig({ SLOTRUSH_INPUT_TIMEOUT_MS: bad }), bad).toThrow(/SLOTRUSH_INPUT_TIMEOUT_MS must be an integer from 250 to 1499, below the 1500 ms away delay \(LINK_AWAY_MS\)/);
+    }
   });
   it('redacts secret-looking fields from log lines', () => {
     const lines: string[] = [];
