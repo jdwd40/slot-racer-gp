@@ -509,8 +509,18 @@ export function createApp({ cfg, log, manager, pool = null, sessionCheckMs = SES
 
     function dispatch(m: ClientMsg): Promise<void> | void {
       // a message queued behind a session check (the backlog) may replay after the socket closed: a closed socket never
-      // creates, joins or resumes a seat (its close already ran, so that seat would never be released)
-      if (ws.readyState !== ws.OPEN) return;
+      // creates, joins or resumes a seat (its close already ran, so that seat would never be released).
+      // One exception (#106): a `leave` that arrives while the server is closing this socket (CLOSING, its close handler not run
+      // yet) still gives up the seat at once, rather than leaving it to wait out the reconnect grace. It only ever releases: it
+      // needs the seat this socket still holds, and only while this socket is still that seat's connection (a socket being
+      // closed because the seat was resumed elsewhere cannot give up the new connection's seat).
+      if (ws.readyState !== ws.OPEN) {
+        if (m.t === 'leave' && room && pid && room.participant(pid)?.peer === peer) {
+          room.handle(pid, m, manager.now());
+          room = null; pid = null;
+        }
+        return;
+      }
       if (!hello) {
         if (m.t !== 'hello') { send({ t: 'nack', ref: m.t, code: 'hello_required' }); return; }
         if (m.v !== PROTOCOL_VERSION || m.proto !== PROTOCOL_NAME) {

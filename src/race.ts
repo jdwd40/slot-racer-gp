@@ -1,5 +1,6 @@
 import * as T from './track';
-import { PitTraffic, PitWait, PIT_Q } from './pit';
+import { PitTraffic, PitWait } from './pit';
+import { PIT_Q } from './pitConst';
 import { outOfTraffic } from './traffic';
 
 export const LAPS = 13;
@@ -90,7 +91,7 @@ export const REV_PIT_MIN = T.PIT_IN1;
  * holds still for the whole stop and drives to the pit exit. Everything is in simulation time and distance, never frames.
  */
 export const AUTO = {
-  window: 40,          // road distance before the entrance where the approach is taken over (the pit-queue approach)
+  window: PIT_Q.approach, // road distance before the entrance where the approach is taken over (the pit-queue approach)
   plan: 18,            // braking the entry profile plans with (m/s²) so the car reaches the pit limit at the entrance
   late: 24,            // braking an approach may need at most and still be taken over; beyond it the entrance is too late
   box: 6,              // braking the box stop plans with (m/s²)
@@ -1906,7 +1907,7 @@ export class Race {
       c.pitReq = mustPit;
       if (!c.change && !c.laneReq && c.changeCooldown <= 0) {
         if (mustPit && c.laneSide > 0) c.laneReq = true;
-        else if (!mustPit && nearest && ng < 7 && Math.abs(nearest.d - c.d) < 0.3 && nearest.v < this.profiles['1'][0] * 0.98) c.laneReq = true;
+        else if (!mustPit && nearest && ng < 7 && Math.abs(nearest.d - c.d) < 0.3 && nearest.v < VMAX * 0.98) c.laneReq = true;
       }
       if (c.laneReq && mustPit && c.laneSide < 0) c.laneReq = false;
       if (!mustPit) this.defend(c, dt, s);

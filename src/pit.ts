@@ -4,26 +4,13 @@
 import * as T from './track';
 import type { Car, Race } from './race';
 import { outOfTraffic } from './traffic';
+import { PIT_Q } from './pitConst';
 
 /** What an assisted car is waiting for, or null when it is not being held. */
 export type PitWait = 'queued' | 'bay' | 'exit' | null;
 export type Zone = 'box' | 'exit' | `bay${number}` | `merge${number}`;
 export type ReleaseWhy = 'done' | 'defer' | 'route' | 'passed' | 'terminal' | 'moved' | 'reorder' | 'recover';
 export interface ResEntry { t: number; car: number; zone: Zone; op: 'grant' | 'release'; why?: ReleaseWhy }
-
-export const PIT_Q = {
-  gap: 0.5,          // clear slot kept behind a stopped leader (beyond bumper contact)
-  decel: 20,         // braking the assisted speed cap plans with (m/s²); the cap itself is enforced at up to 45
-  leadBrake: 30,     // braking assumed for a moving leader
-  look: 40,          // obstacles further ahead than this are ignored
-  approach: 40,      // road distance before the pit entrance in which a routed car joins the queue
-  hold: 0.6,         // an assisted cap below this (m/s) holds the car: it is queued
-  join: 2,           // a road car whose queue cap comes within this (m/s) of its speed is braking for the queue: it joins it
-  mergeSpacing: 4,   // bay merges closer than this are never under way together (adjacent bays are 3 m apart)
-  mergeTime: 1.0,    // seconds of a reversing car's travel a bay departure allows for
-  exitWin: 4,        // yield window before the pit exit merge starts
-  boxMargin: 0.4,    // a car held out of an occupied box plans to stop this far short of its entry line
-};
 
 const BAY_MODES = new Set(['bayIn', 'service', 'bayOut']);
 const inBay = (c: Car): boolean => BAY_MODES.has(c.mode);

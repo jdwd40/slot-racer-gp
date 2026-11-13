@@ -3,7 +3,7 @@
 // under `jobs:`, job keys at four. Anything it does not understand (an `||`, a `!`, an unknown condition) fails the test
 // rather than being guessed at. The deploy condition is then evaluated the way GitHub Actions does for every combination
 // of prerequisite results, so a failed, cancelled or skipped prerequisite is shown to block deployment.
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 
 const WORKFLOW = process.env.SLOTRUSH_CI_WORKFLOW ?? '.github/workflows/ci.yml';
@@ -140,5 +140,36 @@ describe('CI release gate (#55)', () => {
     expect(all.get('check')!.join('\n')).toMatch(/python3 deploy\/artifact\.py pack dist bundle "\$CHECKED_SHA"/);
     // the server job still deploys nothing and holds no secrets
     expect(all.get('server')!.join('\n')).not.toMatch(/secrets\.|ssh|deploy\/run\.sh/);
+  });
+});
+
+// The database test files are chosen by one vitest file filter, used both by the CI database step and by `npm run test:db`
+// (scripts/local-pg.mjs), never by a hand-written list: a new *.db.test.ts used to be skipped silently unless both lists were
+// edited (#106). vitest selects a file when its path contains a filter.
+describe('database tests (#106)', () => {
+  const server = jobs().get('server')!;
+  const at = server.findIndex((l) => /SLOTRUSH_TEST_DATABASE_URL:/.test(l));
+  const run = server.slice(at).find((l) => /^ {8}run: /.test(l))!.trim().slice('run: '.length);
+  const testFiles = (readdirSync('test', { recursive: true }) as string[]).filter((f) => f.endsWith('.test.ts')).map((f) => `test/${f.replaceAll('\\', '/')}`);
+
+  it('CI runs them with a single vitest file filter, not a list of files', () => {
+    expect(at, 'the server job sets SLOTRUSH_TEST_DATABASE_URL on its database step').toBeGreaterThanOrEqual(0);
+    expect(run).toBe('npx vitest run db.test.ts');
+  });
+
+  it('npm run test:db (scripts/local-pg.mjs) uses the same filter', () => {
+    const src = readFileSync('scripts/local-pg.mjs', 'utf8');
+    const spawn = /spawnSync\('npx', \[([^\]]*)\]/.exec(src);
+    expect(spawn, 'local-pg.mjs runs vitest').not.toBeNull();
+    const args = [...spawn![1].matchAll(/'([^']*)'/g)].map((m) => m[1]);
+    expect(['npx', ...args].join(' ')).toBe(run);
+  });
+
+  it('the filter selects exactly the test files that need the database', () => {
+    const filter = run.split(' ').at(-1)!;
+    const needDb = testFiles.filter((f) => /process\.env\.SLOTRUSH_TEST_DATABASE_URL\b/.test(readFileSync(f, 'utf8')));
+    const selected = testFiles.filter((f) => f.includes(filter));
+    expect(needDb.length).toBeGreaterThanOrEqual(5);
+    expect(selected.sort()).toEqual(needDb.sort());
   });
 });

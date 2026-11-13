@@ -332,7 +332,7 @@ export interface Range { s0: number; s1: number; }
 export const CAR_LEN = 1.4;
 export const CAR_W = 0.62;
 export const LANE_HALF = 0.5;
-export const SQUEEZE_HALF = 0.2;
+const SQUEEZE_HALF = 0.2;
 export const TRACK_EDGE = 0.6; // track surface extends this far beyond the lane slot
 
 // Pit lane (on the right / outside of the main straight; every circuit's
@@ -370,7 +370,7 @@ export class Track {
   readonly RAISED: Range[];
   readonly MAX_Z: number;
   // track-independent values, repeated here so simulation code reads everything through its own context
-  readonly CAR_LEN = CAR_LEN; readonly CAR_W = CAR_W; readonly LANE_HALF = LANE_HALF; readonly SQUEEZE_HALF = SQUEEZE_HALF;
+  readonly CAR_LEN = CAR_LEN; readonly CAR_W = CAR_W; readonly LANE_HALF = LANE_HALF;
   readonly TRACK_EDGE = TRACK_EDGE; readonly PIT_IN0 = PIT_IN0; readonly PIT_IN1 = PIT_IN1; readonly BAYS = BAYS;
   readonly BAY_HALF = BAY_HALF; readonly PEN_S = PEN_S; readonly PEN_HALF = PEN_HALF; readonly FINISH_S = FINISH_S;
   readonly PIT_OUT0 = PIT_OUT0; readonly PIT_OUT1 = PIT_OUT1; readonly PIT_D = PIT_D; readonly BAY_D = BAY_D;
@@ -568,26 +568,23 @@ export let L: number;
 export let MAIN_LEN: number;
 export let BOUNDS: Bounds;
 export let SQ_SEG: number;
-export let SQ_Q0: number, SQ_Q1: number, SQ_Q2: number, SQ_Q3: number, SQ_ENTRY: number, SQ_EXIT: number;
+export let SQ_Q0: number, SQ_Q1: number, SQ_Q2: number, SQ_Q3: number, SQ_ENTRY: number;
 export let SWITCHES: Switch[];
-export let ELEV: ElevKey[];
 export let BANKS: Bank[];
 export let CROSSINGS: Crossing[];
 /** stretches of track that sit above the ground (bridge decks and ramps) */
 export let RAISED: Range[];
-export let MAX_Z: number;
 
 /** Make a circuit the displayed one (and the default for a new Race that names none). */
 export function setTrack(id: string): TrackDef {
   const t = trackFor(id);
   ACTIVE = t;
-  ({ DEF, SEGS, L, MAIN_LEN, BOUNDS, SQ_SEG, SQ_Q0, SQ_Q1, SQ_Q2, SQ_Q3, SQ_ENTRY, SQ_EXIT, SWITCHES, ELEV, BANKS, CROSSINGS, RAISED, MAX_Z } = t);
+  ({ DEF, SEGS, L, MAIN_LEN, BOUNDS, SQ_SEG, SQ_Q0, SQ_Q1, SQ_Q2, SQ_Q3, SQ_ENTRY, SWITCHES, BANKS, CROSSINGS, RAISED } = t);
   return t.DEF;
 }
 
 export function at(p: SegPos): number { return ACTIVE.at(p); }
 export function elevZ(s: number): number { return ACTIVE.elevZ(s); }
-export function bankAt(s: number): { tilt: number; grip: number; sign: number } { return ACTIVE.bankAt(s); }
 export function gripScale(s: number): number { return ACTIVE.gripScale(s); }
 export function surfZ(s: number, d: number): number { return ACTIVE.surfZ(s, d); }
 export function slopeZ(s: number): number { return ACTIVE.slopeZ(s); }
