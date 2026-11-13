@@ -18,7 +18,7 @@ The title screen names them separately:
 
 ## Lobby
 
-- **Online menu.** Driver name (1–16 characters), colour (the server's eight liveries), **Create room** (track = the circuit chosen on the title, optional AI fill), **Join room** by 6-character code, and **Start connected solo**. A link ending `#room=CODE` fills in the code.
+- **Online menu.** Driver name (1–16 characters, cleaned as on the server: a name that cleans to nothing, such as `(AI)` alone, is asked for again), colour (the server's eight liveries), **Create room** (track = the circuit chosen on the title, optional AI fill), **Join room** by 6-character code, and **Start connected solo**. A link ending `#room=CODE` fills in the code.
 - **Room screen.**
   - The code is shown as text, with **Copy code** and, where the browser has it, **Share**.
   - It shows the track (the host can change it), the AI setting, and every driver's race number, colour, name and state: You, Host, Ready / Not ready, Reconnecting, Left. A colour that was asked for but already taken is shown as such.

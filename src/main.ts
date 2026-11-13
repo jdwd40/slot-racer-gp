@@ -17,7 +17,7 @@ import { AutoQuality } from './autoQuality';
 import { NetSession, loadSeat, refusalText, type Conn, type ResultView, type EndReason } from './net/session';
 import { AccountClient, accountKey, type AuthError, type AuthState } from './net/account';
 import { SnapBuffer, applySnapshot, localEvent, mirrorRace } from './net/mirror';
-import { LIVERIES as NET_LIVERIES, LIMITS, type AwardsView, type CareerStats, type ChampionshipTag, type LiveryId, type PublicRoom, type ServerMsg } from './net/protocol';
+import { LIVERIES as NET_LIVERIES, LIMITS, cleanName, type AwardsView, type CareerStats, type ChampionshipTag, type LiveryId, type PublicRoom, type ServerMsg } from './net/protocol';
 import type { RaceSnapshot, WireEvent } from './race';
 import type { SocketCtor } from './net/client';
 import { NetWaitGuard, type NetWaitView } from './net/netwait';
@@ -1063,7 +1063,8 @@ function showOnline(): void {
     const expect = entryIdentity();
     if (expect === null) { say(t('acct.loading')); return null; }
     if (accounts.account) return { n: accounts.account.displayName, expect };
-    const n = name.value.trim();
+    // the server's guest-name rule (cleanName): a name with nothing left after it (blank, invisible-only, "(AI)") is asked for again
+    const n = cleanName(name.value);
     if (!n) { say(t('net.err.name')); name.focus(); return null; }
     return { n, expect };
   };

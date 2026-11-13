@@ -71,7 +71,7 @@ every room entry, so a sign-out, expiry or reset elsewhere also ends a socket's 
 - **Driver name** (`profiles.display_name`) is public race information, edited at any time without touching the ID.
   Rules, identical in the browser and on the server (`checkDisplayName` in `src/net/protocol.ts`):
   1. Unicode NFC.
-  2. Control, zero-width, bidirectional-override and BOM characters removed.
+  2. Control, zero-width, invisible (U+2060–2065), bidirectional and BOM characters removed.
   3. Runs of whitespace collapsed to one space; leading and trailing space trimmed.
   4. Then 1–16 characters counted as code points. Blank is refused (`blank`), longer is refused (`too_long`), never cut.
   5. Names ending in `(AI)` are refused (`reserved`), so nobody poses as the AI field.
@@ -79,6 +79,9 @@ every room entry, so a sign-out, expiry or reset elsewhere also ends a socket's 
      (`textContent`, or `escHtml` in the HUD, lobby and result tables). Names are not unique: two drivers may both be
      "Sam"; the lobby marks each seat with its car number, and identity is the account ID.
   The database also refuses blank, padded, over-long or control-character names (`profiles_display_name_shape`).
+  Steps 1–3 (`tidyName`) and the `(AI)` test are shared with guest names (`cleanName`), which differ only in being
+  forgiving: a long guest name is cut to 16 characters and a `(AI)` suffix is removed instead of refused
+  ([online-server.md](online-server.md)).
 - **Default name:** the username (first 16 characters) unless one is given at registration.
 - **A rename never makes a new identity:** the profile row is keyed by the account ID; result envelopes store the
   `accountId` for every signed-in seat, so statistics follow the account through any number of renames.
