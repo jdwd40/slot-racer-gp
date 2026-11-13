@@ -1,7 +1,8 @@
 // Every circuit builds a closed loop with sane geometry, and an all-AI race on each stays numerically sound.
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import * as T from '../src/track';
-import { Race, LAPS, VMAX, AI_GRIP } from '../src/race';
+import { Race, LAPS, VMAX, AI_GRIP, AUTO } from '../src/race';
+import { PIT_Q } from '../src/pitConst';
 import { seedRandom, NONE, DT, all, me } from './helpers';
 
 beforeEach(() => seedRandom(11));
@@ -45,6 +46,13 @@ describe.each(ids)('%s geometry', (id) => {
       expect(Math.min(...p)).toBeLessThan(VMAX); // at least one corner slows the car
     }
   });
+  it('starts the player-profile lane-change threshold at VMAX (the AI uses VMAX * 0.98 for it, #106)', () => {
+    // the AI's "slow car ahead" test used this.profiles['1'][0] * 0.98; it is VMAX * 0.98 only because the start line is on a
+    // straight on every circuit, so a circuit whose start is in a corner would need that check revisited
+    const r = new Race({ track: id, seed: 1 });
+    expect(r.profiles['1'][0]).toBe(VMAX);
+  });
+
   it('reports finite surface heights and banking everywhere', () => {
     T.setTrack(id);
     for (let s = 0; s < T.L; s += 0.5) {
@@ -82,6 +90,12 @@ describe.each(ids)('%s all-AI simulation', (id) => {
       expect(c.lapsDone).toBeLessThan(LAPS);
       expect(c.lapsDone).toBe(Math.max(0, c.crossed - 1));
     }
+  });
+});
+
+describe('pit constants (#106)', () => {
+  it('the automatic stop-and-go takeover window is the pit-queue approach', () => {
+    expect(AUTO.window).toBe(PIT_Q.approach);
   });
 });
 

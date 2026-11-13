@@ -202,9 +202,9 @@ export class RoomManager {
     for (const r of [...this.rooms.values()]) r.abortAndClose(reason, now);
   }
 
-  stats(): { rooms: number; racing: number; humans: number; connected: number } {
-    let racing = 0, humans = 0, connected = 0;
-    for (const r of this.rooms.values()) { if (r.state === 'race') racing++; humans += r.humans; connected += r.connected; }
-    return { rooms: this.rooms.size, racing, humans, connected };
+  stats(): { rooms: number; racing: number; humans: number } {
+    let racing = 0, humans = 0;
+    for (const r of this.rooms.values()) { if (r.state === 'race') racing++; humans += r.humans; }
+    return { rooms: this.rooms.size, racing, humans };
   }
 }

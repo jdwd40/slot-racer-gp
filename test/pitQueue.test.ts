@@ -3,7 +3,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import * as T from '../src/track';
 import { Car, Input, LAPS, PEN, Race, SERVICE_READY } from '../src/race';
-import { PIT_Q } from '../src/pit';
+import { PIT_Q } from '../src/pitConst';
 import type { RaceEvent } from '../src/race';
 import { DT, NONE, UP, fresh, msgs, place, seedRandom, all, me, addSwitch } from './helpers';
 

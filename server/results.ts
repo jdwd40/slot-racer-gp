@@ -20,14 +20,27 @@ export class ResultConflict extends Error { override name = 'ResultConflict'; }
  */
 export interface ResultSink { consume(e: Readonly<ResultEnvelope>, scoring?: Scoring): Promise<ConsumeResult>; }
 
+/** default number of results MemoryResultSink keeps (#106): a guests-only server would otherwise hold every race forever */
+export const MEMORY_RESULTS_MAX = 1000;
+
+/**
+ * Results in memory (guests-only servers and tests). Only the newest `max` envelopes are kept, oldest dropped first, so memory
+ * stays bounded on a long-running guests-only server. The duplicate/conflict check therefore covers only those retained races;
+ * a guests-only server stores nothing durable, so that is all it can promise anyway.
+ */
 export class MemoryResultSink implements ResultSink {
   readonly stored = new Map<string, Readonly<ResultEnvelope>>();
   calls = 0;
+  constructor(readonly max = MEMORY_RESULTS_MAX) {
+    if (!Number.isInteger(max) || max < 1) throw new RangeError('MemoryResultSink max must be a positive integer');
+  }
   async consume(e: Readonly<ResultEnvelope>): Promise<ConsumeResult> {
     this.calls++;
     const had = this.stored.get(e.raceId);
     if (had) { if (had.digest !== e.digest) throw new ResultConflict(`race ${e.raceId} already has a different result`); return 'duplicate'; }
     this.stored.set(e.raceId, e);
+    // a Map iterates in insertion order: the first key is the oldest stored result
+    while (this.stored.size > this.max) this.stored.delete(this.stored.keys().next().value!);
     return 'stored';
   }
 }

@@ -168,7 +168,6 @@ export class Room {
   private active(): Participant[] { return this.parts.filter((p) => !p.left); }
   participant(id: string): Participant | undefined { return this.parts.find((p) => p.id === id); }
   get humans(): number { return this.active().length; }
-  get connected(): number { return this.parts.filter((p) => p.peer).length; }
 
   /** The lowest free livery, starting from `want`, else from the slot's own colour; never one another car has. */
   private pickLivery(want: LiveryId | undefined, slot: number, taken: Set<LiveryId>): LiveryId {

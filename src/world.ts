@@ -17,7 +17,6 @@ export interface World {
   paintBays(bays: BayPaint[]): void;
   /** stop-and-go penalty box highlight */
   penGlow: THREE.MeshBasicMaterial;
-  crowd: THREE.InstancedMesh[];
   /** materials of everything that sits on bridge decks; faded while the player drives underneath */
   bridgeMats: THREE.Material[];
 }
@@ -515,7 +514,6 @@ export function buildWorld(): World {
   }
 
   // ---------------- grandstands
-  const crowd: THREE.InstancedMesh[] = [];
   const stand = (s0: number, s1: number, d0: number, sd: number, rows: number, roofCol: number): void => {
     const mid = (s0 + s1) / 2, len = s1 - s0;
     const gr = groupAt(mid, d0);
@@ -540,7 +538,7 @@ export function buildWorld(): World {
         cm.setMatrixAt(ci, dummy.matrix); cm.setColorAt(ci, col.setHex(palette[(Math.random() * palette.length) | 0])); ci++;
       }
     }
-    cm.count = ci; gr.add(cm); crowd.push(cm);
+    cm.count = ci; gr.add(cm);
     const depth = rows * stepD;
     const backH = stepH * rows + 1.2;
     const back = mesh(new THREE.BoxGeometry(len, backH, 0.1), std(0x3b4048, 0.6), castRecv); back.position.set(0, backH / 2, away * (depth + 0.05)); gr.add(back);
@@ -648,7 +646,7 @@ export function buildWorld(): World {
       sm.needsUpdate = true;
     });
   };
-  return { root, startLights, bayGlow, penGlow, crowd, bridgeMats, paintBays };
+  return { root, startLights, bayGlow, penGlow, bridgeMats, paintBays };
 }
 
 /** Free GPU resources of a world built by buildWorld (geometries, materials, textures). */

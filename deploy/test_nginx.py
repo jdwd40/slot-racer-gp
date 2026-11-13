@@ -87,6 +87,16 @@ class GzipConfig(unittest.TestCase):
                         for d in wanted:
                             self.assertIn(d, directives)
 
+    def test_api_hides_the_room_servers_copies_of_headers_it_adds(self):
+        # the room server sends its own Cache-Control and X-Content-Type-Options; /api/ adds both, so the upstream copies are
+        # hidden and each header reaches the browser once (#94, #106)
+        (api,) = blocks(tls_server(ONLINE), r'location /api/')
+        directives = top_level(api)
+        for name in ('Cache-Control', 'X-Content-Type-Options'):
+            with self.subTest(name):
+                self.assertIn(f'proxy_hide_header {name};', directives)
+                self.assertTrue(any(d.startswith(f'add_header {name} ') for d in directives), name)
+
     def test_static_rollback_has_no_proxy_routes(self):
         text = STATIC.read_text()
         self.assertNotIn('proxy_pass', text)

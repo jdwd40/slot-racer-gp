@@ -7,6 +7,7 @@ import { memoryLogger } from '../server/log';
 import { MemoryResultSink, PgResultSink, type ResultSink } from '../server/results';
 import { DurableSink } from '../server/spool';
 import type { ResultEnvelope } from '../server/envelope';
+import type { Scoring } from '../server/career';
 import { RoomManager } from '../server/rooms';
 import { migrate } from '../server/migrations';
 import pg from 'pg';
@@ -15,6 +16,15 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 export { OnlineClient } from '../src/net/client';
 export { default as WebSocket } from 'ws';
+
+/**
+ * The check's switchable storage: while `storage.down` every store fails (so results wait in the durable queue); otherwise each
+ * envelope goes to `inner` with the scoring policy the room finished with (#106: it used to be dropped, so a database-backed
+ * check stored awards under the sink's default policy instead of the room's).
+ */
+export function gatedSink(inner: ResultSink, storage: { down: boolean }): ResultSink {
+  return { consume: async (e: Readonly<ResultEnvelope>, scoring?: Scoring) => { if (storage.down) throw new Error('qa: storage down'); return inner.consume(e, scoring); } };
+}
 
 /** `db`: a local test database and a schema of its own (recreated), for accounts and profiles; omitted, guests only. */
 export async function startQaServer(over: Partial<Config>, db?: { url: string; schema: string }) {
@@ -33,7 +43,7 @@ export async function startQaServer(over: Partial<Config>, db?: { url: string; s
   // when `durable.drain()` runs with storage back
   const storage = { down: false };
   const inner: ResultSink = pool ? new PgResultSink(pool) : new MemoryResultSink();
-  const gated: ResultSink = { consume: async (e: Readonly<ResultEnvelope>) => { if (storage.down) throw new Error('qa: storage down'); return inner.consume(e); } };
+  const gated = gatedSink(inner, storage);
   const spoolDir = mkdtempSync(join(tmpdir(), 'slotrush-qa-spool-'));
   const durable = new DurableSink(gated, { dir: spoolDir, log, retryMs: 500, maxRetryMs: 1000 });
   const sink = durable;

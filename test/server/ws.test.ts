@@ -7,6 +7,7 @@ import { LAPS, PEN, type RaceSnapshot } from '../../src/race';
 import { OnlineClient, type SocketCtor } from '../../src/net/client';
 import { PROTOCOL_VERSION, type ServerMsg } from '../../src/net/protocol';
 import { createApp, type App } from '../../server/app';
+import type { Peer } from '../../server/room';
 import { testConfig } from '../../server/config';
 import { memoryLogger } from '../../server/log';
 import { MemoryResultSink } from '../../server/results';
@@ -334,5 +335,69 @@ describe('protocol and access checks', () => {
     expect(await fetch(`${base}/api/version`).then((r) => r.json())).toMatchObject({ protocol: PROTOCOL_VERSION });
     expect((await fetch(`${base}/api/nothing`)).status).toBe(404);
     expect((await fetch(`${base}/api/auth/login`, { method: 'POST', headers: { origin: ORIGIN, 'content-type': 'application/json' }, body: '{}' })).status).toBe(503);
+  });
+});
+
+describe('a leave that arrives while the server is closing the socket (#106)', () => {
+  /** the server's end of a client's socket (same loopback connection) */
+  const serverEnd = (c: OnlineClient): WebSocket => {
+    const port = ((c.ws as unknown as { _socket: { localPort: number } })._socket).localPort;
+    const s = [...app.wss.clients].find((x) => (x as unknown as { _socket: { remotePort: number } })._socket.remotePort === port);
+    expect(s, 'server end of the client socket').toBeDefined();
+    return s!;
+  };
+  const settle = () => sleep(150);
+  async function pair() {
+    const { cs, id } = await room(2);
+    const b = cs[1];
+    const pid = b.me!;
+    const r = mgr.room(id)!;
+    return { a: cs[0], b, pid, r };
+  }
+
+  it('gives up the seat at once instead of after the reconnect grace', async () => {
+    const { a, b, pid, r } = await pair();
+    const end = serverEnd(b);
+    // the leave is on the wire first; the server starts closing before it reads it, so it is handled on a CLOSING socket
+    b.send({ t: 'leave' });
+    end.close(4009, 'test');
+    expect(end.readyState).toBe(end.CLOSING);
+    await settle();
+    // a lobby seat given up is removed outright (in a race it would be kept, marked left)
+    const p = r.participant(pid);
+    expect(p === undefined || (p.left && p.lostAt === null)).toBe(true);
+    expect(r.publicRoom().participants.map((x) => x.id)).not.toContain(pid);
+    a.close();
+  });
+
+  it('a socket being closed because its seat was resumed elsewhere cannot give up the new connection\'s seat', async () => {
+    const { a, b, pid, r } = await pair();
+    const end = serverEnd(b);
+    const token = (history(b).find((m) => m.t === 'joined') as Extract<ServerMsg, { t: 'joined' }>).token;
+    const other: Peer = { send: () => {}, close: () => {}, bufferedAmount: 0 };
+    b.send({ t: 'leave' });
+    // the seat moves to another connection before the old socket's leave is read: the room closes the old socket
+    expect(mgr.resume(other, '127.0.0.1', r.id, pid, token, null).ok).toBe(true);
+    expect(end.readyState).toBe(end.CLOSING);
+    await settle();
+    const p = r.participant(pid)!;
+    expect(p.left).toBe(false);
+    expect(p.peer).toBe(other);
+    r.leave(pid, mgr.now());
+    a.close();
+  });
+
+  it('any other message on a closing socket is still ignored', async () => {
+    const { a, b, pid, r } = await pair();
+    const end = serverEnd(b);
+    b.send({ t: 'ready', ready: true });
+    end.close(4009, 'test');
+    await settle();
+    const p = r.participant(pid)!;
+    expect(p.ready).toBe(false);
+    expect(p.left).toBe(false);
+    expect(p.lostAt).not.toBeNull(); // waiting out the grace, as before
+    r.leave(pid, mgr.now());
+    a.close();
   });
 });

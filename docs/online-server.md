@@ -47,6 +47,7 @@ An authoritative server for private rooms of up to four human drivers, plus serv
   - In the lobby or results, the seat is freed at once.
   - In a race, the car retires at once. The seat stays reserved (`left`) until the race ends and is then freed.
   - Leaving revokes the reconnect token.
+  - A `leave` that arrives while the server is already closing that socket (after a `bye`, for example a session that ended) is still honoured: the seat is given up at once instead of waiting out the reconnect grace (#106). Every other message on a closing socket is ignored, and a socket being closed because its seat was resumed on another connection cannot give that seat up (`test/server/ws.test.ts`).
 - **Host control is deterministic.** The host keeps control while present and, outside a race, connected. Otherwise control passes to the earliest-joined connected participant, then to the earliest-joined participant still holding a seat. During a race the host has no powers the race depends on, so a host disconnect never pauses or freezes it.
 - **Empty rooms close and are forgotten.** The code is released.
 - **Results and rematch.** When the race closes, the room moves to `results` and every member receives the envelope. The host may then call `rematch`, which returns to the lobby with the same room and participant IDs; a new race gets a new `raceId`.
@@ -298,6 +299,18 @@ Runtime dependencies are pinned exactly in `package.json` and locked in `package
 | `argon2` | 0.45.2 | Argon2id hashing. It ships linux-x64 glibc prebuilds, so the host builds nothing |
 
 Dev dependencies: `esbuild` 0.28.2 (server bundle), `@types/ws` 8.18.2, `@types/pg` 8.23.1, `@types/express-session` 1.19.0, `@types/node` 22.20.5. `three` moved to dev dependencies. Vite bundles it, so it is not a runtime package and stays out of the server release.
+
+### Upgrading Node
+
+Node 22 is the pinned runtime for the client build, the tests and the room server. It is in maintenance LTS and reaches end of life around April 2027, so move to the next even-numbered LTS before then. Everything below moves together, in one pull request plus the owner's host step; never run a release on a Node the CI did not build and test it with.
+
+1. **`.nvmrc`**: the new major. CI reads it (`node-version-file: .nvmrc` in both the `check` and `server` jobs of `.github/workflows/ci.yml`), so CI follows it with no workflow edit; check that `test/ciworkflow.test.ts` still passes.
+2. **`package.json` `engines.node`** (`>=22.12` now): the new minimum. Also move `@types/node` to the same major and refresh `package-lock.json` (`npm ci` must still pass).
+3. **esbuild target**: `target: 'node22'` in `scripts/build-server.mjs` (the server bundle) and in `scripts/online-check.mjs` (the browser check's in-process server, test tooling only).
+4. **`scripts/pack-server.mjs`**: its header says it runs on Node 22. It packs the production dependencies with the Node it runs on and records `process.version` in `RELEASE`, so pack on the new major (CI does, from `.nvmrc`) and check that `RELEASE` shows it.
+5. **argon2 prebuilds**: `argon2` ships prebuilt linux-x64 glibc binaries and the host never builds it (`npm ci --omit=dev --ignore-scripts`). Before switching, confirm the pinned version's prebuild loads on the new Node; `pack-server.mjs` already imports `argon2`, `ws`, `pg` and `express-session` and runs a hash/verify in the packed release, so a CI `server` job that passes on the new Node is the proof. If it fails, upgrade `argon2` in the same pull request.
+6. **The VPS's Node**: the unit runs `/usr/bin/node` (`ExecStart` in `deploy/server/slotrush-server.service`), the host's system Node. Upgrade that package on the host to the same major as `.nvmrc` (the host is shared, so check the other sites first), then roll out a release built on that major ([Release procedure](#release-procedure-owner)) and confirm `node --version` and `/api/health`. The unit pins the path, not a version: if the new Node is installed somewhere else (for example under `/usr/local/bin`), change `ExecStart` in the unit too and `systemctl daemon-reload`.
+7. **Docs**: the Node versions in this file (Architecture, Production design, the activation runbook's `node --version` check), `README.md` and `docs/deployment.md`.
 
 ## Resource limits
 

@@ -6,7 +6,7 @@ Originally exported from Tesana on 2026-10-26; the Tesana play-service integrati
 
 ## Run it locally
 
-Use Node 22 (the current LTS; `.nvmrc` pins it, so `nvm use` picks it up). Vite and Vitest need at least Node 22.12.
+Use Node 22, the project's pinned runtime (`.nvmrc` pins it, so `nvm use` picks it up). Vite and Vitest need at least Node 22.12. Node 22 is in maintenance LTS and reaches end of life around April 2027; the upgrade checklist is in [docs/online-server.md](docs/online-server.md#upgrading-node).
 
 ```bash
 npm ci             # install exactly the locked dependencies
