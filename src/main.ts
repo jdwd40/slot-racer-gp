@@ -3,7 +3,7 @@ import { ONLINE_ENABLED, afterProtocolRefusal, afterRetry, behindHtml, outdatedH
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 import * as T from './track';
 import { Race, Car, LAPS, RaceEvent, DRIVERS, PERSONAS, PEN, DEF, SOLO_ID, DriverId, RosterEntry } from './race';
-import { buildWorld, disposeWorld, arrowGeometry, BayPaint, World } from './world';
+import { buildWorld, disposeWorld, arrowGeometry, bayPaints, BayPaint, World } from './world';
 import { Y0, disposeObject } from './gfx';
 import { makeCar, makePlayerMarker, dimCar, CarVisual } from './carModel';
 import { Hud, fmt, carLabel, flags, escHtml } from './hud';
@@ -122,11 +122,7 @@ function rebuildVisuals(): void {
 /** Bays are painted from the race's owners (Car.bayHome): the player's in the chosen livery, with its number and tag. */
 let bayPaint: BayPaint[] = [];
 function paintBays(): void {
-  world.paintBays(bayPaint = T.BAYS.map((_, j) => {
-    const o = race.bayOwner(j);
-    const tag = (c: Car): string => (isMe(c) ? t('hud.you') : DRIVERS.find((d) => d.name === c.name)?.tag ?? c.name.slice(0, 5).toUpperCase());
-    return o ? { color: o.color, num: o.num, tag: tag(o), mine: isMe(o) } : { color: 0, num: null, tag: '', mine: false };
-  }));
+  world.paintBays(bayPaint = bayPaints(race, localId));
 }
 rebuildVisuals();
 function setRace(r: Race): void { race = r; autoQuality.beginRace(); laneArrowKey = ''; lastCrossed = 0; prevPoses = race.cars.map(poseOf); stepper.rebase(); rebuildVisuals(); }

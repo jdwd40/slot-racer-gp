@@ -2568,10 +2568,11 @@ async function localslot(run, c) {
   const mk = await read(page, () => { const g = window.__game, r = g.race, p = r.car(g.localId), m = g.marker, d = (x) => Math.hypot(m.position.x - x.x, m.position.z + x.y); return { visible: m.visible, toMe: d(p), toCar0: d(r.cars[0]) }; });
   c.ok('Player marker sits on the local car in the full view', mk.visible && mk.toMe < 0.5 && mk.toCar0 > mk.toMe + 0.5, mk);
   // HUD standings and own bay
-  const hud = await read(page, () => { const g = window.__game, r = g.race, p = r.car(g.localId); const me = [...document.querySelectorAll('#h-stand .me')].map((e) => e.textContent); return { me, pos: document.getElementById('h-pos').textContent, order: r.order().indexOf(p) + 1, bays: g.bays.map((b) => ({ mine: b.mine, tag: b.tag, num: b.num })), fuel: document.getElementById('h-fuelpct').textContent, myFuel: Math.round(p.fuel * 100), mix: g.motorMix }; });
+  const hud = await read(page, () => { const g = window.__game, r = g.race, p = r.car(g.localId); const me = [...document.querySelectorAll('#h-stand .me')].map((e) => e.textContent); return { me, pos: document.getElementById('h-pos').textContent, order: r.order().indexOf(p) + 1, bays: g.bays.map((b) => ({ mine: b.mine, tag: b.tag, sign: b.sign, num: b.num })), fuel: document.getElementById('h-fuelpct').textContent, myFuel: Math.round(p.fuel * 100), mix: g.motorMix }; });
   c.ok('HUD standings mark exactly one row, the local driver, and the position is the local car\'s', hud.me.length === 1 && hud.me[0].includes(STRINGS['hud.you']) && hud.pos.startsWith(`${hud.order}/`), hud);
   c.ok('HUD fuel reads the local car', hud.fuel === `${hud.myFuel}%`, { fuel: hud.fuel, myFuel: hud.myFuel });
   c.ok('Own bay is bay 3 (slot 2), tagged You; no other bay is marked as the player\'s', hud.bays[2].mine && hud.bays[2].tag === STRINGS['hud.you'] && hud.bays.filter((b) => b.mine).length === 1 && hud.bays[0].tag === 'BLUE', hud.bays);
+  c.ok('Garage signs follow the bay owners: You over bay 3, the moved rival (Blue Arrow) over bay 1', hud.bays.map((b) => b.sign).join() === [STRINGS['garage.sign2'], STRINGS['garage.sign1'], STRINGS['hud.you'], STRINGS['garage.sign3']].join(), hud.bays);
   c.ok('Audio emphasis: the local car\'s motor is the full-volume one', hud.mix[2] === 1 && hud.mix.filter((v) => v === 1).length === 1, hud.mix);
   // a personal message reaches this view, and the action only touched the local car
   await keys.tap('KeyP');
