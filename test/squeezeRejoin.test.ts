@@ -334,6 +334,51 @@ describe('a pit exit inside the squeeze, circuit-4 (#110)', () => {
     });
   }
 
+  /**
+   * #118 review: p leaves the pits while b closes on the inside lane at racing speed, c following b; everyone holds
+   * Throttle. Queued behind p purely by place, b could not stop behind it before the lanes close, overran it, and queue
+   * order in collide() shoved b back into c, which took a rear-end offence. A road car that cannot stop behind the exiting
+   * car goes ahead of it instead.
+   */
+  function closing(sb: number, vb: number, gap: number) {
+    const r = race(['p', 'b', 'c'], 'circuit-4');
+    const [p, b, c] = r.cars;
+    placePit(r, p, 25, r.T.PIT_SPEED);
+    place(r, b, sb, 1); b.v = vb; place(r, c, sb - gap, 1); c.v = vb;
+    r.squeezeQ.length = 0;
+    let order = '';
+    const ev = run(r, { p: UP, b: UP, c: UP }, 6, () => {
+      if (!order && r.squeezeQ.includes(p) && r.squeezeQ.includes(b)) order = ids(r).filter((id) => id !== 'c').join('');
+      return [p, b, c].every((x) => x.mode === 'race' && r.T.gapS(r.T.SQ_EXIT, r.s(x)) > 0 && r.T.gapS(r.T.SQ_EXIT, r.s(x)) < 30);
+    });
+    const through = [p, b, c].every((x) => x.mode === 'race' && r.T.gapS(r.T.SQ_EXIT, r.s(x)) > 0);
+    return { r, p, b, c, ev, order, through };
+  }
+
+  it('a faster inside-lane car that cannot stop behind the exiting car goes ahead of it: no offence, no contact (#118 repro)', () => {
+    const { b, c, ev, order, through } = closing(17.5, 14, 5);
+    expect(order).toBe('bp');
+    expect(ev.filter((e) => e.type === 'offence')).toEqual([]);
+    expect(contacts(ev)).toEqual([]);
+    expect(b.offences + c.offences).toBe(0);
+    expect(through).toBe(true);
+  });
+
+  it('sweep: inside-lane car start and speed against the exit, followers 3 to 12 m behind: never an offence, nobody stuck', () => {
+    let runs = 0, ahead = 0, behind = 0;
+    for (const gap of [3, 5, 8, 12]) for (const vb of [6, 10, 14]) for (let sb = 10; sb <= 30; sb += 1) {
+      const { ev, order, through } = closing(sb, vb, gap);
+      const tag = `gap ${gap} vb ${vb} sb ${sb}`;
+      expect(ev.filter((e) => e.type === 'offence'), tag).toEqual([]);
+      expect(through, tag).toBe(true);
+      runs++; if (order === 'bp') ahead++; else if (order === 'pb') behind++;
+    }
+    expect(runs).toBe(252);
+    // both outcomes occur: the slow or distant car stays behind the exiting car, the fast close one goes first
+    expect(ahead).toBeGreaterThan(0);
+    expect(behind).toBeGreaterThan(0);
+  });
+
   it('no deadlock with the pit-exit merge: a queued car standing in the merge waits only for the queue, the pit cars only for it', () => {
     const r = race(['x', 'a', 'p', 'q'], 'circuit-4');
     const [x, a, p, q] = r.cars;
@@ -382,20 +427,28 @@ describe('a pit exit inside the squeeze, circuit-4 (#110)', () => {
     expect(bad).toBe(0);
   });
 
+  it('all-AI races where a fast car goes ahead of a fresh exit and then slows behind it: the place is given back, no deadlock', () => {
+    // without settleExitSqueeze seeds 6, 14, 21, 24 and 26 stall: the exiting car is held for a car queued ahead of it that
+    // follows it on the slot, so neither moves until the race times out. Without SQUEEZE.creep, 82 and 89 stall for a minute
+    // and more: the follower crawls (0.1 m/s) close behind the stopped exiting car, so it never counts as able to stop.
+    // Every one of 400 seeds finishes by 197 s, as on main
+    for (const seed of [6, 14, 21, 24, 26, 82, 89]) {
+      const r = new Race({ roster: ['a', 'b', 'c', 'd'].map((id, slot) => ({ id, control: 'ai' as const, slot })), seed, track: 'circuit-4' });
+      for (let n = 0; r.phase !== 'done' && n < 60 * 300; n++) r.update(DT, {});
+      expect(r.phase, `seed ${seed}`).toBe('done');
+      expect(r.raceTime, `seed ${seed}`).toBeLessThan(205);
+    }
+  });
+
   /**
    * One all-AI race to the flag on a circuit, digested (every event and a snapshot every 0.5 s). `legacy` puts back the rule
-   * before #110: a car that was in the pit lane at the start of the step is not queued by the rejoin.
+   * before #110: a car leaving the pit lane is not queued (and so no car crossing the entry is put ahead of one).
    */
   function aiDigest(track: string, seed: number, legacy: boolean): string {
     const r = new Race({ roster: ['a', 'b', 'c', 'd'].map((id, slot) => ({ id, control: 'ai' as const, slot })), seed, track });
-    const pit = new Set<Car>();
-    if (legacy) {
-      const rejoin = r.rejoinSqueeze.bind(r);
-      r.rejoinSqueeze = (c: Car) => { if (!pit.has(c)) rejoin(c); };
-    }
+    if (legacy) r.exitSqueeze = () => {};
     const h = createHash('sha256');
     for (let n = 0; r.phase !== 'done' && n < 60 * 600; n++) {
-      pit.clear(); for (const c of r.cars) if (c.mode === 'pitlane') pit.add(c);
       r.update(DT, {});
       h.update(JSON.stringify(r.drainEvents()));
       if (n % 30 === 0) h.update(JSON.stringify(r.snapshot()));
@@ -406,8 +459,8 @@ describe('a pit exit inside the squeeze, circuit-4 (#110)', () => {
 
   it('an all-AI race digest is unchanged on every circuit but circuit-4, where the pit exit is inside the squeeze', () => {
     // on circuit-4 most seeds are unchanged too: a car leaving the pits is usually last in the squeeze, or far behind the car
-    // ahead, so its place in the queue caps nobody. With seeds 7 and 11 the race first differs where a car just out of the pits,
-    // still slow, is queued ahead of a faster car arriving at the squeeze behind it, which the queue now holds back
+    // ahead, so its place in the queue caps nobody. With seeds 7 and 11 a faster car reaches the squeeze just behind a car
+    // fresh out of the pits; it cannot stop behind it, so it is queued ahead and (seed 7) the exiting car eases off for it
     for (const d of TRACKS) for (const seed of [7, 11]) {
       const now = aiDigest(d.id, seed, false), before = aiDigest(d.id, seed, true);
       if (d.id === 'circuit-4') expect(now, `${d.id} seed ${seed}`).not.toBe(before);
