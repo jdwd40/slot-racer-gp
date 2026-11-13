@@ -1127,6 +1127,10 @@ export class Race {
       }
       // squeeze priority queue
       if (crossed(this.T.SQ_ENTRY) && !this.squeezeQ.includes(c)) this.squeezeQ.push(c);
+      // backing up left the queue (reverseTravel): driving forward again inside the squeeze (revMark: short of the furthest
+      // point reached before backing up) puts the car back at its physical place, so it waits for the cars ahead and holds
+      // those behind again (#100). Backed out past the entry, it is queued by the crossing above instead
+      if (ds > 0 && c.revMark !== null) this.rejoinSqueeze(c);
       if (crossed(this.T.SQ_EXIT)) this.leaveSqueeze(c);
       c.d = c.laneSide * this.T.laneHalf(s);
     } else if (c.mode === 'pitlane') {
@@ -1560,6 +1564,8 @@ export class Race {
       const busy = this.cars.some((x) => x !== c && (x.mode === 'race' || x.mode === 'pitlane') && !outOfTraffic(x) && Math.abs(this.T.gapS(s, this.s(x))) < 2.4 && Math.abs(x.d - d) < this.T.CAR_W);
       if (!busy) {
         c.u = u; c.laneSide = o.lane; c.d = d; c.mode = 'race'; c.off = null; c.v = 0; c.recoverT = 1.0; c.graceT = PEN.grace; c.yawOff = 0; c.wobble = 0;
+        // the de-slot left the squeeze queue: a re-slot inside the squeeze queues the car again at its physical place (#100)
+        this.rejoinSqueeze(c);
         if (c.human) this.pmsg(c, 'msg.backOn', 'info');
       }
     }
@@ -1735,16 +1741,22 @@ export class Race {
   }
 
   /**
-   * A held car is out of the squeeze priority queue (it would cap the cars behind it, which drive through its spot), so a car
-   * rejoining traffic inside the squeeze is put back in the queue at its physical place: behind every queued car ahead of it
-   * on the slot, ahead of those behind it (ties by grid slot, deterministic). Outside the squeeze it is simply not queued.
+   * A car leaves the squeeze priority queue while it is out of traffic (held, de-slotted) or backing up (it would cap the
+   * cars behind it, which drive through its spot or that it backs past), so a car that is back in traffic inside the
+   * squeeze is put back in the queue at its physical place: behind every queued car ahead of it on the slot, ahead of those
+   * behind it (ties by grid slot, deterministic). That place is read now, not remembered, so a car that backed up behind
+   * cars it was ahead of, or was re-slotted behind cars that went past, queues behind them. Callers: an away car's rejoin,
+   * the marshal's re-slot and a car driving forward again after backing up (#100). Outside the squeeze, or already queued,
+   * nothing changes.
    */
   rejoinSqueeze(c: Car): void {
     const s = this.s(c);
+    if (c.mode !== 'race' || outOfTraffic(c)) return;
     if (!this.T.inRange(s, this.T.SQ_ENTRY, this.T.SQ_EXIT) || this.squeezeQ.includes(c)) return;
     const prog = (x: Car): number => this.T.gapS(this.T.SQ_ENTRY, this.s(x));
     const p = prog(c);
-    const at = this.squeezeQ.findIndex((x) => prog(x) < p || (prog(x) === p && x.idx > c.idx));
+    // (queued cars are always in traffic: every way out of traffic leaves the queue; the check keeps the traffic invariant)
+    const at = this.squeezeQ.findIndex((x) => !outOfTraffic(x) && (prog(x) < p || (prog(x) === p && x.idx > c.idx)));
     if (at < 0) this.squeezeQ.push(c); else this.squeezeQ.splice(at, 0, c);
   }
 
