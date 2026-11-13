@@ -1142,6 +1142,11 @@ export class Race {
         // the handover point: past the pit-exit merge, back in the outside lane, normal control returns
         if (c.sgLeave) { c.sgLeave = false; c.sgCtl = false; c.sgPhase = null; this.pmsg(c, 'msg.sgHandover', 'info'); }
         this.pit.release('exit', c, 'done');
+        // a pit exit inside the squeeze (circuit-4: the zone starts short of PIT_OUT1, so the car never crosses SQ_ENTRY on the
+        // road) joins the squeeze queue at its physical place, judged now: behind every queued car ahead of it on the slot,
+        // ahead of those behind it (an exact tie by grid slot). Elsewhere the exit is short of the zone and the car is
+        // queued by crossing the entry, as before (#110)
+        this.rejoinSqueeze(c);
         if (c.sgOwed > 0 && !c.finished) this.pmsg(c, 'msg.penStillOwed', 'bad');
       }
       // automatic fuel visit: brought to rest at the centre of the car's own bay, it turns in (the usual entry animation)
@@ -1750,8 +1755,8 @@ export class Race {
    * squeeze is put back in the queue at its physical place: behind every queued car ahead of it on the slot, ahead of those
    * behind it (ties by grid slot, deterministic). That place is read now, not remembered, so a car that backed up behind
    * cars it was ahead of, or was re-slotted behind cars that went past, queues behind them. Callers: an away car's rejoin,
-   * the marshal's re-slot and a car driving forward again after backing up (#100). Outside the squeeze, or already queued,
-   * nothing changes.
+   * the marshal's re-slot, a car driving forward again after backing up (#100) and a car leaving the pit lane inside the
+   * squeeze (#110). Outside the squeeze, or already queued, nothing changes.
    */
   rejoinSqueeze(c: Car): void {
     const s = this.s(c);

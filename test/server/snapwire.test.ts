@@ -423,6 +423,8 @@ describe('the room server streams v2 states', () => {
     // for #77 (rules race-core-2026.11.6) on the same grounds: with 11.5 in place and #77's race core the 11.5 digest still results
     // (9da3864a…1ca81 for 11.6). Re-pinned for #100 (rules race-core-2026.11.7) on the same grounds: with 11.6 in place and #100's race
     // core the 11.6 digest still results (no seat ever holds Brake, so none backs up), so the version string is the only change
+    // (979392e8…7d318 for 11.7). Re-pinned for #110 (rules race-core-2026.11.8) on the same grounds: with 11.7 in place and #110's
+    // race core the 11.7 digest still results (circuit-1's pit exit is short of its squeeze), so the version string is the only change
     const run = () => {
       const h = harness({}, 4242);
       const peers = [new FakePeer(), new FakePeer()];
@@ -441,7 +443,7 @@ describe('the room server streams v2 states', () => {
     };
     const a = run(), b = run();
     expect(b).toEqual(a);
-    expect(a).toEqual({ digest: '979392e816134e58a921547d18f36ba9dfccea0bc6ea4fd3d3c1ed25b367d318', outcome: 'completed', ticks: 18031 });
+    expect(a).toEqual({ digest: '3fc80036feb8faedd8c8c6faca71d2fa7e622ad6ccf168dcab02bf4f95f68629', outcome: 'completed', ticks: 18031 });
   });
 });
 
