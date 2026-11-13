@@ -176,6 +176,12 @@ export const STALL = {
   blockGap: 6,         // a stopped car with a slow car this close ahead (clear slot) on its own path is trapped, not blocking
 };
 /**
+ * The squeeze priority queue: a queued car slows at up to `brake` m/s² for the car ahead of it. A car leaving the pit lane
+ * inside the squeeze (circuit-4) waits to join the queue while a road car behind it could not stop behind it at that
+ * braking with `margin` m to spare; closing by no more than `creep` m/s (crawling up behind it, say) never counts (#110).
+ */
+export const SQUEEZE = { brake: 45, margin: 1, creep: 0.5 };
+/**
  * When a car held for an away driver (#74) may rejoin traffic, counted from the moment the driver is back (`awayWaitT`):
  * - never while a car is inside it (less than CAR_LEN of slot apart, in the same slot). That is never capped: the car inside
  *   is in traffic and drives on, or its own stopped-on-track count recovers it.
@@ -302,6 +308,11 @@ export interface Car {
   pitHold: boolean;
   /** must wait at the pit-exit line this step */
   exitHold: boolean;
+  /**
+   * left the pit lane inside the squeeze (circuit-4) and not yet in the squeeze queue: it joins at its physical place once
+   * every car that would be behind it can stop behind it (joinSqueezeWaiting). Server-side only, like the queue (#110)
+   */
+  sqWait: boolean;
   /** a departure from the bay was asked for and waits for a safe merge; latched, so it completes without pressing again */
   exitReq: boolean;
   /** this pit visit is for fuel (set at the entrance, from the reasons the car entered with) */
@@ -571,7 +582,7 @@ export class Race {
         threatIdx: -1, reactT: 0, defendOk: false, defendCooldown: 0, defendPending: false, defendSw: -1,
         x: 0, y: 0, h: 0, z: 0, roll: 0, pitch: 0, bumpT: 0,
         revOn: false, revHoldT: 0, revLatch: false, revMark: null,
-        pitWait: null, pitCap: 1e9, pitHold: false, exitHold: false, exitReq: false, pitFuel: false,
+        pitWait: null, pitCap: 1e9, pitHold: false, exitHold: false, sqWait: false, exitReq: false, pitFuel: false,
         sgPhase: null, sgCtl: false, sgCommit: -1, sgVc: 0, sgLeave: false, upPrev: false,
         stallT: 0, stallRun: 0, stallHold: false, stallSvc: false, linkAway: false, away: false, awayWaitT: 0,
       };
@@ -946,6 +957,8 @@ export class Race {
     }
     // pit traffic is decided from where every car is before any of them moves, so array order never grants priority
     this.pit.update();
+    // a car out of the pits inside the squeeze joins the queue when it safely can, also decided before any car moves (#110)
+    this.joinSqueezeWaiting();
     for (const c of this.cars) this.stepCar(c, dt, this.inputOf(c, inputs));
     // after every car has moved and before any touch: who is held out of traffic for an away driver this step (#74)
     this.awayUpdate(dt);
@@ -1052,7 +1065,7 @@ export class Race {
       if (gap < minGap + 2.5 && Math.abs(c.d - ah.d) > 0.05) c.squeezeHold = lim < c.v + 1;
       cap = Math.min(cap, lim);
     }
-    if (c.v > cap) c.v = Math.max(cap, c.v - 45 * dt);
+    if (c.v > cap) c.v = Math.max(cap, c.v - SQUEEZE.brake * dt);
 
     // ---- move along slot
     const k = this.T.curvature(s0);
@@ -1142,6 +1155,10 @@ export class Race {
         // the handover point: past the pit-exit merge, back in the outside lane, normal control returns
         if (c.sgLeave) { c.sgLeave = false; c.sgCtl = false; c.sgPhase = null; this.pmsg(c, 'msg.sgHandover', 'info'); }
         this.pit.release('exit', c, 'done');
+        // a pit exit inside the squeeze (circuit-4: the zone starts short of PIT_OUT1, so the car never crosses SQ_ENTRY on the
+        // road) waits to join the squeeze queue (joinSqueezeWaiting). Elsewhere the exit is short of the zone and the car is
+        // queued by crossing the entry, as before (#110)
+        c.sqWait = this.T.inRange(this.s(c), this.T.SQ_ENTRY, this.T.SQ_EXIT);
         if (c.sgOwed > 0 && !c.finished) this.pmsg(c, 'msg.penStillOwed', 'bad');
       }
       // automatic fuel visit: brought to rest at the centre of the car's own bay, it turns in (the usual entry animation)
@@ -1410,6 +1427,44 @@ export class Race {
   }
 
   leaveSqueeze(c: Car): void { const i = this.squeezeQ.indexOf(c); if (i >= 0) this.squeezeQ.splice(i, 1); }
+
+  /**
+   * Road car o could not stop behind car p in the squeeze: it is closing on p by more than a crawl, and its stopping
+   * distance at the queue's braking, plus a margin, is more than its clear slot to p's tail less the queue's gap. Queued
+   * behind p it would run up to or past p before the cap held it, and once queued the cap and collide() go by queue order.
+   */
+  cannotStopBehind(o: Car, p: Car, margin = SQUEEZE.margin): boolean {
+    if (o.v <= p.v + SQUEEZE.creep) return false;
+    const room = this.T.gapS(this.s(o), this.s(p)) - (this.T.CAR_LEN + 0.3);
+    return (o.v * o.v) / (2 * SQUEEZE.brake) + margin > room;
+  }
+
+  /**
+   * A car that left the pit lane inside the squeeze (circuit-4) waits to join the queue (Car.sqWait). It joins at its
+   * physical place (rejoinSqueeze) on the first step, before any car moves, at which every car on the road that would be
+   * behind it, queued or still short of the entry, can stop behind it, and it can stop behind every queued car that would be
+   * ahead of it (cannotStopBehind). Until then it runs outside the
+   * queue as before #110: a faster car closing on it goes by first, physically, and the queue stays in physical order. It
+   * stops waiting once out of the squeeze or out of traffic, or no longer on the racing lane.
+   */
+  joinSqueezeWaiting(): void {
+    for (const c of this.cars) {
+      if (!c.sqWait) continue;
+      if (c.mode !== 'race' || outOfTraffic(c) || !this.T.inRange(this.s(c), this.T.SQ_ENTRY, this.T.SQ_EXIT) || this.squeezeQ.includes(c)) {
+        c.sqWait = false; continue;
+      }
+      const behind = (o: Car): boolean => {
+        const g = this.T.gapS(this.s(o), this.s(c));
+        return g > 0 || (g === 0 && o.idx > c.idx);
+      };
+      // and it can stop behind every queued car that would be ahead of it, so it never overruns one either
+      const blocked = this.cars.some((o) => o !== c && o.mode === 'race' && !outOfTraffic(o) && behind(o) && this.cannotStopBehind(o, c))
+        || this.squeezeQ.some((o) => !outOfTraffic(o) && !behind(o) && this.cannotStopBehind(c, o, 0));
+      if (blocked) continue;
+      c.sqWait = false;
+      this.rejoinSqueeze(c);
+    }
+  }
 
   occupies(c: Car, side: number): boolean {
     if (c.mode !== 'race') return false;
@@ -1750,12 +1805,13 @@ export class Race {
    * squeeze is put back in the queue at its physical place: behind every queued car ahead of it on the slot, ahead of those
    * behind it (ties by grid slot, deterministic). That place is read now, not remembered, so a car that backed up behind
    * cars it was ahead of, or was re-slotted behind cars that went past, queues behind them. Callers: an away car's rejoin,
-   * the marshal's re-slot and a car driving forward again after backing up (#100). Outside the squeeze, or already queued,
-   * nothing changes.
+   * the marshal's re-slot, a car driving forward again after backing up (#100) and a car leaving the pit lane inside the
+   * squeeze (#110). Outside the squeeze, or already queued, nothing changes.
    */
   rejoinSqueeze(c: Car): void {
     const s = this.s(c);
-    if (c.mode !== 'race' || outOfTraffic(c)) return;
+    // (a car waiting to join after its pit exit joins only through joinSqueezeWaiting)
+    if (c.mode !== 'race' || outOfTraffic(c) || c.sqWait) return;
     if (!this.T.inRange(s, this.T.SQ_ENTRY, this.T.SQ_EXIT) || this.squeezeQ.includes(c)) return;
     const prog = (x: Car): number => this.T.gapS(this.T.SQ_ENTRY, this.s(x));
     const p = prog(c);
