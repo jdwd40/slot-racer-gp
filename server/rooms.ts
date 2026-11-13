@@ -8,6 +8,7 @@ import type { Logger } from './log';
 import type { Scoring } from './career';
 import type { ResultSink } from './results';
 import { CreateQuota } from './quota';
+import { limitKey } from './netkey';
 import { DurationStats } from './tickstats';
 import { Room, type Fail, type JoinOk, type Peer } from './room';
 
@@ -73,16 +74,17 @@ export class RoomManager {
     }
   }
 
-  /** Throttle guessing: true when this address has failed too many joins/resumes this minute. */
+  /** Throttle guessing: true when this address (its limit key: server/netkey.ts) has failed too many joins/resumes this minute. */
   limited(ip: string): boolean {
-    const f = this.fails.get(ip);
+    const f = this.fails.get(limitKey(ip));
     return !!f && f.until > this.now() && f.n >= JOIN_FAILS_PER_MIN;
   }
   noteFailure(ip: string): void {
     const now = this.now();
     if (this.fails.size > 10000) for (const [k, v] of this.fails) if (v.until <= now) this.fails.delete(k);
-    const f = this.fails.get(ip);
-    if (!f || f.until <= now) this.fails.set(ip, { n: 1, until: now + 60000 });
+    const key = limitKey(ip);
+    const f = this.fails.get(key);
+    if (!f || f.until <= now) this.fails.set(key, { n: 1, until: now + 60000 });
     else f.n++;
   }
 
