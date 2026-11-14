@@ -6,6 +6,7 @@ import { createHash } from 'node:crypto';
 import { Race, Car, LAPS, PEN, STALL, AWAY, AWAY_REJOIN, BRAKE as BRAKE_DECEL, type Controls, type Input, type RosterEntry, type WireEvent, type RaceSnapshot } from '../src/race';
 import { stallLeft, stallPaused } from '../src/hud';
 import { applySnapshot, localEvent, mirrorRace } from '../src/net/mirror';
+import { SnapDecoder, SnapEncoder, type WireStateMsg } from '../src/net/snapwire';
 import { FINISH_S } from '../src/track';
 import { STEP } from '../src/timing';
 import { drive } from './server/bot';
@@ -1139,6 +1140,105 @@ describe('the warning while reversing (#82)', () => {
     });
   }
 
+});
+
+describe('the warning at the -1 m/s boundary, online and offline (#119)', () => {
+  /**
+   * One race step of the count for a car stopped mid-episode at speed `v`, decided by the race core itself (stallUpdate on the
+   * full-precision speed), then sent through the real encoder and decoder into a mirror: what the local HUD and the online HUD
+   * show for the same car.
+   */
+  function boundary(v: number, revOn = false, edit?: (s: RaceSnapshot) => void) {
+    const r = race([human('p')]);
+    const p = r.car('p')!;
+    place(r, p, U(r, STRAIGHT), 1, v);
+    p.revOn = revOn; p.stallT = 0.5;
+    r.stallUpdate(SUB119, {});
+    const enc = new SnapEncoder('r'), dec = new SnapDecoder();
+    const snap = JSON.parse(JSON.stringify(r.snapshot())) as RaceSnapshot;
+    edit?.(snap);
+    const frame = JSON.parse(JSON.stringify({ t: 'state', tick: 1, now: 0, lagMs: 0, ev: [], ...enc.next(snap, 1, 0) })) as WireStateMsg;
+    const got = dec.decode(frame)!;
+    const m = mirrorRace(got);
+    return { r, p, mc: m.car('p')!, got, counted: p.stallT > 0.5 };
+  }
+  const SUB119 = 1 / 120;
+  // either side of the threshold, and the values that round onto it on the wire (3 decimals: -0.9996 and -1.0004 both read -1.000)
+  const SPEEDS = [-0.9, -0.9994, -0.9996, -0.9998, -1 + 1e-9, -STALL.stopV, -1 - 1e-9, -1.0002, -1.0004, -1.1];
+
+  for (const v of SPEEDS) {
+    it(`at ${v} m/s the online HUD shows exactly what the local one does, which is what the count did`, () => {
+      const { p, mc, got, counted } = boundary(v);
+      // the display first: the race core's count, the local HUD and the online HUD all agree
+      expect(counted).toBe(v > -STALL.stopV);
+      expect(stallLeft(p)).toBe(counted ? 3 : 0);
+      expect(stallLeft(mc), 'online HUD').toBe(stallLeft(p));
+      expect(stallPaused(p)).toBe(!counted);
+      expect(stallPaused(mc)).toBe(stallPaused(p));
+      expect(got.cars[0].stallPaused).toBe(!counted);    // sent exactly, whatever the rounded speed says
+    });
+  }
+
+  it('reverse gear at a standstill still counts and still shows, online and offline', () => {
+    for (const v of [0, -0.0004, -0.9998]) {
+      const { p, mc, counted } = boundary(v, true);
+      expect(counted).toBe(true);
+      expect(stallLeft(p)).toBe(3);
+      expect(stallLeft(mc)).toBe(3);
+    }
+  });
+
+  it('an older server (no stallPaused) still gets a sensible warning from the rounded speed', () => {
+    const drop = (s: RaceSnapshot): void => { delete s.cars[0].stallPaused; };
+    // well clear of the boundary: the speed rule gives the same answer the race core did
+    for (const v of [0, -0.5, -0.9, -1.1, -3]) {
+      const { p, mc } = boundary(v, false, drop);
+      expect(mc.stallPaused).toBe(null);
+      expect(stallLeft(mc)).toBe(stallLeft(p));
+    }
+    // reverse gear at a standstill is not the pause there either
+    expect(stallLeft(boundary(0, true, drop).mc)).toBe(3);
+  });
+
+  it('an explicit state from the server wins over the rounded speed, both ways', () => {
+    // -0.9998 m/s counted, but reads -1.000 on the wire: the explicit `false` keeps the warning up
+    const a = boundary(-0.9998);
+    expect(a.got.cars[0].v).toBe(-1);
+    expect(a.got.cars[0].stallPaused).toBe(false);
+    expect(stallLeft(a.mc)).toBe(3);
+    // the same rounded speed with the field left out falls back to the speed rule: that is the old (hidden) reading
+    expect(stallLeft(boundary(-0.9998, false, (s) => { delete s.cars[0].stallPaused; }).mc)).toBe(0);
+    // and an explicit `true` hides it even at a speed the fallback would count
+    expect(stallLeft(boundary(-0.5, false, (s) => { s.cars[0].stallPaused = true; }).mc)).toBe(0);
+  });
+
+  it('a running mirror reads a snapshot without the field as unknown, not as the last explicit value or as false', () => {
+    const a = boundary(-0.9998);
+    const m = mirrorRace(a.got);
+    expect(m.car('p')!.stallPaused).toBe(false);
+    const old = JSON.parse(JSON.stringify(a.got)) as RaceSnapshot;
+    delete old.cars[0].stallPaused;
+    applySnapshot(m, old);
+    expect(m.car('p')!.stallPaused).toBe(null);
+    // a mirror's own snapshot passes the unknown on as absent, never as an explicit false
+    expect('stallPaused' in m.snapshot().cars[0]).toBe(false);
+    applySnapshot(m, a.got);
+    expect(m.car('p')!.stallPaused).toBe(false);
+  });
+
+  it('the flag is false whenever no count runs, and the race core sets it every step', () => {
+    const r = race([human('p')]);
+    const p = r.car('p')!;
+    place(r, p, U(r, STRAIGHT), 1, -3);
+    p.stallT = 0;
+    r.stallUpdate(SUB119, {});
+    expect(p.stallT).toBe(0);
+    expect(p.stallPaused).toBe(false);
+    p.stallT = 0.5; r.stallUpdate(SUB119, {});
+    expect(p.stallPaused).toBe(true);
+    p.v = 0; r.stallUpdate(SUB119, {});
+    expect(p.stallPaused).toBe(false);
+  });
 });
 
 describe('state on the wire and determinism', () => {
