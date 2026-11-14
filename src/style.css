@@ -296,11 +296,16 @@ small { color: #9ca3af; font-weight: 500; }
 #net-banner.show { display: block; }
 #net-banner.ret { border-left-color: #ef4444; color: #fecaca; }
 #net-banner.lag { border-left-color: #60a5fa; color: #dbeafe; }
-/* on a menu card (online menu, lobby, final standings) there is no HUD to clear, so the banner goes to the top edge and the
-   card starts below it (#64): --banner-clear is the banner's measured bottom edge plus a gap (main.ts placeBanner). A card
-   taller than what is left scrolls inside itself as before, so its heading and Copy code are never under the banner. */
-#app.banner-card #net-banner { top: var(--eT); }
-#app.banner-card .overlay { padding-top: max(var(--banner-clear, 0px), 3vh, var(--sat)); }
+/* The menu layer stacks the banner over the overlay in a column (main.ts menuLayer). On a race and the pending results card the
+   banner is out of flow and floats below the HUD, and the overlay fills the layer as before. On a menu card (online menu, lobby,
+   final standings) there is no HUD to clear: the banner joins the flow at the top edge and the overlay takes the height left
+   under it, so wrapped text pushes the card down by its own height (#64, #121). A card taller than what is left scrolls inside
+   itself as before, so its heading and Copy code are never under the banner; with the banner gone the card is back in place. */
+#menu-layer { position: absolute; inset: 0; display: flex; flex-direction: column; pointer-events: none; }
+#menu-layer > .overlay { position: relative; inset: auto; flex: 1 1 auto; min-height: 0; pointer-events: auto; }
+#app.banner-card #menu-layer { background: radial-gradient(ellipse at center, rgba(0,0,0,0.35), rgba(0,0,0,0.7)); }
+#app.banner-card #net-banner { position: relative; top: auto; left: auto; transform: none; flex: none; align-self: center; margin: var(--eT) 12px 0; max-width: calc(100% - 24px); }
+#app.banner-card .overlay { background: none; padding-top: 8px; }
 .lobby .tab { min-height: 40px; }
 
 /* ---- accounts: sign-in, create account and driver profile (docs/accounts.md). 16px+ inputs so iOS does not zoom on focus. */

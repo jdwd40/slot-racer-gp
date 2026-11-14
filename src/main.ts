@@ -162,9 +162,17 @@ function playerUnderBridge(): boolean {
 // ------------------------------------------------------------ HUD / overlays
 const hud = new Hud(app);
 const sfx = new Sfx();
+/**
+ * The menu layer: the connection banner (added below, before the overlay) and the overlay, stacked in a column. On a race the
+ * banner floats out of flow below the HUD; on a menu card it is in flow above the overlay, so its wrapped height pushes the card
+ * down by exactly as much as it needs (#64, #121).
+ */
+const menuLayer = document.createElement('div');
+menuLayer.id = 'menu-layer';
+app.appendChild(menuLayer);
 const overlay = document.createElement('div');
 overlay.className = 'overlay';
-app.appendChild(overlay);
+menuLayer.appendChild(overlay);
 
 let online: OnlineStatus = ONLINE_ENABLED ? { state: 'checking' } : { state: 'off' };
 
@@ -1669,21 +1677,8 @@ function showNetResults(r: ResultView): void {
 const banner = document.createElement('div');
 banner.id = 'net-banner';
 banner.setAttribute('role', 'status');
-app.appendChild(banner);
-let bannerKey = '', bannerMemo = '';
-/**
- * On a menu card the banner sits at the top of the screen and the card is pushed down by its height (#64): at phone sizes
- * the card fills the screen, so a floating banner covered the room heading and Copy code. The height is measured, not
- * assumed, because the text wraps to two or three lines on a narrow phone; a resize observer keeps it right as it rewraps.
- */
-function placeBanner(): void {
-  const onCard = !!bannerKey && bannerOnCard(screen);
-  app.classList.toggle('banner-card', onCard);
-  // the card's top padding clears the banner's bottom edge plus a small gap; 0 when there is nothing to clear
-  app.style.setProperty('--banner-clear', onCard ? `${Math.ceil(banner.getBoundingClientRect().bottom) + 8}px` : '0px');
-}
-if (typeof ResizeObserver === 'function') new ResizeObserver(() => placeBanner()).observe(banner);
-window.addEventListener('resize', placeBanner);
+menuLayer.insertBefore(banner, overlay);
+let bannerMemo = '';
 /** This browser's held pedals for its own seat: sent the moment they change (and checked every frame), never another seat's. */
 function sendHeld(): void {
   if (!net || !netRaceId) return;
@@ -1707,10 +1702,10 @@ function syncBanner(): void {
   const memo = `${key}|${card}|${text}`;
   if (memo === bannerMemo) return;
   bannerMemo = memo;
-  bannerKey = key;
   banner.textContent = text;
   banner.className = key ? `show ${key}` : '';
-  placeBanner();
+  // on a menu card the banner joins the layout above the card (style.css); elsewhere it floats below the HUD
+  app.classList.toggle('banner-card', !!key && card);
 }
 
 // mobile backgrounding and page teardown: controls were already released (suspend); the socket may be dropped by the browser,
