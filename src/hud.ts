@@ -216,7 +216,6 @@ export class Hud {
     this.set('h-fuelpct', `${Math.round(p.fuel * 100)}%`);
     this.fuelLaps(race, p, practice);
 
-    // chips
     const chips: string[] = [];
     if (low && !p.finished) chips.push(`<span class="chip red blink">⚠ ${t('hud.lowFuel')}</span>`);
     if (practice && p.crossed >= 1 && !p.lapValid) chips.push(`<span class="chip org">✕ ${t('hud.lapInvalid')}</span>`);
@@ -317,7 +316,6 @@ export class Hud {
     this.set('h-status', st, true);
     this.el['h-status'].style.opacity = st ? '1' : '0';
 
-    // lights
     const lights = this.el['h-lights'];
     lights.style.opacity = race.phase === 'countdown' ? '1' : '0';
     const n = race.lights;
@@ -412,9 +410,7 @@ export class Hud {
     g.clearRect(0, 0, this.mini.width, this.mini.height);
     g.drawImage(this.miniBg, 0, 0);
     g.restore();
-    // the full redraw left these set from the track lines; the dots' strokes keep them
     g.lineJoin = 'round'; g.lineCap = 'round';
-    // cars
     // the local driver's dot is drawn last, on top
     const cars = [...race.cars].sort((a, b) => (a.id === me ? 1 : 0) - (b.id === me ? 1 : 0));
     for (const c of cars) {

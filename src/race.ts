@@ -790,12 +790,12 @@ export class Race {
   /** The car whose own bay j is for this race, or null (practice leaves the rivals' bays unowned). Ownership is identity, never colour. */
   bayOwner(j: number): Car | null { return this.cars.find((c) => c.bayHome === j) ?? null; }
 
-  /** Pit routing applies: only the player is assisted, the AI makes its own lane decisions. */
+  /** Pit routing assists human drivers. The AI chooses its own approach. */
   pitAssist(c: Car): boolean { return c.human && c.pitReq && !c.finished; }
 
   /**
-   * Player routing from the visit reasons: any owed stop or fuel request routes to the next entrance, except the approach
-   * a deferral released. Never clears a debt; an optional request the car still holds keeps routing on.
+   * An owed stop or fuel request routes a human driver to the next entrance, except on an approach released by a deferral.
+   * Debts persist, and an active optional request keeps routing on.
    */
   syncRoute(c: Car): void {
     if (!c.human) return;
@@ -1216,7 +1216,7 @@ export class Race {
     if (c.revMark !== null && c.u >= c.revMark) { if (ds >= 0) this.rejoinSqueeze(c); c.revMark = null; }
   }
 
-  // ---------------------------------------------------------------- automatic pit service (player only)
+  // ---------------------------------------------------------------- automatic pit service for human drivers
   /**
    * Decide, before the car moves, whether automatic control owns the pedals and what to show. On the road it takes over within
    * `AUTO.window` of an entrance the car is routed into for a stop-and-go or a fuel visit and can still reach (outside lane, a
@@ -1337,7 +1337,7 @@ export class Race {
     return cap;
   }
 
-  // ---------------------------------------------------------------- reverse (player only)
+  // ---------------------------------------------------------------- reverse for human drivers
   /** Why reverse cannot engage now, or null. Checked by speed magnitude and position, never by direction alone. */
   reverseBlock(c: Car): 'phase' | 'mode' | 'change' | 'fuel' | 'service' | 'assist' | null {
     if (this.phase !== 'racing' || c.finished) return 'phase';
