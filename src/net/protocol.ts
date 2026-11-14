@@ -224,7 +224,6 @@ export function parseClientMessage(raw: unknown): Parsed {
  * runs of whitespace collapsed to one space; trimmed. No length rule: each caller applies its own.
  */
 export function tidyName(raw: string): string {
-  // eslint-disable-next-line no-control-regex
   return raw.normalize('NFC').replace(/[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u2028-\u202e\u2060-\u2069\ufeff]/g, '').replace(/\s+/g, ' ').trim();
 }
 

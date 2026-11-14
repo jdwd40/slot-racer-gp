@@ -101,7 +101,6 @@ function newRace(): Race {
   return new Race({ roster, track: T.DEF.id });
 }
 let race = newRace();
-/** the local driver's car */
 const me = (): Car => race.car(localId) ?? race.cars[0];
 const isMe = (c: Car): boolean => c.id === localId;
 const stepper = new FixedStepper();
@@ -113,7 +112,6 @@ function disposeVisual(v: CarVisual): void {
   disposeObject(v.group);
   v.group.removeFromParent();
 }
-/** (re)create car visuals for the cars of the current race */
 function rebuildVisuals(): void {
   visuals.forEach(disposeVisual);
   visuals = race.cars.map((c) => { const v = makeCar(c.color, c.num, isMe(c)); scene.add(v.group); return v; });
@@ -168,8 +166,6 @@ const overlay = document.createElement('div');
 overlay.className = 'overlay';
 app.appendChild(overlay);
 
-// online play stays off unless this build enables it AND the same-origin service passes its health/protocol check
-// (src/online.ts). Nothing online is offered on the menus before that check has passed.
 let online: OnlineStatus = ONLINE_ENABLED ? { state: 'checking' } : { state: 'off' };
 
 type Screen = 'title' | 'race' | 'pause' | 'results' | 'boards' | 'champ' | 'online' | 'lobby' | 'netwait' | 'netres' | 'account';
@@ -907,7 +903,6 @@ function syncArrows(time: number): void {
   const owes = p.sgOwed > 0 && !p.finished;
   world.penGlow.opacity = !owes ? 0 : p.sgServing ? 0.5 : 0.25 + Math.sin(time * 7) * 0.15;
   world.penGlow.color.setHex(p.sgServing ? 0x3cff8a : 0xff4444);
-  // gantry lights
   world.startLights.forEach((m, i) => {
     const on = race.phase === 'countdown' && i < race.lights;
     m.emissive.setHex(on ? 0xff1a1a : 0x000000);
@@ -1774,7 +1769,6 @@ function frame(now: number): void {
   ghost.update(race.raceTime - (1 - alpha) * STEP, screen === 'race' ? dt : 0);
   syncArrows(time);
   syncAudio();
-  // the HUD is refreshed only while shown (#102); the frame that shows it again refreshes it before it is painted
   const hudShown = screen === 'race' || screen === 'pause' || screen === 'results' || screen === 'netwait';
   syncBanner();
   hud.frame(hudShown, race, dt, time, { mode: mode === 'online' ? 'race' : mode, me: localId, pbMs, round: mode === 'champ' && champ ? `${champ.rounds.length + (champRoundSaved ? 0 : 1)}/${R.CHAMP_TRACKS.length}` : '' });
