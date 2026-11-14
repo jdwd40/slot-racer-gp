@@ -176,6 +176,15 @@ export const STALL = {
   blockGap: 6,         // a stopped car with a slow car this close ahead (clear slot) on its own path is trapped, not blocking
 };
 /**
+ * The one pause rule of a running stopped-on-track count (#82, #119): a car backing up (reverse gear, or rolling back after it)
+ * at STALL.stopV or more is making the legitimate recovery manoeuvre (docs/reverse.md), so the step adds nothing to its count.
+ * Reverse gear alone is not the pause: the standstill that engages reverse still counts. Race.stallUpdate() decides with it
+ * and records the result on the car (Car.stallPaused), which the HUD shows and online snapshots carry exactly; the HUD calls
+ * it itself only for a snapshot from a server that predates that field (with the wire's rounded speed). Written as
+ * `!(v > -stopV)` so it is the exact negation of the condition the count has always advanced under.
+ */
+export function stallCountPaused(v: number): boolean { return !(v > -STALL.stopV); }
+/**
  * The squeeze priority queue: a queued car slows at up to `brake` m/s² for the car ahead of it. A car leaving the pit lane
  * inside the squeeze (circuit-4) waits to join the queue while a road car behind it could not stop behind it at that
  * braking with `margin` m to spare; closing by no more than `creep` m/s (crawling up behind it, say) never counts (#110).
@@ -333,6 +342,12 @@ export interface Car {
   stallT: number;
   /** distance driven without a break under the car's own Throttle at STALL.goV or faster: a resumption at STALL.goDist */
   stallRun: number;
+  /**
+   * The running count was paused on this step because the car is backing up (stallCountPaused, from the full-precision speed);
+   * false whenever no count runs. Set by Race.stallUpdate() only. Null only on an online mirror whose server's snapshots do
+   * not carry it (older than #119): the HUD then falls back to the rule on the snapshot's rounded speed.
+   */
+  stallPaused: boolean | null;
   /** recovered off the track (mode `tow`, out of traffic) and waiting for its own bay to be free to be placed in */
   stallHold: boolean;
   /** this bay stay is a stopped-on-track recovery: nothing is refuelled or served, the car may only rejoin (#69 review B1) */
@@ -400,6 +415,12 @@ export interface CarSnapshot {
   hiU: number; squeezeHold: boolean; pitHold: boolean; towSvc: boolean; pitFuel: boolean; serviced: boolean; upPrev: boolean;
   /** stopped-on-track recovery (#69): the warning's count and the wait for the bay. Additive, so optional for older snapshots */
   stallT?: number; stallHold?: boolean; stallSvc?: boolean;
+  /**
+   * #119: the race core's own pause decision for a running count (Car.stallPaused), sent exactly so the HUD never re-derives it
+   * from the rounded speed. A current server always sends it (true or false); an older one omits it, which the mirror reads
+   * as unknown (null), never as false
+   */
+  stallPaused?: boolean;
   /** held while its driver reconnects (#74): present (true) only while held, so older snapshots and quiet cars omit it */
   away?: boolean;
 }
@@ -584,7 +605,7 @@ export class Race {
         revOn: false, revHoldT: 0, revLatch: false, revMark: null,
         pitWait: null, pitCap: 1e9, pitHold: false, exitHold: false, sqWait: false, exitReq: false, pitFuel: false,
         sgPhase: null, sgCtl: false, sgCommit: -1, sgVc: 0, sgLeave: false, upPrev: false,
-        stallT: 0, stallRun: 0, stallHold: false, stallSvc: false, linkAway: false, away: false, awayWaitT: 0,
+        stallT: 0, stallRun: 0, stallPaused: false, stallHold: false, stallSvc: false, linkAway: false, away: false, awayWaitT: 0,
       };
       this.cars.push(c);
     }
@@ -1653,7 +1674,7 @@ export class Race {
     c.off = { x: p.x, y: p.y, z: p.z, vx: 0, vy: 0, vz: 0, yaw: p.h, spin: 0, t: PARKED_OFF_T, u0: c.u, lane: -1 };
     c.mode = 'off'; c.retire = 'parked'; c.v = 0; c.throttle = 0; c.brake = 0; c.change = null; c.slip = 0; c.wobble = 0; c.yawOff = 0;
     c.bumpT = 0; c.recoverT = 0; c.towT = 0; c.latRatio = 0; c.squeezeHold = false; c.yielding = false; c.pitHold = false; c.exitHold = false;
-    c.stallHold = false; c.stallSvc = false; c.stallT = 0; c.stallRun = 0;
+    c.stallHold = false; c.stallSvc = false; c.stallT = 0; c.stallRun = 0; c.stallPaused = false;
     this.leaveSqueeze(c); this.pit.releaseAll(c, 'terminal');
   }
 
@@ -1725,6 +1746,7 @@ export class Race {
     const blocks = this.cars.map((c) => this.stallBlock(c));
     const due: Car[] = [];
     this.cars.forEach((c, i) => {
+      c.stallPaused = false;
       // a legitimate wait (or the rule not applying) ends the episode: a trapped car that then stays put starts afresh
       if (blocks[i]) { c.stallT = 0; c.stallRun = 0; return; }
       const inp = this.inputOf(c, inputs);
@@ -1741,7 +1763,8 @@ export class Race {
       if (c.stallRun >= STALL.goDist - 1e-9) { c.stallT = 0; c.stallRun = 0; return; }
       // backing up (reverse gear, or rolling back after it) is the legitimate recovery manoeuvre (docs/reverse.md): it pauses
       // the count, never resets it. The standstill that engages reverse still counts, so a back-and-forth nudge gains nothing
-      if (c.v > -STALL.stopV) c.stallT += dt;
+      c.stallPaused = stallCountPaused(c.v);
+      if (!c.stallPaused) c.stallT += dt;
       // the tolerance only absorbs float summing (360 steps of 1/120 s): the first step at or after the deadline. A car that is
       // pulling away under its own Throttle at that moment is let finish the pull-away (about 0.6 s from a standstill, the
       // run above): lifting, braking or stopping during it recovers it on that step, so a last-moment nudge buys nothing
@@ -1868,7 +1891,7 @@ export class Race {
     c.v = 0; c.throttle = 0; c.brake = 0; c.slip = 0; c.wobble = 0; c.latRatio = 0; c.yawOff = 0; c.bumpT = 0;
     c.squeezeHold = false; c.yielding = false; c.pitHold = false; c.exitHold = false; c.pitCap = 1e9; c.pitWait = null;
     c.laneSide = -1; c.d = this.T.BAY_D; c.lapValid = false; c.towPit = false;
-    c.stallT = 0; c.stallRun = 0;
+    c.stallT = 0; c.stallRun = 0; c.stallPaused = false;
     for (const o of this.cars) if (o !== c) this.touching[Math.min(o.idx, c.idx) * 4 + Math.max(o.idx, c.idx)] = false;
     this.emit({ type: 'recover', car: c });
     this.pmsg(c, 'msg.stallRecovered', 'bad');
@@ -2230,6 +2253,8 @@ export class Race {
         serviceT: c.serviceT, penalty: c.penalty, towT: c.towT, recoverT: c.recoverT, bumpT: c.bumpT,
         hiU: c.hiU, squeezeHold: c.squeezeHold, pitHold: c.pitHold, towSvc: c.towSvc, pitFuel: c.pitFuel, serviced: c.serviced, upPrev: c.upPrev,
         stallT: c.stallT, stallHold: c.stallHold, stallSvc: c.stallSvc,
+        // always sent by a race that decides it; only a mirror fed by an older server holds null (unknown), and passes it on as absent
+        ...(c.stallPaused === null ? {} : { stallPaused: c.stallPaused }),
         ...(c.away ? { away: true } : {}),
       })),
       pit: {

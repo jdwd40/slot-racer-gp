@@ -34,10 +34,12 @@ type OptionalKey<T> = { [K in keyof T]-?: object extends Pick<T, K> ? K : never 
  * What the mirror reads for an optional field a snapshot leaves out: the value a new race starts with. An older server sends
  * no #69 stall fields, `away` (#74) is sent only while true, and a delta that names one under DELETED has the decoder drop it,
  * so absence must clear the value applied before (a fresh mirror and a long-running one agree). Every optional CarSnapshot
- * field needs an entry here (a type error otherwise).
+ * field needs an entry here (a type error otherwise), typed as the mirror's Car holds it. `stallPaused` (#119) is the one whose
+ * absence is not a race's starting value: a current server always sends it, so absent means a server that predates it, read
+ * as null (unknown), and the HUD falls back to the speed rule; an explicit false from the server is kept as false.
  */
-const ABSENT = { stallT: 0, stallHold: false, stallSvc: false, away: false } as const satisfies {
-  readonly [K in OptionalKey<CarSnapshot>]-?: NonNullable<CarSnapshot[K]>;
+const ABSENT = { stallT: 0, stallHold: false, stallSvc: false, stallPaused: null, away: false } as const satisfies {
+  readonly [K in OptionalKey<CarSnapshot>]-?: K extends keyof Car ? Car[K] : never;
 };
 
 /**

@@ -1,5 +1,5 @@
 import * as T from './track';
-import { Race, LAPS, LOW_FUEL, Car, SERVICE_READY, DriverId, SOLO_ID, STALL } from './race';
+import { Race, LAPS, LOW_FUEL, Car, SERVICE_READY, DriverId, SOLO_ID, STALL, stallCountPaused } from './race';
 import { t } from './i18n';
 import { fmtMs } from './records';
 import { laneCue, pitCue } from './input';
@@ -430,13 +430,16 @@ export class Hud {
 }
 
 /**
- * Whether the race core's stopped-on-track count is paused for this car right now (#82): it is rolling backwards at
- * STALL.stopV or more. This is exactly the condition under which Race.stallUpdate() (src/race.ts) does not add the step's
- * time to a running episode (`if (c.v > -STALL.stopV) c.stallT += dt`); a copy, so the server bundle does not change, and
- * test/stall.test.ts pins the two together frame by frame. Reverse gear alone (revOn) is NOT the pause: the standstill that
- * engages reverse, or a car in reverse stopped against the car it backed into, still counts.
+ * Whether the race core's stopped-on-track count is paused for this car right now (#82): it is backing up at STALL.stopV or
+ * more. The HUD never decides this itself (#119): it shows the race core's own decision, Car.stallPaused, set by
+ * Race.stallUpdate() from the full-precision speed, offline and (sent exactly in each snapshot) online alike. Only a value
+ * that is not a boolean, an online mirror fed by a server that predates the field, falls back to the race core's rule
+ * (stallCountPaused) on the speed it has, rounded to 1 mm/s on the wire, so the warning stays sensible against an older
+ * server. Reverse gear alone (revOn) is NOT the pause: the standstill that engages reverse still counts.
  */
-export function stallPaused(c: { v: number }): boolean { return c.v <= -STALL.stopV; }
+export function stallPaused(c: { v: number; stallPaused?: boolean | null }): boolean {
+  return typeof c.stallPaused === 'boolean' ? c.stallPaused : stallCountPaused(c.v);
+}
 
 /**
  * Whole seconds left on a stopped-on-track warning (3, 2, 1), or 0 when none is running (#69). Also 0 exactly while the count
@@ -444,7 +447,7 @@ export function stallPaused(c: { v: number }): boolean { return c.v <= -STALL.st
  * is never shown; and a count that is running is never hidden, so the warning stays up in reverse gear at a standstill (while
  * reverse engages, or blocked by a car behind). When the car stops again the warning returns with the time that is left.
  */
-export function stallLeft(c: { stallT: number; mode: string; finished: boolean; v: number }): number {
+export function stallLeft(c: { stallT: number; mode: string; finished: boolean; v: number; stallPaused?: boolean | null }): number {
   if (!(c.stallT > 0) || c.mode !== 'race' || c.finished || stallPaused(c)) return 0;
   return Math.max(1, Math.min(Math.ceil(STALL.grace), Math.ceil(STALL.grace - c.stallT - 1e-9)));
 }

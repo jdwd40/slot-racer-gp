@@ -53,6 +53,11 @@ export const CAR_DYNAMIC = {
   // #69 stopped-on-track recovery: a countdown that runs only while a car is stopped on the racing lane (exact, like the
   // other timers: it costs nothing the rest of the time and the HUD counts down the server's own value), and two flags
   stallT: 'exact', stallHold: 'exact', stallSvc: 'exact',
+  // #119 whether the race core paused the running count on this step (backing up): its own decision from the full-precision
+  // speed, exact, so the HUD never re-derives it from the 3-decimal `v` (-0.9998 m/s would read as -1.000). Additive: always
+  // sent by a current server (false nearly always, so deltas rarely carry it); an older server's frames lack it, older
+  // decoders copy it through untouched and older mirrors copy only the fields they list, so PROTOCOL_VERSION stays 2
+  stallPaused: 'exact',
   // #74 held for an away driver: optional and additive (absent while false, so an older server's frames simply lack it and
   // a delta names it under DELETED when the hold ends), which keeps PROTOCOL_VERSION 2
   away: 'exact',
