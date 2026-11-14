@@ -33,7 +33,8 @@ export type StaticCar = Pick<CarSnapshot, StaticKey>;
 
 /**
  * Every other per-car field, in snapshot order, with its wire precision. `satisfies` makes a field added to CarSnapshot a
- * type error here until it is listed: adding a dynamic field (optional or not) is this one line plus mirror.ts's CAR_FIELDS.
+ * type error here until it is listed: adding a dynamic field is this one line, as mirror.ts copies every field listed here
+ * (an optional one also needs its absent value in mirror.ts's ABSENT, which the types enforce).
  * 3 decimals: 1 mm of position, distance and lateral offset (track units are metres), 1 mm/s of speed, 1 mrad of angle,
  * 0.1% of pedal and of the fuel tank. These change nearly every step; the rest change a few times a lap. `fuel` keeps a
  * non-empty tank above 0 (#79): a tank under 0.05% goes as 0.1%, not as an empty 0.

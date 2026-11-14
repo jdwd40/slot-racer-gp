@@ -175,6 +175,42 @@ describe('snapshot wire format v2 (#67)', () => {
     });
   });
 
+  it('a running mirror clears the #69 stall fields and the #74 away flag when a delta drops them, like a fresh mirror, and picks them up again (#120)', () => {
+    const enc = new SnapEncoder('r'), dec = new SnapDecoder();
+    const base = frames[600].snap;
+    const id = base.cars[1].id;
+    const variant = (k: number, f: (c: CarSnapshot) => void): RaceSnapshot => { const s = JSON.parse(JSON.stringify(base)) as RaceSnapshot; f(s.cars[1]); s.t += k; return s; };
+    const OPTIONAL = ['stallT', 'stallHold', 'stallSvc', 'away'] as const;
+    const fields = (r: Race) => { const c = r.car(id)!; return { stallT: c.stallT, stallHold: c.stallHold, stallSvc: c.stallSvc, away: c.away }; };
+    const step = (i: number, s: RaceSnapshot): RaceSnapshot => {
+      const f = enc.next(s, i + 1, i * 50);
+      if (i > 0) expect(f.key).toBeFalsy();   // every frame after the first is a delta: the mirror is not rebuilt
+      return dec.decode(wire(i + 1, f))!;
+    };
+    let got = step(0, variant(0, () => undefined));
+    const m = mirrorRace(got);
+    // a countdown on the racing lane, then held in the tow, for an away driver
+    got = step(1, variant(1, (c) => { c.stallT = 1.25; c.stallHold = true; c.stallSvc = true; c.away = true; }));
+    applySnapshot(m, got);
+    expect(fields(m)).toEqual({ stallT: 1.25, stallHold: true, stallSvc: true, away: true });
+    // a delta that removes every optional field: the decoder drops them and the mirror reads no countdown, no hold, not away
+    const gone = variant(2, (c) => { for (const k of OPTIONAL) delete c[k]; });
+    const f = enc.next(gone, 3, 100);
+    expect(f.key).toBeFalsy();
+    expect(f.snap.cars[1][DELETED]).toEqual([...OPTIONAL]);
+    got = dec.decode(wire(3, f))!;
+    for (const k of OPTIONAL) expect(k in got.cars[1]).toBe(false);
+    applySnapshot(m, got);
+    expect(fields(m)).toEqual({ stallT: 0, stallHold: false, stallSvc: false, away: false });
+    expect(fields(m)).toEqual(fields(mirrorRace(got)));   // the same as a mirror that never saw the values
+    expect(m.cars.every((c) => !(c.stallT > 0))).toBe(true);
+    // sent again: picked up
+    got = step(3, variant(3, (c) => { c.stallT = 0.75; c.stallHold = false; c.stallSvc = true; c.away = true; }));
+    applySnapshot(m, got);
+    expect(fields(m)).toEqual({ stallT: 0.75, stallHold: false, stallSvc: true, away: true });
+    expect(fields(m)).toEqual(fields(mirrorRace(got)));
+  });
+
   it('the #74 away flag is optional and additive: frames without it (an older server) decode and mirror as not held; it round-trips and is deleted when it ends', () => {
     const enc = new SnapEncoder('r'), dec = new SnapDecoder();
     const base = frames[600].snap;

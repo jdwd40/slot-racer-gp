@@ -5,6 +5,7 @@
 import { Race, type Car, type CarSnapshot, type DriverId, type RaceEvent, type RaceSnapshot, type WireEvent } from '../race';
 import { trackFor } from '../track';
 import { STEP, blendPose, type Pose } from '../timing';
+import { CAR_DYNAMIC } from './snapwire';
 
 /** A mirror race for a snapshot's roster and circuit. AI personas only matter to the server, so none are given. */
 export function mirrorRace(snap: RaceSnapshot): Race {
@@ -14,14 +15,30 @@ export function mirrorRace(snap: RaceSnapshot): Race {
   return r;
 }
 
-/** Snapshot fields copied verbatim onto the mirror's cars. */
-const CAR_FIELDS = [
-  'status', 'dqReason', 'dnfReason', 'finished', 'mode', 'u', 'v', 'd', 'laneSide', 'x', 'y', 'z', 'h', 'roll', 'pitch', 'yawOff', 'wobble',
-  'throttle', 'brake', 'fuel', 'crossed', 'lapsDone', 'lastLap', 'bestLap', 'lapStartT', 'lapValid', 'finishTime', 'pitStops',
-  'offences', 'sgOwed', 'sgServed', 'sgServing', 'timePen', 'svcBreach', 'laneReq', 'pitReq', 'fuelReq', 'fuelDue', 'sgDue', 'sgDeferred',
-  'routeHold', 'laneOverride', 'revOn', 'sgPhase', 'sgCtl', 'pitWait', 'exitReq', 'serviceT', 'penalty', 'towT', 'recoverT', 'bumpT',
-  'hiU', 'squeezeHold', 'pitHold', 'towSvc', 'pitFuel', 'serviced', 'upPrev', 'stallT', 'stallHold', 'stallSvc', 'away',
-] as const satisfies readonly (keyof CarSnapshot & keyof Car)[];
+/** Wire fields the mirror maps itself rather than copying: `bayInUse` sets the car's `bay`; `change` and `off` are copied as new objects. */
+const MAPPED = new Set(['bayInUse', 'change', 'off'] as const);
+type DirectKey = Exclude<keyof typeof CAR_DYNAMIC, typeof MAPPED extends Set<infer K> ? K : never>;
+
+/**
+ * Snapshot fields copied verbatim onto the mirror's cars: every dynamic wire field (snapwire's CAR_DYNAMIC, the one list a new
+ * field is added to) but the mapped ones. `satisfies` makes a dynamic field the mirror's Car does not have a type error here.
+ */
+const CAR_FIELDS = (Object.keys(CAR_DYNAMIC) as (keyof typeof CAR_DYNAMIC)[]).filter(
+  (k): k is DirectKey => !(MAPPED as Set<string>).has(k),
+) satisfies readonly (keyof Car)[];
+
+/** Snapshot keys that may be absent (`{}` has them), so a snapshot can leave them out. */
+type OptionalKey<T> = { [K in keyof T]-?: object extends Pick<T, K> ? K : never }[keyof T];
+
+/**
+ * What the mirror reads for an optional field a snapshot leaves out: the value a new race starts with. An older server sends
+ * no #69 stall fields, `away` (#74) is sent only while true, and a delta that names one under DELETED has the decoder drop it,
+ * so absence must clear the value applied before (a fresh mirror and a long-running one agree). Every optional CarSnapshot
+ * field needs an entry here (a type error otherwise).
+ */
+const ABSENT = { stallT: 0, stallHold: false, stallSvc: false, away: false } as const satisfies {
+  readonly [K in OptionalKey<CarSnapshot>]-?: NonNullable<CarSnapshot[K]>;
+};
 
 /**
  * Overwrite the mirror with authoritative state. Nothing is re-derived or replayed: laps, pit visits, penalties and results are
@@ -35,12 +52,11 @@ export function applySnapshot(r: Race, s: RaceSnapshot): void {
     const dst = c as unknown as Record<string, unknown>;
     const src = cs as unknown as Record<string, unknown>;
     for (const k of CAR_FIELDS) if (k in src) dst[k] = src[k];
+    for (const [k, v] of Object.entries(ABSENT)) if (!(k in src)) dst[k] = v;
     c.change = cs.change ? { ...cs.change } : null;
     c.off = cs.off ? { ...cs.off } : null;
     c.bay = cs.bayInUse;
     if (!('hiU' in src)) c.hiU = Math.max(c.hiU, c.u);
-    // `away` (#74) is sent only while true: its absence (an older server, or the hold over) means not held
-    if (!('away' in src)) c.away = false;
   }
   const idx = (id: DriverId | null): number => (id === null ? -1 : r.car(id)?.idx ?? -1);
   r.pit.box = idx(s.pit.box); r.pit.exit = idx(s.pit.exit);
