@@ -2658,6 +2658,8 @@ async function memory(run, c) {
  * room heading and Copy code at phone sizes. With a socketless lobby from `__game.qaNetLobby` (the default build has online
  * off, and this is layout, not networking), each size forces Reconnecting and checks the seat wording and that the banner's
  * rectangle meets neither the heading, #l-code nor #l-copy; back to Connected, the banner and the room it made are gone.
+ * The banner is laid out above the card with CSS (#121): a message wrapped to several lines keeps the heading and Copy code in
+ * view while a short screen's card scrolls, and off the menu cards it still floats below the HUD with the car wording.
  */
 async function netbanner(run, c) {
   const part = (id, num, name, extra = {}) => ({ id, name, slot: num - 1, num, bay: num - 1, livery: ['yellow', 'orange', 'white', 'purple'][num - 1], color: [0xffd23f, 0xfb923c, 0xf4f4f5, 0xa855f7][num - 1], liveryRequested: null, ready: false, connected: true, host: num === 1, guest: true, joinOrder: num, left: false, ...extra });
@@ -2690,10 +2692,35 @@ async function netbanner(run, c) {
     // the card scrolls inside itself on a short screen: it starting below the banner keeps every part of it clear
     c.ok(`${name}: the card starts below the banner`, rec.onCard && rec.card.y >= rec.banner.y + rec.banner.h, { banner: rec.banner, card: rec.card });
     await page.screenshot({ path: path.join(run.out, `netbanner-${name}.png`) });
+    // a message that wraps to several lines (#121): the banner is in the layout, so the card gives up exactly the banner's
+    // height; the room heading and Copy code stay in view, and on a short screen the card scrolls inside what is left
+    await read(page, (msg) => { document.getElementById('net-banner').textContent = msg; }, `${want} ${want} ${want}`);
+    await frames(page, 3);
+    const wrap = await read(page, () => {
+      const r = (e) => { const b = e.getBoundingClientRect(); return { x: b.x, y: b.y, w: b.width, h: b.height }; };
+      const card = document.querySelector('.lobby'), b = document.getElementById('net-banner');
+      const visible = (sel) => { const e = document.querySelector(sel); if (!e) return false; const a = e.getBoundingClientRect(), k = card.getBoundingClientRect(); return a.top >= k.top - 0.5 && a.bottom <= k.bottom + 0.5 && a.top >= 0 && a.bottom <= innerHeight + 0.5 && a.left >= 0 && a.right <= innerWidth + 0.5; };
+      return { banner: r(b), card: r(card), heading: r(document.querySelector('.lobby h2')), copy: r(document.getElementById('l-copy')), headingVisible: visible('.lobby h2'), copyVisible: visible('#l-copy'), scrolls: card.scrollHeight > card.clientHeight + 1, vh: innerHeight };
+    });
+    const short = vp.height < 500;
+    c.ok(`${name}: a wrapped banner pushes the card below its own height, clear of the heading and Copy code`, wrap.banner.h > rec.banner.h && wrap.card.y >= wrap.banner.y + wrap.banner.h && !meets(wrap.banner, wrap.heading) && !meets(wrap.banner, wrap.copy), wrap);
+    c.ok(`${name}: with the wrapped banner the room heading and Copy code are on screen inside the card${short ? ', which scrolls' : ''}`, wrap.headingVisible && wrap.copyVisible && (!short || wrap.scrolls), wrap);
     await read(page, (r) => window.__game.qaNetLobby(r, 'p2', 'connected'), room);
     await frames(page, 3);
     const after = await read(page, measure);
     c.ok(`${name}: back to connected, the banner and the room made for it are gone`, !after.shown && !after.onCard && Math.abs(after.card.y - before.card.y) < 1, { before: before.card, after: after.card });
+    // off the menu cards (a race, the pending results card) the banner floats below the HUD with the car wording and takes no room
+    await read(page, (r) => { window.__game.qaNetLobby(r, 'p2', 'reconnecting'); window.__game.showTitle(); }, room);
+    await frames(page, 3);
+    const float = await read(page, () => {
+      const b = document.getElementById('net-banner'), cs = getComputedStyle(b), probe = document.createElement('div');
+      probe.style.cssText = 'position:absolute;top:calc(var(--eT, 8px) + 56px)';
+      document.getElementById('app').appendChild(probe);
+      const hudTop = probe.getBoundingClientRect().top; probe.remove();
+      return { screen: window.__game.screen, shown: cs.display !== 'none', position: cs.position, top: b.getBoundingClientRect().top, hudTop, text: b.textContent, onCard: document.getElementById('app').classList.contains('banner-card'), overlayTop: document.querySelector('.overlay').getBoundingClientRect().top };
+    });
+    const carWant = STRINGS['net.reconnecting'].replace('{n}', '20');
+    c.ok(`${name}: off a menu card the banner floats below the HUD with the car wording, and the overlay is not pushed down`, float.screen === 'title' && float.shown && !float.onCard && float.position === 'absolute' && Math.abs(float.top - float.hudTop) < 1 && float.overlayTop === 0 && float.text === carWant, float);
   }
   return s;
 }
