@@ -2692,6 +2692,35 @@ async function netbanner(run, c) {
     // the card scrolls inside itself on a short screen: it starting below the banner keeps every part of it clear
     c.ok(`${name}: the card starts below the banner`, rec.onCard && rec.card.y >= rec.banner.y + rec.banner.h, { banner: rec.banner, card: rec.card });
     await page.screenshot({ path: path.join(run.out, `netbanner-${name}.png`) });
+    // the strip beside and above the banner belongs to the menu (#126): a click or wheel there must not reach the track
+    // behind the lobby, and the dimmed backdrop stacks above the HUD's top-right buttons, as the full-screen overlay did
+    const strip = await read(page, () => {
+      const b = document.getElementById('net-banner').getBoundingClientRect(), mid = b.top + b.height / 2;
+      const pts = [[3, 3], [3, mid], [innerWidth - 3, mid], [b.left - 4, mid], [b.right + 4, mid]].filter(([x, y]) => x >= 0 && x < innerWidth && y >= 0);
+      const hits = pts.map(([x, y]) => ({ x: Math.round(x), y: Math.round(y), tag: document.elementFromPoint(x, y)?.tagName ?? null, layer: !!document.elementFromPoint(x, y)?.closest('#menu-layer') }));
+      // the HUD is hidden on the menu cards; shown for one synchronous read, its buttons must still be under the menu layer
+      const hud = document.getElementById('hud'), was = hud.style.display;
+      hud.style.display = '';
+      const btn = [...document.querySelectorAll('.tr .btn')].find((e) => e.getClientRects().length > 0);
+      const r = btn.getBoundingClientRect(), top = document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2);
+      const hudTop = { id: btn.id, hit: top?.id || top?.tagName || null, underMenu: !!top?.closest('#menu-layer') };
+      hud.style.display = was;
+      return { hits, hudTop };
+    });
+    c.ok(`${name}: a point in the strip beside or above the banner is the menu layer, not the track canvas`, strip.hits.length >= 3 && strip.hits.every((h) => h.tag !== 'CANVAS' && h.layer), strip.hits);
+    c.ok(`${name}: the dimmed backdrop of a menu card stacks above the HUD's top-right buttons`, strip.hudTop.underMenu, strip.hudTop);
+    await read(page, () => {
+      window.__wheel = { canvas: 0, seen: 0 };
+      document.querySelector('#app > canvas').addEventListener('wheel', () => window.__wheel.canvas++);
+      window.addEventListener('wheel', () => window.__wheel.seen++, { capture: true });
+    });
+    const span = strip.hits[1];
+    await page.mouse.move(span.x, span.y);
+    await page.mouse.wheel(0, 240);
+    await page.mouse.wheel(0, -240);
+    await frames(page, 2);
+    const wheel = await read(page, () => window.__wheel);
+    c.ok(`${name}: a mouse wheel beside the banner does not reach the track camera behind the lobby`, wheel.seen > 0 && wheel.canvas === 0, wheel);
     // a message that wraps to several lines (#121): the banner is in the layout, so the card gives up exactly the banner's
     // height; the room heading and Copy code stay in view, and on a short screen the card scrolls inside what is left
     await read(page, (msg) => { document.getElementById('net-banner').textContent = msg; }, `${want} ${want} ${want}`);
@@ -2721,6 +2750,17 @@ async function netbanner(run, c) {
     });
     const carWant = STRINGS['net.reconnecting'].replace('{n}', '20');
     c.ok(`${name}: off a menu card the banner floats below the HUD with the car wording, and the overlay is not pushed down`, float.screen === 'title' && float.shown && !float.onCard && float.position === 'absolute' && Math.abs(float.top - float.hudTop) < 1 && float.overlayTop === 0 && float.text === carWant, float);
+    // in a race no menu layer stands over the track, the HUD or the top-right buttons, the banner still showing (#126)
+    await read(page, () => window.__game.startSession('race'));
+    await waitFor(page, () => window.__game.screen === 'race');
+    await frames(page, 3);
+    const race = await read(page, () => {
+      const b = document.getElementById('net-banner').getBoundingClientRect(), at = (x, y) => document.elementFromPoint(x, y);
+      const btns = [...document.querySelectorAll('.tr .btn')].filter((e) => e.getClientRects().length > 0).map((e) => { const r = e.getBoundingClientRect(), top = at(r.x + r.width / 2, r.y + r.height / 2); return { id: e.id, ok: top === e || e.contains(top) }; });
+      const tl = document.querySelector('.tl').getBoundingClientRect();
+      return { shown: getComputedStyle(document.getElementById('net-banner')).display !== 'none', onCard: document.getElementById('app').classList.contains('banner-card'), centre: at(innerWidth / 2, innerHeight / 2)?.tagName, strip: at(3, b.top + b.height / 2)?.tagName, beside: at(b.right + 4, b.top + b.height / 2)?.tagName, hudPanel: !at(tl.x + tl.width / 2, tl.y + tl.height / 2)?.closest('#menu-layer'), btns };
+    });
+    c.ok(`${name}: racing with the banner shown, the track, the HUD and the top-right buttons are on top where they are`, race.shown && !race.onCard && race.centre === 'CANVAS' && race.strip === 'CANVAS' && race.beside === 'CANVAS' && race.hudPanel && race.btns.length > 0 && race.btns.every((x) => x.ok), race);
   }
   return s;
 }
