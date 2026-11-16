@@ -209,6 +209,22 @@ small { color: #9ca3af; font-weight: 500; }
 @media (min-width: 701px) and (max-width: 1100px) and (min-height: 501px) {
   .touch .topbar { position: absolute; top: var(--eT); left: var(--eL); display: flex; align-items: flex-start; gap: 6px; }
   .touch .topbar .tl, .touch .topbar .tc { position: static; transform: none; }
+  /* the centred messages reach the standings column here too, so they drop below it (and its round label) and the start lights.
+     No lower: in a window only 501 px tall the race instructions above the meters start about 240 px down (#128) */
+  .touch .toast { top: calc(var(--eT) + 170px); }
+}
+/* desktop windows up to 1320 px wide: a long message (about 770 px on one line) is wider than the space the standings column,
+   with penalty flags on its rows, leaves either side of the window's centre, so it drops below the standings (and the round
+   label in a championship) and the start lights, and wraps (#128) */
+@media (min-width: 701px) and (max-width: 1320px) and (min-height: 501px) {
+  body:not(.touch) .toast { top: calc(var(--eT) + 178px); width: max-content; max-width: calc(100% - 24px); white-space: normal; text-align: center; }
+}
+/* up to 840 px wide the full-size start lights (260 px) reach a standings column with penalty flags on its rows (up to about
+   262 px from the left), and lower down they would meet the meters and minimap once the window is short. So they keep their
+   place at the top and use smaller lamps: 148 px wide, they clear the standings from 701 px, with touch or without (#128) */
+@media (min-width: 701px) and (max-width: 840px) and (min-height: 501px) {
+  .lights { gap: 6px; padding: 8px 12px; }
+  .lights i { width: 20px; height: 20px; }
 }
 @media (max-width: 900px) { .tc > div:not(:first-child) { display: none; } }
 
@@ -234,7 +250,8 @@ small { color: #9ca3af; font-weight: 500; }
   .br { top: calc(var(--eT) + 56px); bottom: auto; }
   .toast, .touch .toast { top: calc(var(--eT) + 52px); width: max-content; max-width: 56%; padding: 7px 12px; font-size: 13px; white-space: normal; text-align: center; }
   .status { width: max-content; max-width: calc(100% - 24px); font-size: 13px; white-space: normal; text-align: center; }
-  .lights { top: calc(var(--eT) + 52px); gap: 10px; padding: 8px 12px; }
+  /* the start lights sit below the message slot, which holds up to three lines, rather than on top of it (#128) */
+  .lights { top: calc(var(--eT) + 120px); gap: 10px; padding: 8px 12px; }
   .lights i { width: 28px; height: 28px; }
   .go { width: max-content; max-width: 92%; font-size: clamp(44px, 13vw, 96px); line-height: 1; text-align: center; }
 
@@ -275,6 +292,10 @@ small { color: #9ca3af; font-weight: 500; }
    they drop below the standings and the minimap as on a phone (#126) */
 @media (orientation: portrait) and (min-width: 601px) and (max-width: 1100px) {
   .touch .toast { top: calc(var(--eT) + 64px + var(--mini-h)); }
+}
+/* a compact portrait window without touch has its minimap at the top right too, where the centred messages reach it (#128) */
+@media (orientation: portrait) and (min-width: 601px) and (max-width: 700px) {
+  .toast { top: calc(var(--eT) + 64px + var(--mini-h)); }
 }
 
 /* ---- online: menu, lobby, results and the connection banner (docs/online-client.md) */
