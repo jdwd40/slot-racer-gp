@@ -1568,8 +1568,9 @@ const menuOk = (m) => m.pageX <= 0 && m.cardX <= 0 && m.inside && m.blocked.leng
 
 /** Viewports for the race messages against the start lights, standings, times, minimap and HUD buttons (#128): phone landscape
  *  sizes, both sides of the 700 / 701 compact boundary, the 701-1320 desktop windows where a long message reaches the
- *  standings, 840 / 841 where the start lights clear it, and wide desktop. Each runs with touch and with a mouse. */
-const MSG_VIEWS = [[915, 412], [844, 390], [740, 360], [667, 375], [640, 360], [650, 900], [700, 800], [701, 800], [768, 1024], [800, 600], [840, 600], [841, 600], [960, 540], [1024, 768], [1100, 800], [1101, 800], [1180, 820], [1181, 820], [1280, 800], [1320, 800], [1321, 800], [1440, 900]];
+ *  standings, 840 / 841 where the start lights clear it, wide desktop, and windows only 501 px tall, where the meters, race
+ *  instructions and minimap come up from the bottom. Each runs with touch and with a mouse. */
+const MSG_VIEWS = [[915, 412], [844, 390], [740, 360], [667, 375], [640, 360], [650, 900], [700, 800], [701, 800], [768, 1024], [800, 600], [840, 600], [841, 600], [960, 540], [1024, 768], [1100, 800], [1101, 800], [1180, 820], [1181, 820], [1280, 800], [1320, 800], [1321, 800], [1440, 900], [701, 501], [800, 501], [840, 501], [1100, 501], [1320, 501]];
 
 /** Geometry of the centred race messages, the start lights and what they could land on, with the lights' real countdown state. */
 function measureMessages() {
@@ -1577,13 +1578,16 @@ function measureMessages() {
   const rectOf = (e) => { const r = e.getBoundingClientRect(); return { x: Math.round(r.x), y: Math.round(r.y), r: Math.round(r.right), b: Math.round(r.bottom) }; };
   const hit = (a, b) => a.x < b.r - 0.5 && b.x < a.r - 0.5 && a.y < b.b - 0.5 && b.y < a.b - 0.5;
   const parts = {};
-  for (const [k, q] of Object.entries({ toast: '#h-toast', lights: '#h-lights', top: '.tl', timer: '.tc', mini: '#h-mini' })) { const e = document.querySelector(q); if (shown(e)) parts[k] = rectOf(e); }
-  for (const e of document.querySelectorAll('.tr .btn')) if (shown(e)) parts[e.id] = rectOf(e);
+  for (const [k, q] of Object.entries({ toast: '#h-toast', lights: '#h-lights', top: '.tl', timer: '.tc', mini: '#h-mini', meters: '.bl' })) { const e = document.querySelector(q); if (shown(e)) parts[k] = rectOf(e); }
+  const st = document.getElementById('h-status');
+  if (shown(st) && st.textContent.trim()) parts.status = rectOf(st);
+  for (const e of document.querySelectorAll('.tr .btn, .tbtn')) if (shown(e)) parts[e.id] = rectOf(e);
   const keys = Object.keys(parts), pairs = [];
-  // the message and the lights against each other and everything else; the standings against the times, minimap and buttons
+  // the message and the lights against each other and everything else, top and bottom, but the lights not against the race
+  // instructions: no race shows those during the countdown (crowdHud forces them); the standings against the times, minimap and buttons
   if (parts.toast && parts.lights && hit(parts.toast, parts.lights)) pairs.push('toast/lights');
-  for (const a of ['toast', 'lights']) for (const b of keys) if (!['toast', 'lights'].includes(b) && parts[a] && hit(parts[a], parts[b])) pairs.push(`${a}/${b}`);
-  for (const b of keys) if (!['top', 'toast', 'lights'].includes(b) && parts.top && hit(parts.top, parts[b])) pairs.push(`top/${b}`);
+  for (const a of ['toast', 'lights']) for (const b of keys) if (!['toast', 'lights'].includes(b) && !(a === 'lights' && b === 'status') && parts[a] && hit(parts[a], parts[b])) pairs.push(`${a}/${b}`);
+  for (const b of keys) if (!['top', 'toast', 'lights', 'meters', 'status'].includes(b) && parts.top && hit(parts.top, parts[b])) pairs.push(`top/${b}`);
   const L = document.getElementById('h-lights'), T = document.getElementById('h-toast');
   const off = ['toast', 'lights'].filter((k) => !parts[k] || parts[k].x < 0 || parts[k].y < 0 || parts[k].r > innerWidth + 0.5 || parts[k].b > innerHeight + 0.5);
   return { pairs, off, toast: parts.toast, lights: parts.lights, top: parts.top, round: document.getElementById('h-round').textContent, lightsOn: getComputedStyle(L).opacity === '1' && L.querySelectorAll('i.on').length > 0, toastOn: T.classList.contains('show') && T.textContent.length > 60, toastPx: parseFloat(getComputedStyle(T).fontSize), phase: window.__game.race.phase, touch: document.body.classList.contains('touch') };
@@ -1611,7 +1615,7 @@ async function hudMessages(run, c, champ) {
       await frames(page, 3);
       const m = await read(page, measureMessages);
       c.evidence[`messages-${mode}`].push({ size: `${w}x${h}`, pairs: m.pairs, toast: m.toast, lights: m.lights, top: m.top });
-      c.ok(`Race messages at ${w}x${h} (${mode}): the lit start lights and a long message are on screen and clear of each other, the standings, times, minimap and buttons`, m.touch === touch && !!m.round && m.phase === 'countdown' && m.lightsOn && m.toastOn && m.toastPx >= 13 && m.off.length === 0 && m.pairs.length === 0, { overlaps: m.pairs, off: m.off, round: m.round, toast: m.toast, lights: m.lights, top: m.top, lightsOn: m.lightsOn, toastPx: m.toastPx });
+      c.ok(`Race messages at ${w}x${h} (${mode}): the lit start lights and a long message are on screen and clear of each other, the standings, times, meters, race instructions, minimap and buttons`, m.touch === touch && !!m.round && m.phase === 'countdown' && m.lightsOn && m.toastOn && m.toastPx >= 13 && m.off.length === 0 && m.pairs.length === 0, { overlaps: m.pairs, off: m.off, round: m.round, toast: m.toast, lights: m.lights, top: m.top, lightsOn: m.lightsOn, toastPx: m.toastPx });
       if ([915, 1100, 1180].includes(w)) await page.screenshot({ path: path.join(run.out, `messages-${mode}-${w}x${h}.png`) });
     }
     c.ok(`Race messages (${mode}): no page or console errors`, s.errors.length === 0, s.errors.slice(0, 5));
