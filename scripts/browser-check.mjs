@@ -1566,6 +1566,59 @@ function measureMenu() {
 
 const menuOk = (m) => m.pageX <= 0 && m.cardX <= 0 && m.inside && m.blocked.length === 0 && m.small.length === 0;
 
+/** Viewports for the race messages against the start lights, standings, times, minimap and HUD buttons (#128): phone landscape
+ *  sizes, both sides of the 700 / 701 compact boundary, the 701-1320 desktop windows where a long message reaches the
+ *  standings, 840 / 841 where the start lights clear it, and wide desktop. Each runs with touch and with a mouse. */
+const MSG_VIEWS = [[915, 412], [844, 390], [740, 360], [667, 375], [640, 360], [650, 900], [700, 800], [701, 800], [768, 1024], [800, 600], [840, 600], [841, 600], [960, 540], [1024, 768], [1100, 800], [1101, 800], [1180, 820], [1181, 820], [1280, 800], [1320, 800], [1321, 800], [1440, 900]];
+
+/** Geometry of the centred race messages, the start lights and what they could land on, with the lights' real countdown state. */
+function measureMessages() {
+  const shown = (e) => e && e.getClientRects().length > 0 && getComputedStyle(e).visibility !== 'hidden' && getComputedStyle(e).display !== 'none';
+  const rectOf = (e) => { const r = e.getBoundingClientRect(); return { x: Math.round(r.x), y: Math.round(r.y), r: Math.round(r.right), b: Math.round(r.bottom) }; };
+  const hit = (a, b) => a.x < b.r - 0.5 && b.x < a.r - 0.5 && a.y < b.b - 0.5 && b.y < a.b - 0.5;
+  const parts = {};
+  for (const [k, q] of Object.entries({ toast: '#h-toast', lights: '#h-lights', top: '.tl', timer: '.tc', mini: '#h-mini' })) { const e = document.querySelector(q); if (shown(e)) parts[k] = rectOf(e); }
+  for (const e of document.querySelectorAll('.tr .btn')) if (shown(e)) parts[e.id] = rectOf(e);
+  const keys = Object.keys(parts), pairs = [];
+  // the message and the lights against each other and everything else; the standings against the times, minimap and buttons
+  if (parts.toast && parts.lights && hit(parts.toast, parts.lights)) pairs.push('toast/lights');
+  for (const a of ['toast', 'lights']) for (const b of keys) if (!['toast', 'lights'].includes(b) && parts[a] && hit(parts[a], parts[b])) pairs.push(`${a}/${b}`);
+  for (const b of keys) if (!['top', 'toast', 'lights'].includes(b) && parts.top && hit(parts.top, parts[b])) pairs.push(`top/${b}`);
+  const L = document.getElementById('h-lights'), T = document.getElementById('h-toast');
+  const off = ['toast', 'lights'].filter((k) => !parts[k] || parts[k].x < 0 || parts[k].y < 0 || parts[k].r > innerWidth + 0.5 || parts[k].b > innerHeight + 0.5);
+  return { pairs, off, toast: parts.toast, lights: parts.lights, top: parts.top, round: document.getElementById('h-round').textContent, lightsOn: getComputedStyle(L).opacity === '1' && L.querySelectorAll('i.on').length > 0, toastOn: T.classList.contains('show') && T.textContent.length > 60, toastPx: parseFloat(getComputedStyle(T).fontSize), phase: window.__game.race.phase, touch: document.body.classList.contains('touch') };
+}
+
+/** Race messages and start lights with the HUD crowded, touch and mouse, at every MSG_VIEWS size (#128). A championship round
+ *  with penalty flags on every row, so the standings column is at its tallest (round label) and widest. */
+async function hudMessages(run, c, champ) {
+  for (const touch of [true, false]) {
+    const s = await open(run, { viewport: { width: 1024, height: 768 }, device: touch ? PHONE : {}, fixtures: { 'srgp.champ': champ } });
+    const { page } = s;
+    if (touch) await page.locator('#o-champ-cont').tap(); else await page.click('#o-champ-cont');
+    await waitFor(page, () => window.__game.screen === 'race' && window.__game.mode === 'champ');
+    // hold the start: the lights come on through the HUD's own countdown and stay on while every size is measured
+    await read(page, () => { window.__game.race.goT = 1e9; });
+    await waitFor(page, () => window.__game.race.lights >= 3);
+    const mode = touch ? 'touch' : 'mouse';
+    c.evidence[`messages-${mode}`] = [];
+    for (const [w, h] of MSG_VIEWS) {
+      await page.setViewportSize({ width: w, height: h });
+      await frames(page, 3);
+      await crowdHud(page);
+      // the widest standings: every row carries both warning flags, a stop-and-go and a time penalty
+      await read(page, () => { for (const x of window.__game.race.cars) Object.assign(x, { offences: 2, sgOwed: 5, timePen: 10 }); });
+      await frames(page, 3);
+      const m = await read(page, measureMessages);
+      c.evidence[`messages-${mode}`].push({ size: `${w}x${h}`, pairs: m.pairs, toast: m.toast, lights: m.lights, top: m.top });
+      c.ok(`Race messages at ${w}x${h} (${mode}): the lit start lights and a long message are on screen and clear of each other, the standings, times, minimap and buttons`, m.touch === touch && !!m.round && m.phase === 'countdown' && m.lightsOn && m.toastOn && m.toastPx >= 13 && m.off.length === 0 && m.pairs.length === 0, { overlaps: m.pairs, off: m.off, round: m.round, toast: m.toast, lights: m.lights, top: m.top, lightsOn: m.lightsOn, toastPx: m.toastPx });
+      if ([915, 1100, 1180].includes(w)) await page.screenshot({ path: path.join(run.out, `messages-${mode}-${w}x${h}.png`) });
+    }
+    c.ok(`Race messages (${mode}): no page or console errors`, s.errors.length === 0, s.errors.slice(0, 5));
+    await s.context.close();
+  }
+}
+
 /** The supported layouts, by touch alone on Chromium's emulation, and the desktop layout by mouse and keys. See docs/responsive.md. */
 async function responsive(run, c) {
   const shot = (page, name) => page.screenshot({ path: path.join(run.out, `${name}.png`) });
@@ -1605,6 +1658,9 @@ async function responsive(run, c) {
     await d.context.close();
   }
   c.ok('Desktop part: no page or console errors', d.errors.length === 0, d.errors.slice(0, 5));
+
+  // ---- the race messages against the start lights and the standings, touch and mouse (#128)
+  await hudMessages(run, c, champ);
 
   // ---- emulated touch device
   const s = await open(run, { viewport: { width: 360, height: 640 }, dpr: 2, device: PHONE, fixtures: { 'srgp.champ': champ, 'srgp.lb.practice.circuit-1': board, 'srgp.track': TRACK } });
