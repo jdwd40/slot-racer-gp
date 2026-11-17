@@ -1588,9 +1588,47 @@ function measureMessages() {
   if (parts.toast && parts.lights && hit(parts.toast, parts.lights)) pairs.push('toast/lights');
   for (const a of ['toast', 'lights']) for (const b of keys) if (!['toast', 'lights'].includes(b) && !(a === 'lights' && b === 'status') && parts[a] && hit(parts[a], parts[b])) pairs.push(`${a}/${b}`);
   for (const b of keys) if (!['top', 'toast', 'lights', 'meters', 'status'].includes(b) && parts.top && hit(parts.top, parts[b])) pairs.push(`top/${b}`);
+  // the times against the minimap and every HUD button (#130)
+  for (const b of keys) if (!['top', 'timer', 'toast', 'lights', 'meters', 'status'].includes(b) && parts.timer && hit(parts.timer, parts[b])) pairs.push(`timer/${b}`);
   const L = document.getElementById('h-lights'), T = document.getElementById('h-toast');
   const off = ['toast', 'lights'].filter((k) => !parts[k] || parts[k].x < 0 || parts[k].y < 0 || parts[k].r > innerWidth + 0.5 || parts[k].b > innerHeight + 0.5);
   return { pairs, off, toast: parts.toast, lights: parts.lights, top: parts.top, round: document.getElementById('h-round').textContent, lightsOn: getComputedStyle(L).opacity === '1' && L.querySelectorAll('i.on').length > 0, toastOn: T.classList.contains('show') && T.textContent.length > 60, toastPx: parseFloat(getComputedStyle(T).fontSize), phase: window.__game.race.phase, touch: document.body.classList.contains('touch') };
+}
+
+/** Viewports for the racing HUD with a status line showing (#130): the 601-1180 mouse windows where a centred status line met the
+ *  meters and the minimap, both sides of 700 / 701, 840 / 841, 900 / 901 (where the times gain Last and Best), 1100 / 1101 and
+ *  1180 / 1181, windows only 501 px tall, tablet portrait, and wide desktop. Touch runs the same sizes: 701-1100 is where the
+ *  times sit in a row beside the standings, with the buttons at its right end. */
+const STATUS_VIEWS = [[601, 900], [650, 900], [700, 800], [701, 501], [701, 800], [750, 600], [768, 1024], [800, 501], [840, 600], [841, 600], [900, 600], [901, 600], [960, 540], [1000, 700], [1024, 768], [1100, 501], [1100, 800], [1101, 800], [1180, 820], [1181, 820], [1320, 501], [1440, 900]];
+
+/** The longest name another player can have (LIMITS.nameMax, 16), as it would look in the standings */
+const LONG_NAME = 'Maximilian Weber';
+
+/** Geometry of the status line, meters, minimap, standings, times and HUD buttons while racing (#130). */
+function measureStatus(touch) {
+  const shown = (e) => e && e.getClientRects().length > 0 && getComputedStyle(e).visibility !== 'hidden' && getComputedStyle(e).display !== 'none';
+  const rectOf = (e) => { const r = e.getBoundingClientRect(); return { x: Math.round(r.x), y: Math.round(r.y), r: Math.round(r.right), b: Math.round(r.bottom) }; };
+  const hit = (a, b) => a.x < b.r - 0.5 && b.x < a.r - 0.5 && a.y < b.b - 0.5 && b.y < a.b - 0.5;
+  const parts = {};
+  for (const [k, q] of Object.entries({ top: '.tl', timer: '.tc', mini: '#h-mini', meters: '.bl', toast: '#h-toast' })) { const e = document.querySelector(q); if (shown(e)) parts[k] = rectOf(e); }
+  const st = document.getElementById('h-status');
+  const statusOn = shown(st) && !!st.textContent.trim() && getComputedStyle(st).opacity === '1';
+  if (statusOn) parts.status = rectOf(st);
+  const buttons = [];
+  for (const e of document.querySelectorAll('.tr .btn, .tbtn')) if (shown(e)) { parts[e.id] = rectOf(e); buttons.push(e.id); }
+  const keys = Object.keys(parts), pairs = [];
+  // the status line against everything; the times against the minimap and buttons, and with touch the standings (the shared row).
+  // With touch the status line stays in the dock above the meters, and is not checked against the message here: in a window only
+  // 501 px tall with every chip showing, the dock reaches the message at 701 px wide, which is the short layout of #130 item 3
+  for (const b of keys) if (b !== 'status' && !(touch && b === 'toast') && parts.status && hit(parts.status, parts[b])) pairs.push(`status/${b}`);
+  for (const b of [...buttons, 'mini', ...(touch ? ['top'] : [])]) if (parts.timer && parts[b] && hit(parts.timer, parts[b])) pairs.push(`timer/${b}`);
+  for (const b of [...buttons, 'mini']) if (parts.top && parts[b] && hit(parts.top, parts[b])) pairs.push(`top/${b}`);
+  const off = ['status', 'timer', 'top', ...buttons].filter((k) => !parts[k] || parts[k].x < 0 || parts[k].y < 0 || parts[k].r > innerWidth + 0.5 || parts[k].b > innerHeight + 0.5);
+  // every row still shows its flags (where the standings show: compact layouts drop them), and the times their numbers
+  const standOn = shown(document.getElementById('h-stand'));
+  const flags = [...document.querySelectorAll('#h-stand > div')].map((d) => { const r = d.getBoundingClientRect(); return [...d.querySelectorAll('.flag')].every((f) => { const q = f.getBoundingClientRect(); return q.width > 0 && q.right <= r.right + 0.5; }); });
+  const times = [...document.querySelectorAll('.tc .mono')].filter(shown).every((e) => e.scrollWidth <= e.clientWidth + 0.5 && e.getBoundingClientRect().width > 20);
+  return { pairs, off, status: parts.status, statusOn, statusLen: st.textContent.length, statusPx: parseFloat(getComputedStyle(st).fontSize), timer: parts.timer, top: parts.top, flags: !standOn || (flags.length === 4 && flags.every(Boolean)), standOn, times, phase: window.__game.race.phase, touch: document.body.classList.contains('touch') };
 }
 
 /** Race messages and start lights with the HUD crowded, touch and mouse, at every MSG_VIEWS size (#128). A championship round
@@ -1617,6 +1655,36 @@ async function hudMessages(run, c, champ) {
       c.evidence[`messages-${mode}`].push({ size: `${w}x${h}`, pairs: m.pairs, toast: m.toast, lights: m.lights, top: m.top });
       c.ok(`Race messages at ${w}x${h} (${mode}): the lit start lights and a long message are on screen and clear of each other, the standings, times, meters, race instructions, minimap and buttons`, m.touch === touch && !!m.round && m.phase === 'countdown' && m.lightsOn && m.toastOn && m.toastPx >= 13 && m.off.length === 0 && m.pairs.length === 0, { overlaps: m.pairs, off: m.off, round: m.round, toast: m.toast, lights: m.lights, top: m.top, lightsOn: m.lightsOn, toastPx: m.toastPx });
       if ([915, 1100, 1180].includes(w)) await page.screenshot({ path: path.join(run.out, `messages-${mode}-${w}x${h}.png`) });
+    }
+
+    // ---- racing, with the status line showing (#130). It only shows in a race: a penalty, the pits, fuel or a missed deadline.
+    // The race is released, then held still (the stepper stops, the HUD keeps drawing from the race state) so every size reads
+    // the same state. Two states: a stop-and-go owed with the box occupied (the most chips, so the tallest meter panel), and a
+    // fuel stop in the bay with a penalty to serve (the longest status line). Every rival has the longest name a player can have
+    await read(page, () => { window.__game.race.goT = 0; });
+    await waitFor(page, () => window.__game.race.phase === 'racing');
+    await read(page, () => { window.__game.stepper.frame = () => 0; });
+    c.evidence[`status-${mode}`] = [];
+    for (const [w, h] of STATUS_VIEWS) {
+      await page.setViewportSize({ width: w, height: h });
+      await frames(page, 3);
+      const seen = [];
+      for (const state of ['armed', 'service']) {
+        await crowdHud(page);
+        await read(page, ({ state, name }) => {
+          const g = window.__game, r = g.race, p = r.car(g.localId), other = r.cars.find((o) => o !== p);
+          for (const x of r.cars) { Object.assign(x, { offences: 2, sgOwed: 5, timePen: 10 }); if (x !== p) x.name = name; }
+          Object.assign(p, { mode: 'race', penalty: 0, lastLap: 63.4, bestLap: 61.2 });
+          r.pit.box = state === 'armed' ? other.idx : -1;
+          if (state === 'service') Object.assign(p, { mode: 'service', serviceT: 0, penalty: 3, sgOwed: 0 });
+        }, { state, name: LONG_NAME });
+        await frames(page, 3);
+        const m = await read(page, measureStatus, touch);
+        seen.push({ state, ...m });
+        c.evidence[`status-${mode}`].push({ size: `${w}x${h}`, state, pairs: m.pairs, off: m.off, status: m.status, timer: m.timer, top: m.top });
+        if (state === 'service' && [701, 901, 1100].includes(w)) await page.screenshot({ path: path.join(run.out, `status-${mode}-${w}x${h}.png`) });
+      }
+      c.ok(`Racing HUD at ${w}x${h} (${mode}): the status line (stop-and-go owed with the box busy; a fuel stop with a penalty) is on screen, readable (13 px, or the 12 px of the touch phone dock) and clear of the meters, minimap, standings, times, message and buttons; the times are clear of the buttons and minimap, with every flag shown beside long names`, seen.every((m) => m.touch === touch && m.phase === 'racing' && m.statusOn && m.statusPx >= (touch && w <= 700 ? 12 : 13) && m.off.length === 0 && m.pairs.length === 0 && m.flags && m.times) && seen[1].statusLen > 90, seen.map((m) => ({ state: m.state, overlaps: m.pairs, off: m.off, status: m.status, len: m.statusLen, px: m.statusPx, timer: m.timer, top: m.top, flags: m.flags, times: m.times })));
     }
     c.ok(`Race messages (${mode}): no page or console errors`, s.errors.length === 0, s.errors.slice(0, 5));
     await s.context.close();
