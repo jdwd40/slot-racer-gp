@@ -3,7 +3,7 @@
 :root {
   --sat: env(safe-area-inset-top, 0px); --sar: env(safe-area-inset-right, 0px); --sab: env(safe-area-inset-bottom, 0px); --sal: env(safe-area-inset-left, 0px);
   --eT: max(12px, var(--sat)); --eR: max(12px, var(--sar)); --eB: max(12px, var(--sab)); --eL: max(12px, var(--sal));
-  --mini-w: 230px; --mini-h: 200px; --tools-w: 86px;
+  --mini-w: 230px; --mini-h: 200px; --tools-w: 86px; --bl-w: 280px;
 }
 html, body { margin: 0; height: 100%; overflow: hidden; background: #1b1714; font-family: 'Segoe UI', system-ui, -apple-system, Roboto, 'Noto Sans', sans-serif; color: #f4f4f5; user-select: none; }
 #app, canvas { display: block; }
@@ -13,7 +13,7 @@ html, body { margin: 0; height: 100%; overflow: hidden; background: #1b1714; fon
 .mono { font-variant-numeric: tabular-nums; font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace; }
 #hud { position: absolute; inset: 0; pointer-events: none; }
 /* these wrappers only take a box in the layouts that need them */
-.topbar, .dock, .util { display: contents; }
+.hbar, .topbar, .dock, .util { display: contents; }
 .panel { position: absolute; background: rgba(10, 14, 20, 0.66); border: 1px solid rgba(255,255,255,0.08); border-radius: 12px; padding: 8px 12px; backdrop-filter: blur(4px); }
 .lbl { font-size: 10px; letter-spacing: 1.5px; color: #9ca3af; margin-right: 6px; font-weight: 700; }
 .tl { top: var(--eT); left: var(--eL); min-width: 150px; }
@@ -31,7 +31,7 @@ html, body { margin: 0; height: 100%; overflow: hidden; background: #1b1714; fon
 .btn.sq { width: 36px; padding: 0; font-size: 16px; }
 .btn.more { display: none; }
 button:focus-visible { outline: 2px solid #fff; outline-offset: 2px; }
-.bl { bottom: var(--eB); left: var(--eL); width: 280px; }
+.bl { bottom: var(--eB); left: var(--eL); width: var(--bl-w); }
 .meter { display: flex; align-items: center; margin: 3px 0; }
 .meter .lbl { width: 76px; }
 .bar { position: relative; flex: 1; height: 12px; background: rgba(255,255,255,0.1); border-radius: 6px; overflow: hidden; }
@@ -207,8 +207,19 @@ small { color: #9ca3af; font-weight: 500; }
 /* the view and zoom row is wide in touch mode, so the times sit beside the standings instead of centred. They follow the
    standings in a row rather than at a fixed offset: the standings panel grows with the penalty and fuel flags on its rows (#126) */
 @media (min-width: 701px) and (max-width: 1100px) and (min-height: 501px) {
-  .touch .topbar { position: absolute; top: var(--eT); left: var(--eL); display: flex; align-items: flex-start; gap: 6px; }
+  /* the standings, times and buttons share one row with the buttons at its right end, so the times can never reach View (#130).
+     The times keep their width; on a long name the standings column gives way by shortening the name, never the flags */
+  .touch .hbar { position: absolute; top: var(--eT); left: var(--eL); right: var(--eR); display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; }
+  .touch .topbar { display: flex; flex: 0 1 auto; min-width: 0; align-items: flex-start; gap: 6px; }
   .touch .topbar .tl, .touch .topbar .tc { position: static; transform: none; }
+  .touch .topbar .tl { flex: 0 1 auto; }
+  /* each time's label sits above its figure, so the times take less of the row and the names more */
+  .touch .topbar .tc { flex: none; }
+  .touch .tc > div { display: flex; flex-direction: column; }
+  .touch .topbar .tc .lbl { margin-right: 0; }
+  .touch .hbar .tr { position: static; flex: none; }
+  .touch .stand .nm { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+  .touch .stand .flag, .touch .stand b, .touch .stand i { flex: none; }
   /* the centred messages reach the standings column here too, so they drop below it (and its round label) and the start lights.
      No lower: in a window only 501 px tall the race instructions above the meters start about 240 px down (#128) */
   .touch .toast { top: calc(var(--eT) + 170px); }
@@ -296,6 +307,17 @@ small { color: #9ca3af; font-weight: 500; }
 /* a compact portrait window without touch has its minimap at the top right too, where the centred messages reach it (#128) */
 @media (orientation: portrait) and (min-width: 601px) and (max-width: 700px) {
   .toast { top: calc(var(--eT) + 64px + var(--mini-h)); }
+}
+
+/* without touch, the status line has its own slot at the bottom, between the meter panel and the minimap, and wraps to fit it.
+   Centred above them at a fixed height it reached both: the meter panel grows with its chips and the minimap is 200 px tall (#130) */
+@media (min-width: 601px) {
+  body:not(.touch) .status { left: calc(var(--eL) + var(--bl-w) + 12px); right: calc(var(--eR) + var(--mini-w) + 12px); bottom: var(--eB); transform: none; width: fit-content; max-width: none; margin: 0 auto; white-space: normal; text-align: center; }
+}
+@media (min-width: 601px) and (max-width: 1100px) { body:not(.touch) .status { font-size: 13px; padding: 7px 12px; } }
+/* compact layouts have the minimap at the top right, so the slot runs to the right edge */
+@media (min-width: 601px) and (max-width: 700px), (min-width: 601px) and (max-height: 500px) {
+  body:not(.touch) .status { right: var(--eR); }
 }
 
 /* ---- online: menu, lobby, results and the connection banner (docs/online-client.md) */

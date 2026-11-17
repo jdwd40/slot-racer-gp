@@ -42,6 +42,7 @@ export class Hud {
     this.root = document.createElement('div');
     this.root.id = 'hud';
     this.root.innerHTML = `
+      <div class="hbar">
       <div class="topbar">
         <div class="panel tl">
           <div class="big"><span class="lbl" data-t="hud.pos"></span><span id="h-pos">1/4</span></div>
@@ -67,6 +68,7 @@ export class Hud {
         </div>
         <button id="b-pause" class="btn sq" title="Esc" aria-label="${t('ctl.pause')}">${PAUSE_ICON}</button>
         <button id="t-pause" class="btn sq touch-only" tabindex="-1" data-tap="pause" aria-label="${t('ctl.pause')}">${PAUSE_ICON}</button>
+      </div>
       </div>
       <div class="dock">
         <div id="h-status" class="status"></div>
@@ -200,7 +202,7 @@ export class Hud {
       this.set('h-bestlbl', t('hud.best'));
       this.el['h-stand'].style.display = '';
     }
-    const stand = order.map((c, i) => `<div class="${c === p ? 'me' : ''}"><b>${i + 1}</b><i style="background:${hex(c.color)}"></i>${escHtml(carLabel(c, p.id))}${flags(c)}${c.mode === 'service' || c.mode === 'bayIn' ? ' ⛽' : ''}${c.status === 'finished' ? ' 🏁' : ''}</div>`).join('');
+    const stand = order.map((c, i) => `<div class="${c === p ? 'me' : ''}"><b>${i + 1}</b><i style="background:${hex(c.color)}"></i><span class="nm">${escHtml(carLabel(c, p.id))}</span>${flags(c)}${c.mode === 'service' || c.mode === 'bayIn' ? ' ⛽' : ''}${c.status === 'finished' ? ' 🏁' : ''}</div>`).join('');
     this.set('h-stand', stand, true);
     if (!practice) {
       const cur = race.phase === 'countdown' ? 0 : p.finished ? p.finishTime : race.raceTime;
