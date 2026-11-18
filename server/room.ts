@@ -13,6 +13,7 @@ import {
 import { SnapEncoder } from '../src/net/snapwire';
 import { CHAMP_TRACKS } from '../src/records';
 import { DEFAULT_LENGTH, LENGTH_SET, isRaceLengthId, knowsLength, raceLength, type RaceLengthId } from '../src/raceLength';
+import { DEFAULT_SETUP, SETUP_IDS, SETUP_SET, carSetup, isSetupId, knowsSetup, type SetupId } from '../src/carSetup';
 import { computeAwards, makeScoring, type Scoring } from './career';
 import type { Config } from './config';
 import type { Logger } from './log';
@@ -56,6 +57,13 @@ interface Participant {
    * which knows Standard only). Kept for the seat, so a resume never has to repeat it.
    */
   lengths: number;
+  /**
+   * #133: this seat's own car setup (an allowlisted id: only the seat's own `setup` message or its create/join ever sets it;
+   * no numbers), kept through rematches and resumes, and frozen into the race's roster at the start
+   */
+  setup: SetupId;
+  /** the car-setup preset list this seat's page can show (`setups` on create/join; 0 for a page older than setups) */
+  setups: number;
 }
 
 export interface ModeRules { maxHumans: number; minHumans: number; joinable: boolean; aiFill: 'setting' | 'always' | 'never'; practice: boolean; }
@@ -116,7 +124,7 @@ export class Room {
   // ---- the current race (state 'race'); everything here is reset on start
   race: Race | null = null;
   raceId: string | null = null;
-  private roster: (RosterEntry & { slot: number; livery: LiveryId; accountId: string | null })[] = [];
+  private roster: (RosterEntry & { slot: number; livery: LiveryId; accountId: string | null; setup: SetupId })[] = [];
   private baseWall = 0;
   private stepsDone = 0;
   private lagSteps = 0;
@@ -181,6 +189,13 @@ export class Room {
 
   // ------------------------------------------------------------------------------------------------ seats
   private active(): Participant[] { return this.parts.filter((p) => !p.left); }
+  /**
+   * #133: whether a setup may be chosen in this room now: every seated page (and `also`, a joiner's) can show it. A page older
+   * than setups knows only Balanced, so while one is seated every car stays Balanced.
+   */
+  private setupAllowed(id: SetupId, also?: number): boolean { return (also === undefined || knowsSetup(also, id)) && this.active().every((p) => knowsSetup(p.setups, id)); }
+  /** The setups a driver may choose here now (PublicRoom.setups) */
+  private allowedSetups(): SetupId[] { return SETUP_IDS.filter((id) => this.setupAllowed(id)); }
   participant(id: string): Participant | undefined { return this.parts.find((p) => p.id === id); }
   get humans(): number { return this.active().length; }
 
@@ -193,7 +208,7 @@ export class Room {
   }
   private takenLiveries(except?: Participant): Set<LiveryId> { return new Set(this.parts.filter((p) => p !== except && !p.left).map((p) => p.livery)); }
 
-  join(peer: Peer, o: { name: string; livery?: LiveryId; accountId: string | null; lengths?: number }, now: number, creator = false): JoinOk | Fail {
+  join(peer: Peer, o: { name: string; livery?: LiveryId; accountId: string | null; lengths?: number; setup?: string; setups?: number }, now: number, creator = false): JoinOk | Fail {
     if (this.state === 'closed') return { ok: false, code: 'not_found' };
     if (!creator && !this.rules.joinable) return { ok: false, code: 'not_found' };
     if (this.state !== 'lobby') return { ok: false, code: 'started', detail: 'the starting roster is locked' };
@@ -201,6 +216,15 @@ export class Room {
     // it is refused (and told to reload) rather than seated. A creator's own page always knows what it asked for
     const lengths = Math.min(LENGTH_SET, o.lengths ?? 0);
     if (!knowsLength(lengths, this.length)) return { ok: false, code: 'bad_settings', detail: `this room races ${raceLength(this.length).laps} laps (${this.length}): reload the page to join` };
+    // #133: only an allowlisted setup id; a page that names none races Balanced. A page that cannot show setups (older than
+    // them) joins only a room where every car is Balanced, and keeps it that way while it is seated (setupLock)
+    if (o.setup !== undefined && !isSetupId(o.setup)) return { ok: false, code: 'bad_settings', detail: 'unknown car setup' };
+    const setups = Math.min(SETUP_SET, o.setups ?? 0);
+    if (this.active().some((p) => !knowsSetup(setups, p.setup))) return { ok: false, code: 'bad_settings', detail: 'drivers here have chosen car setups: reload the page to join' };
+    const want: SetupId = o.setup ?? DEFAULT_SETUP;
+    if (!knowsSetup(setups, want)) return { ok: false, code: 'bad_settings', detail: 'unknown car setup' };
+    // a setup a seated older page could not show is not given: this driver starts Balanced and sees why (PublicRoom.setups)
+    const setup: SetupId = this.setupAllowed(want, setups) ? want : DEFAULT_SETUP;
     if (o.accountId && this.parts.some((p) => p.accountId === o.accountId && !p.left)) return { ok: false, code: 'already_joined', detail: 'resume your existing seat' };
     const used = new Set(this.parts.map((p) => p.slot));
     if (this.humans >= this.rules.maxHumans || used.size >= DRIVERS.length) return { ok: false, code: 'full' };
@@ -213,7 +237,7 @@ export class Room {
       id: `p_${randomBytes(9).toString('base64url')}`, name, accountId: o.accountId, slot, livery,
       liveryRequested: o.livery && o.livery !== livery ? o.livery : null,
       ready: false, joinOrder: this.joins++, tokenHash: hashToken(token), peer, lostAt: null,
-      held: neutral(), ctlSeq: 0, ctlAt: now, actSeq: 0, left: false, inRace: false, lengths,
+      held: neutral(), ctlSeq: 0, ctlAt: now, actSeq: 0, left: false, inRace: false, lengths, setup, setups,
     };
     this.parts.push(p);
     this.ensureHost();
@@ -325,6 +349,17 @@ export class Room {
         if (this.state !== 'lobby') return nack('bad_state');
         p.ready = m.ready; this.touch(now); this.broadcastRoom();
         return null;
+      case 'setup': {
+        // #133: a seat changes only its own setup (the message names no driver), only in the lobby: a race's setups are
+        // frozen with its roster at the start, and a rematch's lobby is where the next choice is made
+        if (this.state !== 'lobby') return nack('bad_state', 'car setups are chosen in the lobby');
+        if (!isSetupId(m.setup)) return nack('bad_settings', 'unknown car setup');
+        if (!knowsSetup(p.setups, m.setup)) return nack('bad_settings', 'reload the page to choose that setup');
+        if (!this.setupAllowed(m.setup)) return nack('bad_settings', 'a driver\'s page is out of date for car setups: they must reload first');
+        if (m.setup !== p.setup) { p.setup = m.setup; p.ready = false; }   // the change clears this driver's own Ready only
+        this.touch(now); this.broadcastRoom();
+        return null;
+      }
       case 'livery': {
         if (this.state !== 'lobby') return nack('bad_state');
         const l = this.pickLivery(m.livery, p.slot, this.takenLiveries(p));
@@ -375,12 +410,14 @@ export class Room {
   private startRace(now: number): void {
     const act = this.active().sort((a, b) => a.slot - b.slot);
     const taken = new Set(act.map((p) => p.livery));
-    this.roster = act.map((p) => ({ id: p.id, control: 'human' as const, slot: p.slot, name: p.name, color: liveryColor(p.livery), livery: p.livery, accountId: p.accountId }));
+    // each seat's own setup (#133) is frozen into the roster here: nothing a client sends during the race can change it
+    this.roster = act.map((p) => ({ id: p.id, control: 'human' as const, slot: p.slot, name: p.name, color: liveryColor(p.livery), livery: p.livery, accountId: p.accountId, setup: p.setup }));
     if (this.settings.aiFill) {
       for (let slot = 0; slot < DRIVERS.length; slot++) {
         if (this.roster.some((e) => e.slot === slot)) continue;
         const livery = this.pickLivery(undefined, slot, taken); taken.add(livery);
-        this.roster.push({ id: `ai_${slot}`, control: 'ai', slot, name: `${AI_NAMES[slot]} (AI)`, color: liveryColor(livery), livery, accountId: null });
+        // the AI field carries an explicit setup: Balanced (AI_SETUP), its personality is the race core's own and separate
+        this.roster.push({ id: `ai_${slot}`, control: 'ai', slot, name: `${AI_NAMES[slot]} (AI)`, color: liveryColor(livery), livery, accountId: null, setup: AI_SETUP });
       }
     }
     const humans = act.length;
@@ -389,7 +426,7 @@ export class Room {
     const len = raceLength(this.length);
     this.race = new Race({
       track: trackById(this.settings.track),
-      roster: this.roster.map(({ id, control, slot, name, color }) => ({ id, control, slot, name, color })),
+      roster: this.roster.map(({ id, control, slot, name, color, setup }) => ({ id, control, slot, name, color, setup })),
       seed, practice: this.rules.practice, runOn: 'live', length: len.id,
       finishWindow: humans > 1 ? len.finishWindowS : len.soloFinishWindowS, timeLimit: len.timeLimitS,
     });
@@ -553,7 +590,8 @@ export class Room {
     const race = this.race;
     const participants: EnvelopeParticipant[] = this.roster.map((e) => {
       const c = race.car(e.id)!;
-      return { id: e.id, control: e.control, slot: e.slot, num: c.num, bay: c.bayHome, name: e.name ?? c.name, livery: e.livery, accountId: e.accountId };
+      // the setup recorded is the car's own in the race (fixed at its start), with its tuning (#133)
+      return { id: e.id, control: e.control, slot: e.slot, num: c.num, bay: c.bayHome, name: e.name ?? c.name, livery: e.livery, accountId: e.accountId, setup: c.setup.id, tuning: c.setup.tuning };
     });
     const env = buildEnvelope({
       raceId: this.raceId!, roomId: this.id, mode: this.mode, championship: this.championship, outcome, abortReason: reason,
@@ -627,14 +665,14 @@ export class Room {
   publicRoom(): PublicRoom {
     const ai: PublicAi[] = [];
     if (this.state === 'race' || this.state === 'results') {
-      for (const e of this.roster) if (e.control === 'ai') ai.push({ id: e.id, name: e.name!, slot: e.slot, num: DRIVERS[e.slot].num, bay: e.slot, livery: e.livery, color: liveryColor(e.livery), ai: true });
+      for (const e of this.roster) if (e.control === 'ai') ai.push({ id: e.id, name: e.name!, slot: e.slot, num: DRIVERS[e.slot].num, bay: e.slot, livery: e.livery, color: liveryColor(e.livery), ai: true, ...setupView(e.setup) });
     } else if (this.settings.aiFill) {
       const taken = this.takenLiveries();
       const used = new Set(this.active().map((p) => p.slot));
       for (let slot = 0; slot < DRIVERS.length; slot++) {
         if (used.has(slot)) continue;
         const livery = this.pickLivery(undefined, slot, taken); taken.add(livery);
-        ai.push({ id: `ai_${slot}`, name: `${AI_NAMES[slot]} (AI)`, slot, num: DRIVERS[slot].num, bay: slot, livery, color: liveryColor(livery), ai: true });
+        ai.push({ id: `ai_${slot}`, name: `${AI_NAMES[slot]} (AI)`, slot, num: DRIVERS[slot].num, bay: slot, livery, color: liveryColor(livery), ai: true, ...setupView(AI_SETUP) });
       }
     }
     return {
@@ -644,8 +682,11 @@ export class Room {
         id: p.id, name: p.name, slot: p.slot, num: DRIVERS[p.slot].num, bay: p.slot, livery: p.livery, color: liveryColor(p.livery),
         liveryRequested: p.liveryRequested, ready: p.ready, connected: !!p.peer, host: p.id === this.hostId, guest: !p.accountId,
         joinOrder: p.joinOrder, left: p.left,
+        // during a race (and on its results) the frozen roster's setup is shown, which is the seat's own then anyway
+        ...setupView(this.roster.find((e) => e.id === p.id)?.setup ?? p.setup),
       })),
       ai, raceId: this.raceId, maxHumans: this.rules.maxHumans, minHumans: this.rules.minHumans, graceS: this.cfg.graceS,
+      setups: this.allowedSetups(),
     };
   }
 
@@ -701,6 +742,9 @@ export class Room {
 }
 
 const DEFAULT_SCORING = makeScoring();
+/** The AI field's setup (#133): explicit in its roster, Balanced, the handling it always had */
+export const AI_SETUP: SetupId = DEFAULT_SETUP;
+const setupView = (id: SetupId): { setup: SetupId; tuning: number } => ({ setup: id, tuning: carSetup(id).tuning });
 export function liveryColor(id: LiveryId): number { return LIVERIES.find((l) => l.id === id)!.color; }
 const iso = (ms: number): string => new Date(ms).toISOString();
 const round3 = (x: number): number => Math.round(x * 1000) / 1000;

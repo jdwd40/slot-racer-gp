@@ -3,11 +3,16 @@ import { PitTraffic, PitWait } from './pit';
 import { PIT_Q } from './pitConst';
 import { outOfTraffic } from './traffic';
 import { raceLength, type RaceLength, type RaceLengthId } from './raceLength';
+import { carSetup, isSetupId, DEFAULT_SETUP, type CarSetup, type SetupId } from './carSetup';
 
 // No lap count lives here: each Race takes its target from an allowlisted preset (src/raceLength.ts, #132), as `race.targetLaps`.
-export const ACC = 30, VMAX = 26, COAST = 9, BRAKE = 30, DRAG = 0.006;
-export const AI_GRIP = 36;   // cornering speeds the AI aims for
-export const GRIP = 52;      // real grip of the slot (well above the AI's target, so cars stick)
+// Drive, top speed, drag and grip are not here either: each car has its own setup preset (src/carSetup.ts, #133, Car.setup).
+// ACC, VMAX, DRAG, GRIP and AI_GRIP are Balanced's values, kept for the rules that are the same for every car (a coasting
+// retired car, the wording of tuning comments) and for tests; no car's dynamics read them. Coasting and braking are shared.
+const BAL = carSetup(DEFAULT_SETUP);
+export const ACC = BAL.acc, VMAX = BAL.vmax, COAST = 9, BRAKE = 30, DRAG = BAL.drag;
+export const AI_GRIP = BAL.aiGrip;   // cornering speeds the Balanced AI aims for
+export const GRIP = BAL.grip;        // real grip of the slot for a Balanced car (well above the AI's target, so cars stick)
 /** Fuel burned per unit of track for a lap of length L. L is required: a default read from the displayed track would let it reach a race. */
 export function fuelRate(L: number): number { return 1 / (L * 7.4); }
 export const REFUEL_RATE = 0.2;           // tank per second
@@ -53,9 +58,17 @@ export type DnfReason = 'window' | 'timeout' | 'runout' | 'retired';
 export type DriverId = string;
 export type Control = 'human' | 'ai';
 /** One race entry. `slot` (0–3) is the grid position, race number and own bay; omitted, the lowest free slot is used. */
-export interface RosterEntry { id: DriverId; control: Control; slot?: number; name?: string; color?: number; persona?: PersonaId; }
+export interface RosterEntry {
+  id: DriverId; control: Control; slot?: number; name?: string; color?: number; persona?: PersonaId;
+  /** the car's setup preset (#133): an allowlisted id only (an unknown one throws). Default Balanced, for humans and AI alike */
+  setup?: SetupId;
+}
 /** Random source in [0, 1). Each race owns one, so seeding one race never couples it to another. */
 export type Rng = () => number;
+/** Throttle that holds speed v against coasting and drag with a car's own drive (#133: per setup, never a global). */
+export function holdThrottle(S: CarSetup, v: number): number {
+  return (COAST + S.drag * v * v) / (S.acc * Math.max(0.05, 1 - v / S.vmax) + COAST);
+}
 /** Small seeded generator (mulberry32) for reproducible races. */
 export function seededRng(seed: number): Rng {
   let a = seed >>> 0;
@@ -294,6 +307,11 @@ export interface Car {
   lowFuelWarned: boolean;
   serviced: boolean;
   persona: Persona;
+  /**
+   * The car's setup preset (#133), fixed for the race: its drive, top speed, drag, grip and the AI's planned cornering all
+   * come from here, never from a global. A frozen preset, shared by every car with that setup; nothing can change it.
+   */
+  readonly setup: CarSetup;
   // rear-end offences: warnings, outstanding stop-and-go, service progress and result-time penalty
   offences: number; sgOwed: number; sgServed: number; sgServing: boolean; timePen: number;
   /** immunity timers: fresh respawn/pit exit/start, recently hit from behind, recently changed lane */
@@ -406,6 +424,11 @@ export function wireEvent(e: RaceEvent): WireEvent {
 /** One driver in an authoritative snapshot: plain values keyed by driver ID, nothing a client could not rebuild a view from. */
 export interface CarSnapshot {
   id: DriverId; slot: number; control: Control; name: string; color: number; num: number; bay: number;
+  /**
+   * #133: the car's setup preset and its tuning, fixed for the race (static fields, sent once per race). A current server
+   * always sends both; an older one sends neither, which the mirror reads as Balanced (all an older server races)
+   */
+  setup?: SetupId; tuning?: number;
   status: CarStatus; dqReason: DqReason | null; dnfReason: DnfReason | null; finished: boolean;
   mode: Mode; u: number; v: number; d: number; laneSide: number; change: { from: number; to: number; s0: number; s1: number } | null;
   x: number; y: number; z: number; h: number; roll: number; pitch: number; yawOff: number; wobble: number; off: OffState | null;
@@ -520,6 +543,7 @@ export function resolveRoster(roster: RosterEntry[]): (RosterEntry & { slot: num
     if (ids.has(e.id)) throw new Error(`roster: duplicate driver id ${e.id}`);
     ids.add(e.id);
     if (e.control !== 'human' && e.control !== 'ai') throw new Error(`roster: bad control for ${e.id}`);
+    if (e.setup !== undefined && !isSetupId(e.setup)) throw new Error(`roster: unknown setup for ${e.id}`);
     if (e.slot !== undefined) {
       if (!Number.isInteger(e.slot) || e.slot < 0 || e.slot >= DRIVERS.length || used.has(e.slot)) throw new Error(`roster: bad slot for ${e.id}`);
       used.add(e.slot);
@@ -531,6 +555,14 @@ export function resolveRoster(roster: RosterEntry[]): (RosterEntry & { slot: num
     used.add(k);
     return { ...e, slot: k };
   });
+}
+
+/**
+ * Key of a planned speed profile in Race.profiles: persona, side and whether it is the lapse ('hot') profile. Balanced keeps
+ * the keys profiles always had (`player:-1`, `aggressive:1:hot`); another setup's are prefixed with its id (#133).
+ */
+export function profKey(setup: SetupId, persona: PersonaId, side: number, hot: boolean): string {
+  return `${setup === DEFAULT_SETUP ? '' : `${setup}~`}${persona}:${side}${hot ? ':hot' : ''}`;
 }
 
 /** The single-player adapter's roster: the solo human in slot 0, AI rivals in the other slots (none in practice). */
@@ -584,9 +616,16 @@ export class Race {
     this.finishWindow = opts.finishWindow ?? (humans > 1 ? this.length.finishWindowS : Infinity);
     this.timeLimit = opts.timeLimit ?? (humans > 1 ? this.length.timeLimitS : Infinity);
     this.runOn = opts.runOn ?? 'sync';
-    for (const P of Object.values(PERSONAS)) for (const side of [-1, 1]) {
-      this.profiles[`${P.id}:${side}`] = this.T.buildProfile(side, AI_GRIP * P.grip, VMAX, P.brake);
-      this.profiles[`${P.id}:${side}:hot`] = this.T.buildProfile(side, AI_GRIP * P.grip * P.lapseGrip, VMAX, P.brake * P.lapseBrake);
+    // planned speed profiles per persona, side and setup (#133): each built from that setup's own top speed and planned grip,
+    // so an AI (or the automatic pit controller's corner limit) never plans a speed its car could not carry. Balanced keeps
+    // the keys it always had; only setups in this roster are built
+    const setups = new Set<SetupId>([DEFAULT_SETUP, ...roster.map((e) => e.setup ?? DEFAULT_SETUP)]);
+    for (const id of setups) {
+      const S = carSetup(id);
+      for (const P of Object.values(PERSONAS)) for (const side of [-1, 1]) {
+        this.profiles[profKey(id, P.id, side, false)] = this.T.buildProfile(side, S.aiGrip * P.grip, S.vmax, P.brake);
+        this.profiles[profKey(id, P.id, side, true)] = this.T.buildProfile(side, S.aiGrip * P.grip * P.lapseGrip, S.vmax, P.brake * P.lapseBrake);
+      }
     }
     this.profiles['-1'] = this.profiles['player:-1']; this.profiles['1'] = this.profiles['player:1'];
     this.goT = this.practice ? 1.6 : 4.0 + this.rnd(0.5, 1.4);
@@ -603,6 +642,7 @@ export class Race {
       // humans drive with the player assistance persona; an AI in slot 0 (normally the solo seat) races as a consistent driver
       const P = PERSONAS[e.persona ?? (human ? 'player' : D.persona === 'player' ? 'consistent' : D.persona)];
       const color = e.color ?? (g.di === 0 && opts.playerColor !== undefined ? opts.playerColor : D.color);
+      const setup = carSetup(e.setup ?? DEFAULT_SETUP);
       const c: Car = {
         id: e.id, idx: g.di, name: e.name ?? D.name, color, human,
         num: D.num, bayHome: g.di,
@@ -616,7 +656,7 @@ export class Race {
         finished: false, finishTime: 0, pitStops: 0,
         squeezeHold: false, yielding: false, waitingClear: false,
         skill: P.skill, lapse: 0, mistakeT: this.rnd(P.mistakeEvery[0], P.mistakeEvery[1]), pitPlan: false, refuelTarget: 1, changeCooldown: 0,
-        lowFuelWarned: false, serviced: false, persona: P,
+        lowFuelWarned: false, serviced: false, persona: P, setup,
         offences: 0, sgOwed: 0, sgServed: 0, sgServing: false, timePen: 0,
         graceT: 0, pushedT: 0, pushedFree: false, cutT: 0,
         threatIdx: -1, reactT: 0, defendOk: false, defendCooldown: 0, defendPending: false, defendSw: -1,
@@ -626,6 +666,8 @@ export class Race {
         sgPhase: null, sgCtl: false, sgCommit: -1, sgVc: 0, sgLeave: false, upPrev: false,
         stallT: 0, stallRun: 0, stallPaused: false, stallHold: false, stallSvc: false, linkAway: false, away: false, awayWaitT: 0,
       };
+      // the setup is the car's for the whole race: not writable, so no rule or client can swap it mid-race
+      Object.defineProperty(c, 'setup', { writable: false, configurable: false, enumerable: true });
       this.cars.push(c);
     }
     this.cars.sort((a, b) => a.idx - b.idx);
@@ -1053,7 +1095,7 @@ export class Race {
         const err = autoV - c.v;
         if (err > 0.3) thrIn = 1;
         else if (err < -0.05) brkIn = 1;
-        else thrIn = (COAST + DRAG * c.v * c.v) / (ACC * Math.max(0.05, 1 - c.v / VMAX) + COAST);
+        else thrIn = holdThrottle(c.setup, c.v);
       } else if (c.human && !c.finished) { brkIn = input.down ? 1 : 0; thrIn = input.up && !input.down ? 1 : 0; }
       // a retired car has no driver: both pedals stay released and it coasts to a stop (COAST + drag, under 3 s from VMAX)
       else if (c.mode !== 'grid' && !c.retire) { const a = this.ai(c, dt); thrIn = a.t; brkIn = a.b; }
@@ -1074,8 +1116,10 @@ export class Race {
       // rolling backwards without reverse drive: Brake or Throttle stop it, releasing coasts it to rest; never a sign flip in one step
       c.v = Math.min(0, v0 + (thrIn > 0 || brkIn > 0 ? BRAKE : COAST) * dt);
     } else {
-      const drive = thr * ACC * Math.max(0, 1 - v0 / VMAX);
-      const decel = (1 - thr) * COAST + brkIn * BRAKE + DRAG * v0 * v0;
+      // the car's own setup (#133): drive and drag are its preset's, braking and coasting are everyone's
+      const S = c.setup;
+      const drive = thr * S.acc * Math.max(0, 1 - v0 / S.vmax);
+      const decel = (1 - thr) * COAST + brkIn * BRAKE + S.drag * v0 * v0;
       c.v = Math.max(0, v0 + (drive - decel) * dt);
     }
     // the controller tracks its target: braking stops at it, driving never passes it
@@ -1224,7 +1268,7 @@ export class Race {
       const k2 = this.T.curvature(s);
       const kl = Math.abs(k2 / (1 - k2 * c.d));
       // banked sections (new circuits only) give a modest, predictable grip bonus to everyone
-      const r = (c.v * c.v * kl) / (GRIP * this.T.gripScale(s));
+      const r = (c.v * c.v * kl) / (c.setup.grip * this.T.gripScale(s));
       c.latRatio = r;
       if (r > 1) c.slip += ((r - 1) * 3 + 0.2) * dt; else c.slip = Math.max(0, c.slip - 2.5 * dt);
       const target = Math.max(0, Math.min(1, (r - 0.8) / 0.2)) * 0.6 + c.slip * 0.8;
@@ -1360,8 +1404,17 @@ export class Race {
     const n = this.profiles['-1'].length;
     const i0 = Math.floor(this.T.wrapS(s) / this.T.PROFILE_STEP) % n;
     const i1 = Math.floor(this.T.wrapS(s + c.v * c.persona.look) / this.T.PROFILE_STEP) % n;
-    const sides = c.change || c.laneSide > 0 ? ['-1', '1'] : ['-1'];
-    return Math.min(...sides.map((k) => Math.min(this.profiles[k][i0], this.profiles[k][i1])));
+    const sides = c.change || c.laneSide > 0 ? [-1, 1] : [-1];
+    // the player profile of this car's own setup (#133): a Speed car is never held at a corner speed only Grip could carry
+    return Math.min(...sides.map((k) => { const p = this.playerProfile(c, k); return Math.min(p[i0], p[i1]); }));
+  }
+
+  /**
+   * The assisted-driver ('player' persona) planned speed profile of a car's own setup on one side (#133): what the automatic
+   * pit controller's corner limit reads, and what scripted test drivers follow. Balanced's is `profiles['-1']` / `['1']`.
+   */
+  playerProfile(c: Car, side: number): Float32Array {
+    return this.profiles[profKey(c.setup.id, 'player', side < 0 ? -1 : 1, false)];
   }
 
   /** A stopping gap behind any car ahead on the car's lane or the outside lane it is heading for (road only). */
@@ -1967,10 +2020,11 @@ export class Race {
       const i0 = Math.floor(this.T.wrapS(s) / this.T.PROFILE_STEP) % n;
       const i1 = Math.floor(this.T.wrapS(look) / this.T.PROFILE_STEP) % n;
       const prof = (side: number): number => {
-        const pr = this.profiles[`${P.id}:${side}`];
+        // the planned limits of this car's own setup (#133), with its personality's margins on top
+        const pr = this.profiles[profKey(c.setup.id, P.id, side, false)];
         const a = Math.min(pr[i0], pr[i1]);
         if (c.lapse === 0) return a;
-        const hot = this.profiles[`${P.id}:${side}:hot`];
+        const hot = this.profiles[profKey(c.setup.id, P.id, side, true)];
         return a + (Math.min(hot[i0], hot[i1]) - a) * c.lapse;
       };
       target = c.change ? Math.min(prof(-1), prof(1)) : prof(c.laneSide < 0 ? -1 : 1);
@@ -2006,14 +2060,14 @@ export class Race {
       c.pitReq = mustPit;
       if (!c.change && !c.laneReq && c.changeCooldown <= 0) {
         if (mustPit && c.laneSide > 0) c.laneReq = true;
-        else if (!mustPit && nearest && ng < 7 && Math.abs(nearest.d - c.d) < 0.3 && nearest.v < VMAX * 0.98) c.laneReq = true;
+        else if (!mustPit && nearest && ng < 7 && Math.abs(nearest.d - c.d) < 0.3 && nearest.v < c.setup.vmax * 0.98) c.laneReq = true;
       }
       if (c.laneReq && mustPit && c.laneSide < 0) c.laneReq = false;
       if (!mustPit) this.defend(c, dt, s);
     }
 
     const v = c.v;
-    const hold = (COAST + DRAG * v * v) / (ACC * Math.max(0.05, 1 - v / VMAX) + COAST);
+    const hold = holdThrottle(c.setup, v);
     const err = target - v;
     if (err > 0) return { t: Math.min(1, hold + err * P.thrGain), b: 0 };
     if (err < -1.2) return { t: 0, b: Math.min(1, -err * P.brkGain) };
@@ -2260,6 +2314,7 @@ export class Race {
       finishWindow: fin(this.finishWindow), timeLimit: fin(this.timeLimit),
       cars: this.cars.map((c) => ({
         id: c.id, slot: c.idx, control: c.human ? 'human' : 'ai', name: c.name, color: c.color, num: c.num, bay: c.bayHome,
+        setup: c.setup.id, tuning: c.setup.tuning,
         status: c.status, dqReason: c.dqReason, dnfReason: c.dnfReason, finished: c.finished,
         mode: c.mode, u: c.u, v: c.v, d: c.d, laneSide: c.laneSide, change: c.change ? { ...c.change } : null,
         x: c.x, y: c.y, z: c.z, h: c.h, roll: c.roll, pitch: c.pitch, yawOff: c.yawOff, wobble: c.wobble, off: c.off ? { ...c.off } : null,

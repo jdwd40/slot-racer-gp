@@ -44,8 +44,11 @@ Evidence: [career-evidence.md](career-evidence.md).
 ## Personal bests
 
 - The fastest **valid** lap per account × circuit × **circuit layout version** (a hash of the circuit definition) ×
-  mode (`solo`, `championship`, `multiplayer`, `practice`) × rules version. A changed circuit or rules version starts a
-  new best; the old one is kept and shown as "older layout".
+  mode (`solo`, `championship`, `multiplayer`, `practice`) × rules version × **car setup and its tuning** (#133,
+  [car-setup.md](car-setup.md#records-and-ghosts)). A changed circuit or rules version starts a new best; the old one is
+  kept and shown as "older layout". A lap is only ever compared with laps driven with the same setup at the same tuning;
+  a setup retuned later starts a new best and the old one is shown as "older tuning". Bests stored before setups are
+  Balanced at tuning 0, whose physics did not change, so they stay current for Balanced.
 - Laps come from the server's own lap events. The race core's invalidation rules decide validity (all three sectors in
   order, no pit-lane entry, no reversing, no collision, no de-slot/tow, a flying lap); an invalid lap never qualifies.
   Laps under 1 s are ignored as a defence in depth.
@@ -69,7 +72,8 @@ results stored before it are not scored retroactively):
 | --- | --- | --- |
 | `race_results` + `scoring_version` | `race_id` | the immutable server envelope, now with the scoring version it was scored under |
 | `career_awards` | `(race_id, participant_id, scoring_version)`, also unique `(race_id, account_id, scoring_version)` | the award ledger: one immutable row per credited participant (position, status, points, mode, championship round, track + version, rules version, field size, humans, driver name at the time, livery, finish time) |
-| `personal_bests` | `(account_id, track_id, track_version, mode, rules_version)` | verified fastest lap |
+| `personal_bests` | `(account_id, track_id, track_version, mode, rules_version)` | verified fastest lap; since #133 only Balanced laps at tuning 0 (every lap before setups was one) |
+| `setup_bests` (migration `004_setup_bests`, #133) | `(account_id, track_id, track_version, mode, rules_version, setup, tuning)` | verified fastest lap of every other setup or tuning (a check refuses Balanced at tuning 0 here) |
 
 - **One transaction per race** (`PgResultSink.consume`): insert the result (`ON CONFLICT (race_id) DO NOTHING`); only if
   this transaction inserted it, write its ledger rows and best-lap updates; commit. A duplicate delivery (same digest)
@@ -104,8 +108,9 @@ results stored before it are not scored retroactively):
 Account screen (signed in): driver name, total career points, wins/seconds/thirds, races, verified personal bests by
 circuit and mode (with lap number and date, older layouts marked), and the ten most recent results (date, mode,
 championship round, race length (#132: read from the stored result's envelope, `settings.length`; results stored before
-race-length presets read as Standard, which they were), circuit, position/field or DQ/DNF, points). Points per finish
-are the same at every race length. Read from `GET /api/profile/stats` for the session's
+race-length presets read as Standard, which they were), the driver's car setup (#133: from the same envelope's participant
+row; results stored before setups read as Balanced), circuit, position/field or DQ/DNF, points). Points per finish
+are the same at every race length and for every setup; each best is labelled with its setup. Read from `GET /api/profile/stats` for the session's
 account only; an answer for a different account than the tab shows (another tab switched the cookie) is dropped.
 A rename changes only `profiles.display_name`: the ledger keys on the account id, so history and attribution stay.
 

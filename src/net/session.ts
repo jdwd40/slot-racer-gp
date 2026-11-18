@@ -5,6 +5,7 @@ import { OnlineClient, type SocketCtor } from './client';
 import type { AwardsView, ChampionshipTag, ClientMsg, ErrorCode, LiveryId, Mode, PublicRoom, RoomSettings, ServerMsg } from './protocol';
 import type { ActionType, DriverId, Standing } from '../race';
 import { LENGTH_SET, isRaceLengthId, type RaceLengthId } from '../raceLength';
+import { SETUP_SET, isSetupId, type SetupId } from '../carSetup';
 
 export type Conn = 'offline' | 'connecting' | 'connected' | 'reconnecting';
 /**
@@ -22,7 +23,8 @@ export interface ResultView {
   track: { id: string };
   /** the room settings the race ran with; `length` (#132) is absent from a server older than presets (Standard) */
   settings?: { length?: RaceLengthId };
-  participants: { id: string; control: 'human' | 'ai'; slot: number; num: number; name: string; livery: string }[];
+  /** `setup` / `tuning` (#133): each car's setup as the race ran it; absent from a server older than setups (Balanced) */
+  participants: { id: string; control: 'human' | 'ai'; slot: number; num: number; name: string; livery: string; setup?: SetupId; tuning?: number }[];
   classification: Standing[] | null; digest: string;
 }
 
@@ -84,11 +86,12 @@ export class NetSession {
 
   /** Create a room (any mode), join one by code, or resume a stored seat. */
   /** `expectAccount`: who the page shows ('' = guest, an account id when signed in); a socket signed in otherwise is refused. */
-  create(name: string, mode: Mode, settings: Partial<RoomSettings>, livery?: LiveryId, expectAccount?: string, championship?: ChampionshipTag): Promise<Outcome> {
-    return this.begin({ t: 'create', name, mode, settings, ...(livery ? { livery } : {}), ...(expectAccount !== undefined ? { expectAccount } : {}), ...(championship ? { championship } : {}) });
+  /** `setup` (#133): this driver's own car setup, sent only to a server that runs setups (forServer). */
+  create(name: string, mode: Mode, settings: Partial<RoomSettings>, livery?: LiveryId, expectAccount?: string, championship?: ChampionshipTag, setup?: SetupId): Promise<Outcome> {
+    return this.begin({ t: 'create', name, mode, settings, ...(livery ? { livery } : {}), ...(expectAccount !== undefined ? { expectAccount } : {}), ...(championship ? { championship } : {}), ...(setup ? { setup } : {}) });
   }
-  join(code: string, name: string, livery?: LiveryId, expectAccount?: string): Promise<Outcome> {
-    return this.begin({ t: 'join', code: code.trim().toUpperCase(), name, ...(livery ? { livery } : {}), ...(expectAccount !== undefined ? { expectAccount } : {}) });
+  join(code: string, name: string, livery?: LiveryId, expectAccount?: string, setup?: SetupId): Promise<Outcome> {
+    return this.begin({ t: 'join', code: code.trim().toUpperCase(), name, ...(livery ? { livery } : {}), ...(expectAccount !== undefined ? { expectAccount } : {}), ...(setup ? { setup } : {}) });
   }
   resume(seat: Seat): Promise<Outcome> { this.seat = seat; return this.begin({ t: 'resume', room: seat.room, participant: seat.participant, token: seat.token }); }
 
@@ -122,13 +125,23 @@ export class NetSession {
    */
   private forServer(req: ClientMsg): ClientMsg {
     if (req.t !== 'create' && req.t !== 'join') return req;
+    // car setups (#133), the same way: `setups` (this page's preset list) and the driver's own `setup` go only to a server
+    // whose welcome lists setups, and only a setup it runs; an older server gets neither, and every car there is Balanced
+    const { setup, setups: _s, ...base } = req;
+    void _s;
+    const has = this.client.welcome?.setups;
+    const carSetups = Array.isArray(has) && has.length > 0;
+    const withSetup = carSetups ? { ...base, setups: SETUP_SET, ...(setup !== undefined && isSetupId(setup) && has.includes(setup) ? { setup } : {}) } : base;
     const runs = this.client.welcome?.lengths;
     const presets = Array.isArray(runs) && runs.length > 0;
-    if (req.t === 'join') return presets ? { ...req, lengths: LENGTH_SET } : req;
-    const { length, ...rest } = req.settings;
+    if (withSetup.t === 'join') return presets ? { ...withSetup, lengths: LENGTH_SET } : withSetup;
+    const { length, ...rest } = withSetup.settings;
     const keep = presets && length !== undefined && isRaceLengthId(length) && runs.includes(length);
-    return { ...req, settings: keep ? { ...rest, length } : rest, ...(presets ? { lengths: LENGTH_SET } : {}) };
+    return { ...withSetup, settings: keep ? { ...rest, length } : rest, ...(presets ? { lengths: LENGTH_SET } : {}) };
   }
+
+  /** The car setups the connected server accepts (#133): none from a server older than setups (its cars are all Balanced). */
+  get setups(): readonly SetupId[] { return this.client.welcome?.setups ?? []; }
 
   /** Whether the server this session is connected to runs race-length presets (its `welcome` lists them). */
   get lengths(): readonly RaceLengthId[] { return this.client.welcome?.lengths ?? []; }
@@ -260,6 +273,8 @@ export class NetSession {
     if (Object.keys(send).length) this.command({ t: 'settings', settings: send });
   }
   livery(l: LiveryId): void { this.command({ t: 'livery', livery: l }); }
+  /** This seat's own car setup (#133), in the lobby. Sent only to a server that runs setups (an older one refuses the message). */
+  setup(s: SetupId): void { if (this.setups.includes(s)) this.command({ t: 'setup', setup: s }); }
   start(): void { this.command({ t: 'start' }); }
   rematch(): void { this.command({ t: 'rematch' }); }
   /** Give the seat up on purpose (the car retires if racing); no reconnection follows. */

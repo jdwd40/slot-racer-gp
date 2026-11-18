@@ -5,8 +5,9 @@
 import { Race, type Car, type CarSnapshot, type DriverId, type RaceEvent, type RaceSnapshot, type WireEvent } from '../race';
 import { trackFor } from '../track';
 import { STEP, blendPose, type Pose } from '../timing';
-import { CAR_DYNAMIC } from './snapwire';
+import { CAR_DYNAMIC, type StaticKey } from './snapwire';
 import { DEFAULT_LENGTH, lengthForLaps } from '../raceLength';
+import { setupOr } from '../carSetup';
 
 /**
  * A mirror race for a snapshot's roster, circuit and lap target. AI personas only matter to the server, so none are given.
@@ -15,7 +16,8 @@ import { DEFAULT_LENGTH, lengthForLaps } from '../raceLength';
  * ever runs a preset this page sent it knows (`lengths`), so an unknown count is not expected; it would read as Standard.
  */
 export function mirrorRace(snap: RaceSnapshot): Race {
-  const roster = snap.cars.map((c) => ({ id: c.id, control: c.control, slot: c.slot, name: c.name, color: c.color }));
+  // each car's setup (#133) is the server's: a snapshot from a server older than setups names none, and its cars are Balanced
+  const roster = snap.cars.map((c) => ({ id: c.id, control: c.control, slot: c.slot, name: c.name, color: c.color, setup: setupOr(c.setup) }));
   const length = lengthForLaps(snap.laps)?.id ?? DEFAULT_LENGTH;
   const r = new Race({ roster, track: trackFor(snap.track), practice: snap.practice, runOn: 'live', length });
   applySnapshot(r, snap);
@@ -46,7 +48,8 @@ type OptionalKey<T> = { [K in keyof T]-?: object extends Pick<T, K> ? K : never 
  * as null (unknown), and the HUD falls back to the speed rule; an explicit false from the server is kept as false.
  */
 const ABSENT = { stallT: 0, stallHold: false, stallSvc: false, stallPaused: null, away: false } as const satisfies {
-  readonly [K in OptionalKey<CarSnapshot>]-?: K extends keyof Car ? Car[K] : never;
+  // (the optional static fields, #133 `setup` and `tuning`, are read once when the mirror race is built: mirrorRace)
+  readonly [K in OptionalKey<Omit<CarSnapshot, StaticKey>>]-?: K extends keyof Car ? Car[K] : never;
 };
 
 /**

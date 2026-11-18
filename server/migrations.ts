@@ -126,6 +126,35 @@ CREATE TABLE personal_bests (
 );
 `,
   },
+  {
+    // #133: personal bests per car setup and tuning. Additive only: nothing existing is altered, dropped or rewritten. Every
+    // row of personal_bests is a Balanced lap at tuning 0 (the only handling before setups), which is today's Balanced, so the
+    // table keeps holding exactly those bests with its key unchanged (a server from before setups goes on writing it as it
+    // always has during a rollout). A lap driven with any other setup, or with any setup at a later tuning, goes here, keyed
+    // by setup and tuning as well, so it is never compared with a lap driven under other physics. Reverting is dropping this
+    // one table; no other row depends on it.
+    id: '004_setup_bests',
+    sql: `
+CREATE TABLE setup_bests (
+  account_id bigint NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+  track_id text NOT NULL,
+  track_version text NOT NULL,
+  mode text NOT NULL CHECK (mode IN ('multiplayer', 'solo', 'championship', 'practice')),
+  rules_version text NOT NULL,
+  setup text NOT NULL CHECK (setup ~ '^[a-z]{1,16}$'),
+  tuning int NOT NULL CHECK (tuning >= 0),
+  source text NOT NULL DEFAULT 'verified' CHECK (source = 'verified'),
+  lap_ms int NOT NULL CHECK (lap_ms > 0),
+  lap int NOT NULL,
+  race_id uuid NOT NULL REFERENCES race_results(race_id),
+  livery text NOT NULL,
+  set_at timestamptz NOT NULL,
+  -- Balanced at tuning 0 lives in personal_bests (above), never here
+  CONSTRAINT setup_bests_not_legacy CHECK (NOT (setup = 'balanced' AND tuning = 0)),
+  PRIMARY KEY (account_id, track_id, track_version, mode, rules_version, setup, tuning)
+);
+`,
+  },
 ];
 
 export const SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1].id;

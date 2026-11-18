@@ -134,9 +134,10 @@ describe.skipIf(!URL)('PostgreSQL: career points, award ledger, personal bests',
       await c.query(`INSERT INTO race_results (race_id, room_id, mode, outcome, track_id, rules_version, digest, envelope) VALUES ($1, $2, 'multiplayer', 'completed', 'circuit-1', 'race-core-2026.11.1', $3, $4)`, [old.raceId, old.roomId, old.digest, JSON.stringify(old)]);
     } finally { c.release(); }
     expect((await req('/api/health')).status).toBe(503);
-    expect(await migrate(pool)).toEqual(['003_career_awards_bests']);
+    // (and #133's 004, setup bests, after it: additive, see setupBests.db.test.ts)
+    expect(await migrate(pool)).toEqual(['003_career_awards_bests', '004_setup_bests']);
     const h = (await (await req('/api/health')).json()) as Record<string, unknown>;
-    expect(h).toMatchObject({ ok: true, career: true, schema: '003_career_awards_bests', scoring: 'career-1:10-6-4', pendingResults: 0 });
+    expect(h).toMatchObject({ ok: true, career: true, schema: '004_setup_bests', scoring: 'career-1:10-6-4', pendingResults: 0 });
     expect((await pool.query("SELECT a.username, p.display_name, (SELECT count(*)::int FROM sessions) AS s FROM accounts a JOIN profiles p ON p.account_id = a.id")).rows).toEqual([{ username: 'legacy_car', display_name: 'Legacy', s: 1 }]);
     // a result stored before career scoring existed is kept as it was and never scored retroactively
     expect((await pool.query('SELECT scoring_version FROM race_results')).rows).toEqual([{ scoring_version: null }]);
@@ -187,7 +188,8 @@ describe.skipIf(!URL)('PostgreSQL: career points, award ledger, personal bests',
     expect(row.envelope.settings).toEqual({ track: 'circuit-1', aiFill: false });
     // same points policy at every length (this issue changes no scoring): a win is 10 whatever the length
     expect(s.career).toMatchObject({ points: 10 + 10 + 6, races: 3, wins: 2 });
-    expect((await pool.query('SELECT id FROM schema_migrations ORDER BY id')).rows.map((r) => r.id).at(-1)).toBe('003_career_awards_bests');
+    // #132 needed no migration (the newest is #133's, which only adds a table)
+    expect((await pool.query('SELECT id FROM schema_migrations ORDER BY id')).rows.map((r) => r.id).at(-1)).toBe('004_setup_bests');
   });
 
   it('personal bests only ever get faster, per circuit layout version, mode and rules; invalid, slower, duplicate and concurrent laps cannot replace one', async () => {

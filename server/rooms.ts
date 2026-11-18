@@ -93,7 +93,7 @@ export class RoomManager {
    * the room counts against that address's (and the account's) creation allowance until it closes. In-process tests that
    * leave it out are not limited.
    */
-  create(peer: Peer, o: { name: string; livery?: LiveryId; accountId: string | null; mode: Mode; settings: Partial<RoomSettings>; championship?: ChampionshipTag; ip?: string; lengths?: number }): (JoinOk & { room: Room }) | Fail {
+  create(peer: Peer, o: { name: string; livery?: LiveryId; accountId: string | null; mode: Mode; settings: Partial<RoomSettings>; championship?: ChampionshipTag; ip?: string; lengths?: number; setup?: string; setups?: number }): (JoinOk & { room: Room }) | Fail {
     if (this.rooms.size >= this.deps.cfg.roomCap) return { ok: false, code: 'unavailable', detail: 'room limit reached, try again later' };
     if (this.tickLoadMs > 50) return { ok: false, code: 'overloaded', detail: 'server busy, try again later' };
     const keys = o.ip === undefined ? null : CreateQuota.keys(o.ip, o.accountId);
@@ -116,7 +116,7 @@ export class RoomManager {
     return { ...r, room };
   }
 
-  join(peer: Peer, ip: string, o: { code: string; name: string; livery?: LiveryId; accountId: string | null; lengths?: number }): (JoinOk & { room: Room }) | Fail {
+  join(peer: Peer, ip: string, o: { code: string; name: string; livery?: LiveryId; accountId: string | null; lengths?: number; setup?: string; setups?: number }): (JoinOk & { room: Room }) | Fail {
     if (this.limited(ip)) return { ok: false, code: 'rate' };
     const room = this.byCode(o.code);
     if (!room) { this.noteFailure(ip); return { ok: false, code: 'not_found' }; }

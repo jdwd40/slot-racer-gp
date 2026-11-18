@@ -4,6 +4,7 @@ import { createHash } from 'node:crypto';
 import type { Standing } from '../src/race';
 import { TRACKS } from '../src/track';
 import { PROTOCOL_VERSION, RULES_VERSION, type ChampionshipTag, type LiveryId, type Mode, type RoomSettings } from '../src/net/protocol';
+import type { SetupId } from '../src/carSetup';
 
 export const ENVELOPE_SCHEMA = 1;
 
@@ -11,6 +12,11 @@ export interface EnvelopeParticipant {
   id: string; control: 'human' | 'ai'; slot: number; num: number; bay: number; name: string; livery: LiveryId;
   /** a signed-in account, or null for a guest or AI. A display name is never an identity. */
   accountId: string | null;
+  /**
+   * #133: the car's setup preset and its tuning, as the race ran it (the frozen roster). Every current envelope has both; one
+   * stored before setups has neither and is Balanced at tuning 0 (the handling every car had then)
+   */
+  setup?: SetupId; tuning?: number;
 }
 export interface EnvelopeLap { driver: string; lap: number; time: number; valid: boolean; raceT: number; }
 export interface ResultEnvelope {

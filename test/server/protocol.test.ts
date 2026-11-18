@@ -81,7 +81,7 @@ describe('online gate (browser)', () => {
     const f = vi.fn(() => res(200, { ok: true, protocol: PROTOCOL_VERSION, version: 'abc' }));
     expect(await probeOnline(false, f as unknown as typeof fetch, 'https://slotrush.jdwd40.com')).toEqual({ state: 'off' });
     expect(f).not.toHaveBeenCalled();
-    expect(await probeOnline(true, f as unknown as typeof fetch, 'https://slotrush.jdwd40.com')).toEqual({ state: 'available', version: 'abc', wsUrl: 'wss://slotrush.jdwd40.com/ws', accounts: false, lengths: [] });
+    expect(await probeOnline(true, f as unknown as typeof fetch, 'https://slotrush.jdwd40.com')).toEqual({ state: 'available', version: 'abc', wsUrl: 'wss://slotrush.jdwd40.com/ws', accounts: false, lengths: [], setups: [] });
     // sign-in is offered only when the server reports accounts and profiles (a database is attached)
     expect(await probeOnline(true, (() => res(200, { ok: true, protocol: PROTOCOL_VERSION, version: 'abc', accounts: true, profiles: true })) as unknown as typeof fetch, 'https://x')).toMatchObject({ state: 'available', accounts: true });
     expect(await probeOnline(true, (() => res(200, { ok: true, protocol: PROTOCOL_VERSION, version: 'abc', accounts: true })) as unknown as typeof fetch, 'https://x')).toMatchObject({ state: 'available', accounts: false });
@@ -90,6 +90,9 @@ describe('online gate (browser)', () => {
     // server older than presets (no list, or not an array) offers none, so the page never sends it a length
     expect(await probeOnline(true, (() => res(200, { ok: true, protocol: PROTOCOL_VERSION, version: 'abc', lengths: ['endurance', 'marathon', 'sprint', 'standard'] })) as unknown as typeof fetch, 'https://x')).toMatchObject({ state: 'available', lengths: ['sprint', 'standard', 'endurance'] });
     expect(await probeOnline(true, (() => res(200, { ok: true, protocol: PROTOCOL_VERSION, version: 'abc', lengths: 'all' })) as unknown as typeof fetch, 'https://x')).toMatchObject({ state: 'available', lengths: [] });
+    // car setups (#133) the same way: only ids this page knows, none from a server older than setups (it is sent none)
+    expect(await probeOnline(true, (() => res(200, { ok: true, protocol: PROTOCOL_VERSION, version: 'abc', setups: ['grip', 'turbo', 'balanced', 'speed'] })) as unknown as typeof fetch, 'https://x')).toMatchObject({ state: 'available', setups: ['balanced', 'speed', 'grip'] });
+    expect(await probeOnline(true, (() => res(200, { ok: true, protocol: PROTOCOL_VERSION, version: 'abc', setups: { acc: 99 } })) as unknown as typeof fetch, 'https://x')).toMatchObject({ state: 'available', setups: [] });
     // a newer server means this page is outdated (it says so and offers a reload, #67); an older one is just unavailable
     expect(await probeOnline(true, (() => res(200, { ok: true, protocol: PROTOCOL_VERSION + 1 })) as unknown as typeof fetch, 'https://x')).toEqual({ state: 'outdated', server: PROTOCOL_VERSION + 1 });
     expect(await probeOnline(true, (() => res(200, { ok: true, protocol: PROTOCOL_VERSION - 1 })) as unknown as typeof fetch, 'https://x')).toEqual({ state: 'behind', server: PROTOCOL_VERSION - 1 });

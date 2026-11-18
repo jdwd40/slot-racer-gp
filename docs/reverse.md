@@ -14,7 +14,7 @@ Constants are in `src/race.ts` (`REV`, `REV_CAP`, `REV_PIT_MIN`).
 | `REV.still` | 0.02 m/s | Speed magnitude that counts as stationary. The stop-and-go box uses the same threshold |
 | `REV_PIT_MIN` | `PIT_IN1` (8 m) | Upstream end of the reversible pit path, where the pit lane has fully left the road |
 
-The starting values from the issue held up in tests and the browser check, so they are unchanged.
+The starting values from the issue held up in tests and the browser check, so they are unchanged. They are the same for every car setup (#133): reverse speed, acceleration and the pit-path limit do not depend on a car's drive, top speed or grip ([car-setup.md](car-setup.md#what-every-setup-shares)).
 
 ## Controls
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Bounded browser checks of online play: independent browser contexts against the real room server. Results: docs/online-client-evidence.md.
 //
-//   node scripts/online-check.mjs [gate lobby service connection layout accounts career lengths]   (default: all)
+//   node scripts/online-check.mjs [gate lobby service connection layout accounts career lengths setups]   (default: all)
 //   accounts and career need SLOTRUSH_TEST_DATABASE_URL (e.g. $(node scripts/local-pg.mjs env) after `node scripts/local-pg.mjs start`)
 //   node scripts/online-check.mjs race2 --url https://slotrush.jdwd40.com [--origin https://slotrush.jdwd40.com]
 //     the 2-browser race alone against a deployed site (no local build or servers): one multiplayer room with AI fill, two
@@ -1061,7 +1061,75 @@ async function lengths(run, c) {
   return [host, phone];
 }
 
-const SCENARIOS = { gate, lobby, service, connection, layout, accounts, career, race2, lengths };
+/**
+ * Car setups (#133) with two browsers on the local time-scaled server: the online menu's selector, each driver's own choice
+ * reaching the room, everyone seeing every setup, a change clearing only that driver's Ready, an older page refused once a
+ * setup is chosen, a Sprint race with each car on its setup in both mirrors and the result envelope, and rematch keeping them.
+ */
+async function setups(run, c) {
+  const url = run.fastUrl;
+  const name = (id) => STRINGS[`setup.${id}`];
+  const host = await openPage(run, url, 'small', { name: 'host', fpsCap: CAP });
+  const phone = await openPage(run, url, 'phoneLo', { touch: true, name: 'phone', fpsCap: CAP });
+  await goOnline(host, 'Setup Host');
+  const menu = await read(host.page, () => ({ setups: window.__game.online.setups, opts: [...document.querySelectorAll('[data-nrsetup]')].map((b) => `${b.dataset.nrsetup}:${b.getAttribute('aria-checked')}`), old: !!document.querySelector('.setup-old'), desc: document.getElementById('o-nrsetup-desc')?.textContent ?? '' }));
+  c.ok('Online menu: the server lists the setups, so the Car setup selector is offered (Balanced by default), strength and cost in words', menu.setups.join() === 'balanced,speed,grip' && menu.opts.join() === 'balanced:true,speed:false,grip:false' && !menu.old && menu.desc === STRINGS['setup.balanced.desc'], menu);
+  await host.page.click('[data-nrsetup="speed"]');
+  await host.page.click('[data-nrlen="sprint"]');
+  await host.page.click('#n-create');
+  await waitFor(host.page, () => window.__game.screen === 'lobby');
+  const lob = await read(host.page, () => ({ code: window.__game.net.room.code, mine: window.__game.net.room.participants[0].setup, on: document.querySelector('[data-nsetup][aria-checked="true"]')?.dataset.nsetup }));
+  c.ok('Create: the host\'s seat is Speed, and the lobby\'s own selector shows it', lob.mine === 'speed' && lob.on === 'speed', lob);
+  // a page from before setups sends no `setups`: the server refuses it from a room with a Speed car
+  const oldJoin = await read(host.page, ([wsUrl, v, code]) => new Promise((resolve) => {
+    const ws = new WebSocket(wsUrl);
+    const out = {};
+    const done = () => { try { ws.close(); } catch { /* closed */ } resolve(out); };
+    setTimeout(done, 10000);
+    ws.onopen = () => ws.send(JSON.stringify({ t: 'hello', v, proto: 'slotrush' }));
+    ws.onmessage = (e) => { const m = JSON.parse(e.data); if (m.t === 'welcome') { out.welcome = m.setups; ws.send(JSON.stringify({ t: 'join', code, name: 'Old page', lengths: 1 })); } if (m.t === 'nack' || m.t === 'joined') { out.reply = m; done(); } };
+  }), [await read(host.page, () => window.__game.online.wsUrl), PROTOCOL, lob.code]);
+  c.ok('A page older than setups (no `setups` on join) is refused from the room with a Speed car, told to reload', oldJoin.reply?.t === 'nack' && oldJoin.reply.code === 'bad_settings' && /reload/.test(oldJoin.reply.detail ?? '') && oldJoin.welcome?.join() === 'balanced,speed,grip', oldJoin);
+  // the phone picks Grip in its own online menu (a tap), then joins
+  await goOnline(phone, 'Setup Phone');
+  await phone.page.locator('[data-nrsetup="grip"]').tap();
+  await phone.page.fill('#n-code', lob.code);
+  await phone.page.click('#n-join');
+  await waitFor(phone.page, () => window.__game.screen === 'lobby');
+  await waitFor(host.page, () => window.__game.net.room.participants.length === 2);
+  const rows = (s) => read(s.page, () => [...document.querySelectorAll('.lobby tbody tr[data-pid]')].map((r) => `${r.querySelector('.nm').textContent}:${r.dataset.setup}`).join());
+  const seen = await Promise.all([host, phone].map(rows));
+  c.ok('Both lobbies show both drivers\' setups before the start (host Speed, phone Grip)', seen.every((x) => x === 'Setup Host:speed,Setup Phone:grip'), seen);
+  await phone.page.locator('#l-ready').tap();
+  await waitFor(host.page, () => window.__game.net.room.participants.filter((p) => p.ready).length === 1);
+  await phone.page.locator('[data-nsetup="balanced"]').tap();
+  await waitFor(host.page, () => window.__game.net.room.participants[1].setup === 'balanced');
+  const sw = await Promise.all([host, phone].map((s) => read(s.page, () => window.__game.net.room.participants.map((p) => `${p.setup}:${p.ready}`).join())));
+  c.ok('The phone changes to Balanced: both pages see it at once, and only the phone\'s Ready is cleared', sw.every((x) => x === 'speed:false,balanced:false'), sw);
+  await phone.page.locator('[data-nsetup="grip"]').tap();
+  await waitFor(host.page, () => window.__game.net.room.participants[1].setup === 'grip');
+  await phone.page.locator('#l-ready').tap();
+  await waitFor(host.page, () => window.__game.net.room.participants.filter((p) => p.ready).length === 1);
+  await host.page.click('#l-start');
+  for (const s of [host, phone]) await waitFor(s.page, () => window.__game.screen === 'race' && window.__game.net.raceId, undefined, 30000);
+  const mir = await Promise.all([host, phone].map((s) => read(s.page, () => window.__game.race.cars.map((x) => x.setup.id).join())));
+  c.ok('Race: both mirrors hold the server\'s setups (Speed, Grip)', mir.every((x) => x === 'speed,grip'), mir);
+  await snapshotOf(phone.page, 'setups-race-phone.png');
+  phone.keys = new Keys(phone.page);
+  const fin = await driveAll([host, phone], done, 6 * 60000, { laps: 5 });
+  for (const s of [host, phone]) await waitFor(s.page, () => window.__game.screen === 'netres', undefined, 180000);
+  const res = await Promise.all([host, phone].map((s) => read(s.page, () => ({ r: window.__game.net.result, chips: [...document.querySelectorAll('.netres tbody tr')].map((r) => r.querySelector('.setup-chip')?.dataset.setup) }))));
+  const parts = res[0].r.participants.map((p) => `${p.setup}@${p.tuning}`).join();
+  c.ok('Result: identical on both, the envelope names each car\'s setup and tuning, and both results cards label each row', fin.every((x) => !x.error) && res[0].r.digest === res[1].r.digest && parts === 'speed@1,grip@1' && res.every((x) => x.chips.join() === res[0].r.classification.map((k) => res[0].r.participants.find((p) => p.id === k.id).setup).join()), { fin, parts, chips: res.map((x) => x.chips) });
+  await host.page.click('#r-rematch');
+  for (const s of [host, phone]) await waitFor(s.page, () => window.__game.screen === 'lobby');
+  const again = await Promise.all([host, phone].map((s) => read(s.page, () => window.__game.net.room.participants.map((p) => p.setup).join())));
+  c.ok('Rematch: back in the same room, every seat keeps its setup', again.every((x) => x === 'speed,grip'), again);
+  for (const s of [host, phone]) { const l = s.page.locator('#l-leave'); if (await l.count()) await l.click(); }
+  return [host, phone];
+}
+
+const SCENARIOS = { gate, lobby, service, connection, layout, accounts, career, race2, lengths, setups };
 
 /** `race2` alone against a deployed site: no build, no local servers, one room (see the header). */
 async function remote(url, origin, names) {
