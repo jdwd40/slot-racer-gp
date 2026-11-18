@@ -445,7 +445,9 @@ describe('practice ghosts and saves', () => {
   it('records the same 20 Hz ghost at 10 FPS as at 60 FPS, in the existing format', () => {
     const { g } = record(60);
     expect(record(10).g).toEqual(g);
-    expect(Object.keys(g).sort()).toEqual(['L', 'car', 'initials', 'ms', 's', 'track', 'v']);
+    // the existing format plus the lap's car setup and tuning (#133)
+    expect(Object.keys(g).sort()).toEqual(['L', 'car', 'initials', 'ms', 's', 'setup', 'track', 'tuning', 'v']);
+    expect([g.setup, g.tuning]).toEqual(['balanced', 0]);
     expect(g.v).toBe(R.GHOST_VERSION);
     expect(g.s.length % 4).toBe(0);
     const times = g.s.filter((_, i) => i % 4 === 0);

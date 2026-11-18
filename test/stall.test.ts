@@ -917,7 +917,8 @@ describe('exemptions and clean-up, each on its own (review NB4)', () => {
     place(r, p, U(r, STRAIGHT), 1, 0);
     expect(r.stallBlock(p)).toBe(null);
     for (const set of [(c: Car) => { c.pitHold = true; }, (c: Car) => { c.exitHold = true; }, (c: Car) => { c.squeezeHold = true; }, (c: Car) => { c.yielding = true; }, (c: Car) => { c.sgCtl = true; }, (c: Car) => { c.recoverT = 0.5; }, (c: Car) => { c.fuel = 0; }]) {
-      const keep = { ...p };
+      // (the car's setup, #133, is fixed for the race and not writable: it is left out of the restore, it never changes)
+      const { setup: _setup, ...keep } = p;
       set(p);
       expect(r.stallBlock(p)).toBe('held');
       Object.assign(p, keep);

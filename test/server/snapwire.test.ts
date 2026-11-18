@@ -462,7 +462,9 @@ describe('the room server streams v2 states', () => {
     // (979392e8…7d318 for 11.7). Re-pinned for #110 (rules race-core-2026.11.8) on the same grounds: with 11.7 in place and #110's
     // race core the 11.7 digest still results (circuit-1's pit exit is short of its squeeze), so the version string is the only change
     // (3fc80036…68629 for 11.8). Re-pinned for #132 (race-length presets; rules unchanged): the envelope's settings gained
-    // `length: 'standard'`, and with that key removed the 11.8 digest still results, so the key is the only change
+    // `length: 'standard'`, and with that key removed the 11.8 digest still results, so the key is the only change. Re-pinned for
+    // #133 (car setups; rules unchanged): each participant gained `setup: 'balanced', tuning: 0`, and with those keys and
+    // `length` removed the same 11.8 digest results
     const run = () => {
       const h = harness({}, 4242);
       const peers = [new FakePeer(), new FakePeer()];
@@ -481,15 +483,19 @@ describe('the room server streams v2 states', () => {
       // 'standard'`) the envelope is byte for byte the one before presets, so the race itself is unchanged
       const { length, ...before } = env.settings;
       expect(length).toBe('standard');
+      // #133: every participant now names its car setup and tuning (here all Balanced at tuning 0, the AI field too). Without
+      // those two keys as well, the envelope is again byte for byte the one before presets: the race itself is unchanged
+      expect(env.participants.map((p) => [p.setup, p.tuning])).toEqual(env.participants.map(() => ['balanced', 0]));
+      const participants = env.participants.map(({ setup: _s, tuning: _t, ...p }) => p);
       return {
         digest: createHash('sha256').update(norm(env)).digest('hex'), outcome: env.outcome, ticks: env.times.ticks,
-        withoutLength: createHash('sha256').update(norm({ ...env, settings: before })).digest('hex'),
+        withoutLength: createHash('sha256').update(norm({ ...env, settings: before, participants })).digest('hex'),
       };
     };
     const a = run(), b = run();
     expect(b).toEqual(a);
     expect(a).toEqual({
-      digest: 'e88a181af25a611e9dfc02dae9ed7cef42993a0c38b0932ba6bdad30d27df675', outcome: 'completed', ticks: 18031,
+      digest: 'fa2c3efc136b23dfa92190b42be59f150f29db02eb294674daccb89668efce55', outcome: 'completed', ticks: 18031,
       withoutLength: '3fc80036feb8faedd8c8c6faca71d2fa7e622ad6ccf168dcab02bf4f95f68629',
     });
   });

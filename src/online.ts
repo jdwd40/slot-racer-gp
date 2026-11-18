@@ -8,6 +8,7 @@
 // offers Retry (a fresh health probe) and re-probes now and then while the title is shown, so it recovers by itself (#80).
 import { PROTOCOL_VERSION } from './net/protocol';
 import { LENGTH_IDS, type RaceLengthId } from './raceLength';
+import { SETUP_IDS, type SetupId } from './carSetup';
 import { t } from './i18n';
 
 export type OnlineStatus =
@@ -25,6 +26,11 @@ export type OnlineStatus =
      * presets lists none: then only Standard is offered online and no length is ever sent to it (it would refuse the field).
      */
     lengths: RaceLengthId[];
+    /**
+     * the car-setup presets (#133) the server accepts that this page knows, from health's `setups`. A server older than setups
+     * lists none: then the online menu shows no setup selector and no setup is ever sent to it (every car there is Balanced).
+     */
+    setups: SetupId[];
   };
 
 export const ONLINE_ENABLED: boolean = import.meta.env.VITE_ONLINE === '1';
@@ -37,14 +43,15 @@ export async function probeOnline(enabled: boolean, fetchFn: typeof fetch, origi
   try {
     const r = await fetchFn(`${origin}/api/health`, { signal: ctl.signal, cache: 'no-store', credentials: 'same-origin' });
     if (!r.ok) return { state: 'unavailable', reason: `health ${r.status}` };
-    const h = (await r.json()) as { ok?: unknown; protocol?: unknown; version?: unknown; accounts?: unknown; profiles?: unknown; lengths?: unknown };
+    const h = (await r.json()) as { ok?: unknown; protocol?: unknown; version?: unknown; accounts?: unknown; profiles?: unknown; lengths?: unknown; setups?: unknown };
     if (h.ok !== true) return { state: 'unavailable', reason: 'not ok' };
     if (typeof h.protocol === 'number' && h.protocol > PROTOCOL_VERSION) return { state: 'outdated', server: h.protocol };
     // an older server (rolled back, or the static client released before the server is upgraded): retry until it matches
     if (typeof h.protocol === 'number' && h.protocol < PROTOCOL_VERSION) return { state: 'behind', server: h.protocol };
     if (h.protocol !== PROTOCOL_VERSION) return { state: 'unavailable', reason: `protocol ${String(h.protocol)} (client ${PROTOCOL_VERSION})` };
     const lengths = Array.isArray(h.lengths) ? LENGTH_IDS.filter((id) => (h.lengths as unknown[]).includes(id)) : [];
-    return { state: 'available', version: String(h.version), wsUrl: origin.replace(/^http/, 'ws') + '/ws', accounts: h.accounts === true && h.profiles === true, lengths };
+    const setups = Array.isArray(h.setups) ? SETUP_IDS.filter((id) => (h.setups as unknown[]).includes(id)) : [];
+    return { state: 'available', version: String(h.version), wsUrl: origin.replace(/^http/, 'ws') + '/ws', accounts: h.accounts === true && h.profiles === true, lengths, setups };
   } catch (e) {
     return { state: 'unavailable', reason: (e as Error).name === 'AbortError' ? 'timeout' : 'unreachable' };
   } finally {

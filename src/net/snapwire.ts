@@ -26,8 +26,12 @@ export type Precision = 'exact' | number | { readonly dp: number; readonly keepP
 /** Decimals a rounded precision keeps (null for 'exact'). */
 export const decimalsOf = (p: Precision): number | null => (p === 'exact' ? null : typeof p === 'number' ? p : p.dp);
 
-/** Per-car fields fixed for the whole race: sent once per race (first state, resume state). */
-export const CAR_STATIC = ['id', 'slot', 'control', 'name', 'color', 'num', 'bay'] as const satisfies readonly (keyof CarSnapshot)[];
+/**
+ * Per-car fields fixed for the whole race: sent once per race (first state, resume state). `setup` and `tuning` (#133) are
+ * additive: an older decoder copies the static list whole and an older mirror reads only the fields it knows, and an older
+ * server's static list lacks them (its cars are all Balanced), so PROTOCOL_VERSION stays 2.
+ */
+export const CAR_STATIC = ['id', 'slot', 'control', 'name', 'color', 'num', 'bay', 'setup', 'tuning'] as const satisfies readonly (keyof CarSnapshot)[];
 export type StaticKey = (typeof CAR_STATIC)[number];
 export type StaticCar = Pick<CarSnapshot, StaticKey>;
 
@@ -133,7 +137,7 @@ function encode(s: RaceSnapshot): Encoded {
 }
 const staticOf = (s: RaceSnapshot): StaticCar[] => s.cars.map((c) => {
   const o: Fields = {};
-  for (const k of CAR_STATIC) o[k] = c[k];
+  for (const k of CAR_STATIC) if (c[k] !== undefined) o[k] = c[k];
   return o as StaticCar;
 });
 /** Keys of `next` that differ from `prev`, plus a DELETED list for keys `prev` had and `next` does not. */

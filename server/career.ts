@@ -3,6 +3,7 @@
 // a stored result can be re-derived for audit. Policy and reasons: docs/career.md.
 import type { AwardRow, AwardsView } from '../src/net/protocol';
 import type { ResultEnvelope } from './envelope';
+import { recordTag, type SetupId } from '../src/carSetup';
 
 /** Career points for 1st, 2nd, 3rd. Fourth and lower, DQ and DNF score 0. Distinct from local championship points (10/6/4/2). */
 export const DEFAULT_PODIUM: readonly number[] = Object.freeze([10, 6, 4]);
@@ -55,6 +56,8 @@ export function computeAwards(env: Readonly<ResultEnvelope>, scoring: Scoring): 
 /** Personal-best candidate: an account's fastest valid authoritative lap in one race. */
 export interface LapBest {
   accountId: string; participant: string; trackId: string; trackVersion: string; mode: ResultEnvelope['mode']; rulesVersion: string;
+  /** #133: the setup and tuning the lap was driven with (a best is only ever compared within the same pair) */
+  setup: SetupId; tuning: number;
   lapMs: number; lap: number; raceId: string; livery: string;
 }
 
@@ -71,6 +74,10 @@ export function lapBests(env: Readonly<ResultEnvelope>): LapBest[] {
   const out: LapBest[] = [];
   for (const p of env.participants) {
     if (p.control !== 'human' || !p.accountId) continue;
+    // a participant naming no setup is Balanced at tuning 0 (an envelope from before setups); one naming something no record
+    // can be kept under (never produced by the room) sets no best rather than one under the wrong physics
+    const tag = recordTag(p.setup, p.tuning);
+    if (!tag) continue;
     let best: { ms: number; lap: number } | null = null;
     for (const l of env.laps) {
       if (l.driver !== p.id || !l.valid || !Number.isFinite(l.time)) continue;
@@ -80,7 +87,7 @@ export function lapBests(env: Readonly<ResultEnvelope>): LapBest[] {
     }
     if (best) out.push({
       accountId: p.accountId, participant: p.id, trackId: env.track.id, trackVersion: env.track.version, mode: env.mode,
-      rulesVersion: env.rules.version, lapMs: best.ms, lap: best.lap, raceId: env.raceId, livery: p.livery,
+      rulesVersion: env.rules.version, setup: tag.setup, tuning: tag.tuning, lapMs: best.ms, lap: best.lap, raceId: env.raceId, livery: p.livery,
     });
   }
   return out;

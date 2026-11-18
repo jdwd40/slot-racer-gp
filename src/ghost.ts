@@ -28,12 +28,13 @@ export class GhostRecorder {
   }
   /** package the finished lap (called at the next crossing) */
   finish(c: Car, raceTime: number, track: string, car: string, initials: string, ms: number): GhostData {
+    // the lap's own setup and tuning (#133): a ghost is only ever challenged with the same pair
     this.sample(c, raceTime);
     // final sample exactly on the line
     const dur = ms / 1000;
     this.samples.push(+dur.toFixed(3), +T.L.toFixed(3), +c.d.toFixed(3), 0);
     this.active = false;
-    return { v: GHOST_VERSION, track, car, initials, L: +T.L.toFixed(3), ms: Math.round(ms), s: this.samples };
+    return { v: GHOST_VERSION, track, car, initials, L: +T.L.toFixed(3), ms: Math.round(ms), s: this.samples, setup: c.setup.id, tuning: c.setup.tuning };
   }
 }
 

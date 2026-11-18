@@ -4,6 +4,7 @@ import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 import * as T from './track';
 import { Race, Car, RaceEvent, DRIVERS, PEN, SOLO_ID, DriverId, RosterEntry } from './race';
 import { LENGTH_IDS, lengthOr, raceLength, type RaceLengthId } from './raceLength';
+import { DEFAULT_SETUP, SETUP_IDS, setupOr, type SetupId } from './carSetup';
 import { buildWorld, disposeWorld, arrowGeometry, bayPaints, BayPaint, World } from './world';
 import { Y0, disposeObject } from './gfx';
 import { makeCar, makePlayerMarker, dimCar, CarVisual } from './carModel';
@@ -95,14 +96,22 @@ let localSlot = 0;
  * championship races the length it was started with (champ.length), never this; practice has no lap target at all.
  */
 let raceLen: RaceLengthId = R.savedLength();
+/**
+ * The car setup chosen for local races, practice and new online seats (#133): remembered on this device (srgp.setup). A
+ * championship races the setup in its save (champ.setup), which can be changed between rounds, never during one.
+ */
+let carSetupId: SetupId = R.savedSetup();
 function newRace(): Race {
   const practice = mode === 'practice';
   const slot = mode === 'champ' ? 0 : localSlot;
-  const roster: RosterEntry[] = [{ id: localId, control: 'human', slot, name: DRIVERS[0].name, color: R.livery(carId).color }];
+  // the setup is fixed for this race when it is built: a later change only affects the next race (restart takes it)
+  const setup = mode === 'champ' && champ ? champ.setup : carSetupId;
+  const roster: RosterEntry[] = [{ id: localId, control: 'human', slot, name: DRIVERS[0].name, color: R.livery(carId).color, setup }];
   if (practice) return new Race({ practice, roster: [{ ...roster[0], slot: 0 }], track: T.DEF.id });
   for (let k = 1; k < DRIVERS.length; k++) {
     const D = DRIVERS[k];
-    roster.push({ id: `ai${k}`, control: 'ai', slot: k === slot ? 0 : k, name: D.name, color: D.color, persona: D.persona });
+    // the AI rivals carry an explicit setup (Balanced), separate from their personality
+    roster.push({ id: `ai${k}`, control: 'ai', slot: k === slot ? 0 : k, name: D.name, color: D.color, persona: D.persona, setup: DEFAULT_SETUP });
   }
   // the lap target is fixed for this race when it is built: a later change of the setting only affects the next race
   return new Race({ roster, track: T.DEF.id, length: mode === 'champ' && champ ? champ.length : raceLen });
@@ -187,6 +196,8 @@ type Screen = 'title' | 'race' | 'pause' | 'results' | 'boards' | 'champ' | 'onl
 let screen: Screen = 'title';
 let lbTrack = T.DEF.id;
 let lbKind: R.BoardKind = 'practice';
+/** the setup whose laps the leaderboards show (#133): every board holds one setup's laps only, labelled */
+let lbSetup: SetupId = carSetupId;
 /**
  * The pending card's safety net (src/net/netwait.ts): 30 s with no state or result asks the session to resume through
  * the watchdog's drop path, and a refused resume replaces the card with a plain explanation. Declared before enter(),
@@ -327,6 +338,34 @@ function chooseLength(id: string): void {
   R.saveLength(raceLen);
 }
 
+/** A car setup's name ("Speed") and its tag ("Speed setup"), from the one preset table (#133). */
+const setupName = (id: SetupId): string => t(`setup.${id}`);
+const setupTag = (id: SetupId): string => t('setup.tag', { name: setupName(id) });
+/**
+ * The car-setup selector (#133): a radio group like the length one (bindRadios wires it: click, tap or the arrow keys), each
+ * choice its name over a one-word strength, and under it the chosen setup's strength and cost in plain words (a live region,
+ * so a screen reader hears the change). `allowed`: the setups that may be chosen now (a room locked to Balanced disables the
+ * rest, which stay visible). `name` is the data attribute.
+ */
+function setupRadiosHtml(name: string, current: SetupId, ids: readonly SetupId[] = SETUP_IDS, note = '', allowed: readonly SetupId[] = ids): string {
+  const btns = ids.map((id) => {
+    const on = id === current;
+    const off = !allowed.includes(id) && !on;
+    return `<button class="tab len csetup ${on ? 'sel' : ''}" role="radio" aria-checked="${on}" tabindex="${on ? 0 : -1}" data-${name}="${id}" ${off ? 'disabled aria-disabled="true"' : ''} aria-label="${t(`setup.${id}.desc`)}"><b>${setupName(id)}</b> <small>${t(`setup.${id}.short`)}</small></button>`;
+  }).join('');
+  return `<div class="gfx rsetup" data-for="${name}"><div class="lbl2" id="o-${name}">${t('setup.label')}</div><div class="tabs" role="radiogroup" aria-labelledby="o-${name}">${btns}</div><small class="setup-desc" id="o-${name}-desc" aria-live="polite">${t(`setup.${current}.desc`)}</small>${note ? `<small class="len-note">${note}</small>` : ''}</div>`;
+}
+/** Show the chosen setup's strength and cost under its selector. */
+function syncSetupDesc(name: string, id: SetupId): void {
+  const el = overlay.querySelector(`#o-${name}-desc`);
+  if (el) el.textContent = t(`setup.${id}.desc`);
+}
+/** Remember a car setup picked anywhere (title, online menu, own lobby seat) for the next race, practice or seat. */
+function chooseSetup(id: string): void {
+  carSetupId = setupOr(id);
+  R.saveSetup(carSetupId);
+}
+
 const TOUCH_OPTS = TOUCH_MODES.map((id) => ({ id, label: `touch.${id}` }));
 /** Under the graphics selector while the automatic switch to Low is in force: says why, and offers the way back. */
 function autoNoteHtml(): string {
@@ -372,7 +411,7 @@ function showTitle(): void {
   const nRounds = R.CHAMP_TRACKS.length;
   let champBtns = `<button class="cta alt" id="o-champ">${t('title.champ')}</button>`;
   // a championship in progress keeps its own length (#132), so the button says which one it is
-  if (champ && !R.champDone(champ)) champBtns = `<button class="cta alt" id="o-champ-cont">${t('title.champContinue', { n: champ.rounds.length + 1, m: nRounds })} <small>${lengthTag(champ.length)}</small></button><button class="cta alt small" id="o-champ">${t('title.champNew')}</button>`;
+  if (champ && !R.champDone(champ)) champBtns = `<button class="cta alt" id="o-champ-cont">${t('title.champContinue', { n: champ.rounds.length + 1, m: nRounds })} <small>${lengthTag(champ.length)} · ${setupTag(champ.setup)}</small></button><button class="cta alt small" id="o-champ">${t('title.champNew')}</button>`;
   else if (champ) champBtns = `<button class="cta alt" id="o-champ-view">${t('title.champView')}</button><button class="cta alt small" id="o-champ">${t('title.champNew')}</button>`;
   overlay.innerHTML = `<div class="card title">
     <div class="logo">${t('title.name')}</div>
@@ -380,6 +419,7 @@ function showTitle(): void {
     <p id="o-goal">${t('title.goal', { n: raceLength(raceLen).laps })}</p>
     <div class="setup">
       ${lengthRadiosHtml('rlen', raceLen, LENGTH_IDS, t('len.note'))}
+      ${setupRadiosHtml('rsetup', carSetupId, SETUP_IDS, t('setup.note'))}
       <label class="ini"><span class="lbl2">${t('title.initials')}</span><input id="o-ini" maxlength="${R.MAX_INITIALS}" placeholder="${R.ANON}" value="${R.savedInitialsRaw().replace(/"/g, '')}" autocomplete="off" autocapitalize="characters" enterkeyhint="done" spellcheck="false"></label>
       <div><span class="lbl2">${t('title.car')}</span>${carPickerHtml()}</div>
       ${settingsHtml()}
@@ -424,16 +464,19 @@ function showTitle(): void {
     overlay.querySelector('#o-goal')!.textContent = t('title.goal', { n: raceLength(raceLen).laps });
     setRace(newRace());
   });
+  // the setup is the next race's (#133): the grid shown behind the menu is rebuilt with it, nothing running is changed
+  bindRadios('rsetup', (id) => { chooseSetup(id); syncSetupDesc('rsetup', carSetupId); setRace(newRace()); });
   const ini = overlay.querySelector<HTMLInputElement>('#o-ini')!;
   ini.addEventListener('input', () => R.saveInitialsRaw(ini.value));
   ini.addEventListener('keydown', (e) => { if (e.key === 'Enter') ini.blur(); e.stopPropagation(); });
   overlay.querySelector('#o-start')!.addEventListener('click', () => { sfx.init(); startSession('race'); });
   overlay.querySelector('#o-practice')!.addEventListener('click', () => { sfx.init(); startSession('practice'); });
   // a new championship takes the length chosen now and keeps it for every round (#132)
-  overlay.querySelector('#o-champ')!.addEventListener('click', () => { sfx.init(); champ = R.newChamp(carId, R.currentInitials(), raceLen); startChampRound(); });
+  // ...and the setup chosen now for its first round (#133); it can be changed between rounds
+  overlay.querySelector('#o-champ')!.addEventListener('click', () => { sfx.init(); champ = R.newChamp(carId, R.currentInitials(), raceLen, carSetupId); startChampRound(); });
   overlay.querySelector('#o-champ-cont')?.addEventListener('click', () => { sfx.init(); startChampRound(); });
   overlay.querySelector('#o-champ-view')?.addEventListener('click', () => { sfx.init(); showChamp(null); });
-  overlay.querySelector('#o-boards')!.addEventListener('click', () => { sfx.init(); showBoards(); });
+  overlay.querySelector('#o-boards')!.addEventListener('click', () => { sfx.init(); lbSetup = carSetupId; showBoards(); });
 }
 
 function showPause(): void {
@@ -474,13 +517,13 @@ function showResults(): void {
     if (r.status === 'dnf') return `<td class="mono">${t('res.dnf')}</td>`;
     return `<td class="mono">${i === 0 ? fmt(r.time) : '+' + (r.time - winner).toFixed(1) + 's'}${r.est ? ` <small>(${t('res.est')})</small>` : ''}</td>`;
   };
-  const rows = res.map((r, i) => `<tr class="${isMe(r.car) ? 'me' : ''}"><td>${r.status === 'finished' ? i + 1 : '–'}</td><td>${colorDot(r.car.color)}${esc(carLabel(r.car, localId))}</td>
+  const rows = res.map((r, i) => `<tr class="${isMe(r.car) ? 'me' : ''}"><td>${r.status === 'finished' ? i + 1 : '–'}</td><td>${colorDot(r.car.color)}${esc(carLabel(r.car, localId))} ${setupChip(r.car.setup.id)}</td>
     ${timeCell(r, i)}
     <td class="mono">${fmt(r.car.bestLap)}</td><td>${r.car.pitStops}</td><td>${flags(r.car) || '–'}${r.status === 'dq' ? ` <small>${t(`res.dqReason.${r.car.dqReason}`)}</small>` : ''}</td></tr>`).join('');
   const place = mine.status === 'dq' ? `${t('res.youDq')} · ${t(`res.dqReason.${mine.dqReason}`)}` : mine.status === 'finished' ? t('res.youPlace', { n: pos }) : t('res.youDnf');
   overlay.className = 'overlay show';
   overlay.innerHTML = `<div class="card results">
-    <div class="lbl2 res-len">${t(`track.${T.DEF.id}.name`)} · ${lengthTag(race.length.id)}</div>
+    <div class="lbl2 res-len">${t(`track.${T.DEF.id}.name`)} · ${lengthTag(race.length.id)} · <span class="res-setup">${setupTag(mine.setup.id)}</span></div>
     <h2>${pos === 1 && mine.status === 'finished' ? '🏆 ' + t('res.win') : t('res.title')}</h2>
     <div class="place">${place}</div>
     <div class="tscroll"><table><thead><tr><th>#</th><th>${t('res.driver')}</th><th>${t('res.time')}</th><th>${t('res.best')}</th><th>${t('res.pits')}</th><th>${t('res.pen')}</th></tr></thead><tbody>${rows}</tbody></table></div>
@@ -499,7 +542,7 @@ const driverColor = (idx: number): number => (idx === 0 ? R.livery(champ?.car ??
 function recordChampRound(): void {
   // only the race's final standings (every car terminal) are recorded: never a live or estimated order
   if (!champ || champRoundSaved || R.champDone(champ) || race.phase !== 'done' || !race.final) return;
-  champ.rounds.push(R.roundRecord(T.DEF.id, race.final.map((x) => ({ car: { idx: x.slot }, status: x.status, time: x.time ?? 0 }))));
+  champ.rounds.push(R.roundRecord(T.DEF.id, race.final.map((x) => ({ car: { idx: x.slot }, status: x.status, time: x.time ?? 0 })), me().setup.id));
   R.saveChamp(champ);
   champRoundSaved = true;
 }
@@ -541,8 +584,11 @@ function showChamp(finished: Race | null): void {
     <h3>${done ? t('champ.final') : t('champ.standings')}</h3>
     <div class="tscroll"><table><thead><tr><th>#</th><th>${t('res.driver')}</th><th>${t('champ.points')}</th><th>${t('champ.wins')}</th><th>${t('champ.seconds')}</th></tr></thead><tbody>${stRows}</tbody></table></div>
     ${localCareerNote()}
+    ${done ? '' : setupRadiosHtml('csetup', c.setup, SETUP_IDS, t('setup.champNote'))}
     <div class="row">${done ? '' : `<button class="cta" id="o-next">${t('champ.continue', { n: c.rounds.length + 1 })}</button>`}<button class="cta alt" id="o-menu">${t('champ.menu')}</button></div>
   </div>`;
+  // between rounds only (#133): the next round races the setup chosen here; a round under way never changes
+  bindRadios('csetup', (id) => { c.setup = setupOr(id); R.saveChamp(c); chooseSetup(id); syncSetupDesc('csetup', c.setup); });
   overlay.querySelector('#o-next')?.addEventListener('click', () => { sfx.init(); startChampRound(); });
   overlay.querySelector('#o-menu')!.addEventListener('click', toMenu);
 }
@@ -553,19 +599,22 @@ function showBoards(): void {
   overlay.className = 'overlay show';
   const tabs = T.TRACKS.map((d) => `<button class="tab ${d.id === lbTrack ? 'sel' : ''}" data-id="${d.id}">${t(`track.${d.id}.name`)}</button>`).join('');
   const kinds = (['practice', 'race'] as R.BoardKind[]).map((k) => `<button class="tab kind ${k === lbKind ? 'sel' : ''}" data-kind="${k}">${t(`boards.${k}`)}</button>`).join('');
-  const rows = R.board(lbKind, lbTrack);
+  const rows = R.board(lbKind, lbTrack, lbSetup);
   const body = rows.length ? rows.map((r, i) => `<tr class="${freshIds.has(r.id) ? 'fresh' : ''}"><td>${i + 1}</td><td>${r.initials}</td><td>${colorDot(R.livery(r.car).color)}${R.livery(r.car).name}</td><td class="mono">${R.fmtMs(r.ms)}</td><td>${freshIds.has(r.id) ? `<span class="chip yel">${t('boards.new')}</span>` : ''}</td></tr>`).join('')
     : `<tr><td colspan="5" class="empty">${t('boards.empty')}</td></tr>`;
   overlay.innerHTML = `<div class="card results boards">
     <h2>${t('boards.title')}</h2>
-    <p>${t('boards.hint')}</p>
+    <p>${t('boards.hint')} ${t('boards.setupHint')}</p>
     <div class="tabs">${tabs}</div>
     <div class="tabs">${kinds}</div>
+    <div class="tabs" role="radiogroup" aria-label="${t('setup.label')}">${SETUP_IDS.map((id) => `<button class="tab setupf ${id === lbSetup ? 'sel' : ''}" role="radio" aria-checked="${id === lbSetup}" data-lbsetup="${id}">${setupName(id)}</button>`).join('')}</div>
+    <div class="lbl2 lb-setup">${t(`track.${lbTrack}.name`)} · ${t(`boards.${lbKind}`)} · ${setupTag(lbSetup)}</div>
     <div class="tscroll"><table><thead><tr><th>${t('boards.rank')}</th><th>${t('boards.initials')}</th><th>${t('boards.car')}</th><th>${t('boards.time')}</th><th></th></tr></thead><tbody>${body}</tbody></table></div>
     <div class="row"><button class="cta alt" id="o-back">${t('boards.back')}</button></div>
   </div>`;
   overlay.querySelectorAll<HTMLElement>('.tab[data-id]').forEach((b) => b.addEventListener('click', () => { lbTrack = b.dataset.id!; showBoards(); }));
   overlay.querySelectorAll<HTMLElement>('.tab[data-kind]').forEach((b) => b.addEventListener('click', () => { lbKind = b.dataset.kind as R.BoardKind; showBoards(); }));
+  overlay.querySelectorAll<HTMLElement>('.tab[data-lbsetup]').forEach((b) => b.addEventListener('click', () => { lbSetup = setupOr(b.dataset.lbsetup); showBoards(); (overlay.querySelector(`[data-lbsetup="${lbSetup}"]`) as HTMLElement | null)?.focus(); }));
   overlay.querySelector('#o-back')!.addEventListener('click', showTitle);
 }
 
@@ -583,7 +632,8 @@ function startSession(m: Mode): void {
   camMode = 'follow';
   recorder.stop(); pendingLap = null;
   if (mode === 'practice') {
-    const g = R.loadGhost(T.DEF.id, carId, R.currentInitials());
+    // only a ghost driven with this setup at its current tuning is challenged (#133); the personal best is that setup's own
+    const g = R.loadGhost(T.DEF.id, carId, R.currentInitials(), me().setup.id);
     ghost.setData(g); pbMs = g ? g.ms : 0;
   } else { ghost.setData(null); pbMs = 0; }
   resume();
@@ -603,7 +653,7 @@ function onPlayerCross(): void {
     if (lap.valid) {
       const ms = lap.time * 1000;
       const data = recorder.finish(p, race.raceTime, T.DEF.id, carId, R.currentInitials(), ms);
-      const rec = R.submitLap('practice', T.DEF.id, R.currentInitials(), carId, ms);
+      const rec = R.submitLap('practice', T.DEF.id, R.currentInitials(), carId, ms, p.setup.id);
       if (rec) freshIds.add(rec.id);
       if (pbMs === 0 || ms < pbMs) {
         const first = pbMs === 0;
@@ -855,8 +905,9 @@ function handle(e: RaceEvent): void {
       // every valid completed lap counts, the final race lap included: this event is handled after the step that also
       // classified the finish, so the car already reads as finished here (a race core lap event is never sent after it)
       if (e.valid && mode !== 'online' && !net) {
-        const rec = R.submitLap('race', T.DEF.id, R.currentInitials(), carId, e.time * 1000);
-        if (rec) { freshIds.add(rec.id); const rank = R.board('race', T.DEF.id).findIndex((r) => r.id === rec.id) + 1; hud.toast(t('msg.boardEntry', { n: rank, time: R.fmtMs(e.time * 1000) }), 'good'); break; }
+        // the lap goes on its own setup's board (#133), never on another setup's
+        const rec = R.submitLap('race', T.DEF.id, R.currentInitials(), carId, e.time * 1000, p.setup.id);
+        if (rec) { freshIds.add(rec.id); const rank = R.board('race', T.DEF.id, p.setup.id).findIndex((r) => r.id === rec.id) + 1; hud.toast(t('msg.boardEntry', { n: rank, time: R.fmtMs(e.time * 1000) }), 'good'); break; }
       }
       if (e.best && p.lapsDone > 1 && !p.finished) hud.toast(t('msg.bestLap', { time: fmt(e.time) }), 'good');
       break;
@@ -1057,6 +1108,7 @@ function showOnline(): void {
     </div>
     <p><small>${t('net.trackNote', { track: t(`track.${T.DEF.id}.name`) })}</small></p>
     ${netLengths().length > 1 ? lengthRadiosHtml('nrlen', netLength(), netLengths(), t('net.lengthNote', { len: lengthTag(netLength()) })) : `<p class="len-old"><small>${t('net.lengthOld')}</small></p>`}
+    ${netSetups().length > 1 ? setupRadiosHtml('nrsetup', netSetup(), netSetups()) : `<p class="setup-old"><small>${t('setup.oldServer')}</small></p>`}
     <div class="modes-grid">
       <div class="mode-box"><b>${t('net.modeMulti')}</b><small>${t('net.multiDesc')}</small>
         <label class="chk"><input type="checkbox" id="n-ai"> ${t('net.aiFill')}</label>
@@ -1108,8 +1160,10 @@ function showOnline(): void {
     const w = who(); if (!w) return;
     const c = code.value.trim().toUpperCase();
     if (c.length !== LIMITS.codeLength) { say(t('net.err.code')); code.focus(); return; }
-    void netBegin((s) => s.join(c, w.n, netLivery(), w.expect));
+    void netBegin((s) => s.join(c, w.n, netLivery(), w.expect, netSetup()));
   };
+  // the setup goes only to a server that runs setups (NetSession drops it otherwise): every car there is Balanced (#133)
+  bindRadios('nrsetup', (id) => { chooseSetup(id); syncSetupDesc('nrsetup', netSetup()); });
   // the length goes only to a server that runs presets (NetSession drops it otherwise): such a room is Standard
   bindRadios('nrlen', (id) => {
     chooseLength(id);
@@ -1118,15 +1172,16 @@ function showOnline(): void {
     const cl = overlay.querySelector('#n-champ-len');
     if (cl && !connectedChampLength()) cl.textContent = `${lengthTag(netLength())} · ${t('len.champNote')}`;
   });
-  overlay.querySelector('#n-create')!.addEventListener('click', () => { const w = who(); if (w) void netBegin((s) => s.create(w.n, 'multiplayer', { track: T.DEF.id, aiFill: overlay.querySelector<HTMLInputElement>('#n-ai')!.checked, length: netLength() }, netLivery(), w.expect)); });
+  overlay.querySelector('#n-create')!.addEventListener('click', () => { const w = who(); if (w) void netBegin((s) => s.create(w.n, 'multiplayer', { track: T.DEF.id, aiFill: overlay.querySelector<HTMLInputElement>('#n-ai')!.checked, length: netLength() }, netLivery(), w.expect, undefined, netSetup())); });
   overlay.querySelector('#n-join')!.addEventListener('click', join);
-  overlay.querySelector('#n-solo')!.addEventListener('click', () => { const w = who(); if (w) void netBegin((s) => s.create(w.n, 'solo', { track: T.DEF.id, length: netLength() }, netLivery(), w.expect)); });
+  overlay.querySelector('#n-solo')!.addEventListener('click', () => { const w = who(); if (w) void netBegin((s) => s.create(w.n, 'solo', { track: T.DEF.id, length: netLength() }, netLivery(), w.expect, undefined, netSetup())); });
   overlay.querySelector('#n-champ')?.addEventListener('click', () => {
     const w = who(); if (!w) return;
     const c = connectedChamp();
     // the championship's length is chosen when its first round is started, and every later round keeps it (#132)
     const length = connectedChampLength() ?? keepConnectedChampLength(c, netLength());
-    void netBegin((s) => s.create(w.n, 'championship', { track: R.CHAMP_TRACKS[c.round - 1], length }, netLivery(), w.expect, c));
+    // each round's setup is the one chosen for it here (#133): a new choice is allowed between rounds, never during one
+    void netBegin((s) => s.create(w.n, 'championship', { track: R.CHAMP_TRACKS[c.round - 1], length }, netLivery(), w.expect, c, netSetup()));
   });
   overlay.querySelector('#n-back')!.addEventListener('click', () => { netNotice = ''; showTitle(); });
 }
@@ -1437,6 +1492,10 @@ function localCareerNote(): string {
 const netLengths = (): readonly RaceLengthId[] => (online.state === 'available' ? online.lengths : []);
 /** The length a new online room asks for: the remembered choice when this server runs it, else Standard. */
 const netLength = (): RaceLengthId => (netLengths().includes(raceLen) ? raceLen : 'standard');
+/** The car setups the connected server accepts (#133): none from a server older than setups, whose cars are all Balanced. */
+const netSetups = (): readonly SetupId[] => (online.state === 'available' ? online.setups : []);
+/** The setup a new online seat asks for: the remembered choice when this server runs it, else Balanced. */
+const netSetup = (): SetupId => (netSetups().includes(carSetupId) ? carSetupId : DEFAULT_SETUP);
 
 /** This account's stored connected championship: its tag (round 1-4) and, once its first round started, its length (#132). */
 function readConnectedChamp(): { tag: ChampionshipTag; length: RaceLengthId | null } | null {
@@ -1529,8 +1588,8 @@ function loadCareer(accountId: string): void {
 function careerHtml(s: CareerStats): string {
   const c = s.career;
   const tile = (v: number | string, label: string, id: string): string => `<div class="tile" data-k="${id}"><b class="mono">${v}</b><small>${label}</small></div>`;
-  const bests = s.bests.length ? `<div class="tscroll"><table><thead><tr><th>${t('career.circuit')}</th><th>${t('career.mode')}</th><th>${t('res.best')}</th></tr></thead><tbody>${s.bests.map((b) => `<tr data-mode="${b.mode}"><td>${t(`track.${b.track}.name`)}${b.current ? '' : ` <small>(${t('career.oldLayout')})</small>`}</td><td>${careerMode(b.mode)}</td><td class="mono">${R.fmtMs(b.lapMs)} <small>${t('career.lapN', { n: b.lap })} · ${fmtDate(b.setAt)}</small></td></tr>`).join('')}</tbody></table></div>` : `<p><small>${t('career.noBests')}</small></p>`;
-  const recent = s.recent.length ? `<div class="tscroll"><table><thead><tr><th>${t('career.date')}</th><th>${t('career.mode')}</th><th>${t('career.circuit')}</th><th>#</th><th>${t('champ.points')}</th></tr></thead><tbody>${s.recent.map((x) => `<tr data-race="${esc(x.raceId)}"><td>${fmtDate(x.finishedAt)}</td><td>${careerMode(x.mode)}${x.championship ? ` <small>R${x.championship.round}</small>` : ''} <small class="len">${lengthName(lengthOr(x.length))}</small></td><td>${t(`track.${x.track}.name`)}</td><td>${x.status === 'dq' ? t('res.dq') : x.status === 'dnf' ? t('res.dnf') : `P${x.pos}/${x.field}`}</td><td class="mono">${x.points}</td></tr>`).join('')}</tbody></table></div>` : `<p><small>${t('career.noRaces')}</small></p>`;
+  const bests = s.bests.length ? `<div class="tscroll"><table><thead><tr><th>${t('career.circuit')}</th><th>${t('career.mode')}</th><th>${t('res.best')}</th></tr></thead><tbody>${s.bests.map((b) => `<tr data-mode="${b.mode}" data-setup="${setupOr(b.setup)}"><td>${t(`track.${b.track}.name`)}${b.current ? '' : ` <small>(${t(b.tuningCurrent === false ? 'career.oldTuning' : 'career.oldLayout')})</small>`}</td><td>${careerMode(b.mode)} ${setupChip(b.setup)}</td><td class="mono">${R.fmtMs(b.lapMs)} <small>${t('career.lapN', { n: b.lap })} · ${fmtDate(b.setAt)}</small></td></tr>`).join('')}</tbody></table></div>` : `<p><small>${t('career.noBests')}</small></p>`;
+  const recent = s.recent.length ? `<div class="tscroll"><table><thead><tr><th>${t('career.date')}</th><th>${t('career.mode')}</th><th>${t('career.circuit')}</th><th>#</th><th>${t('champ.points')}</th></tr></thead><tbody>${s.recent.map((x) => `<tr data-race="${esc(x.raceId)}"><td>${fmtDate(x.finishedAt)}</td><td>${careerMode(x.mode)}${x.championship ? ` <small>R${x.championship.round}</small>` : ''} <small class="len">${lengthName(lengthOr(x.length))}</small> ${setupChip(x.setup)}</td><td>${t(`track.${x.track}.name`)}</td><td>${x.status === 'dq' ? t('res.dq') : x.status === 'dnf' ? t('res.dnf') : `P${x.pos}/${x.field}`}</td><td class="mono">${x.points}</td></tr>`).join('')}</tbody></table></div>` : `<p><small>${t('career.noRaces')}</small></p>`;
   return `<h3>${t('career.title')} · <span class="nm">${esc(s.displayName)}</span></h3>
     <div class="tiles">${tile(c.points, t('career.points'), 'points')}${tile(c.wins, '🥇', 'wins')}${tile(c.seconds, '🥈', 'seconds')}${tile(c.thirds, '🥉', 'thirds')}${tile(c.races, t('career.races'), 'races')}</div>
     <p><small>${t('career.policy', { a: s.scoring.podium[0] ?? 0, b: s.scoring.podium[1] ?? 0, c: s.scoring.podium[2] ?? 0 })}</small></p>
@@ -1576,8 +1635,12 @@ function seatRow(p: PublicRoom['participants'][number], hostId: string | null): 
   else if (!p.connected) tags.push(`<span class="chip org">${t('net.disconnected')}</span>`);
   if (!p.left && p.id !== hostId) tags.push(p.ready ? `<span class="chip grn">${t('net.ready')}</span>` : `<span class="chip dim">${t('net.notReady')}</span>`);
   const asked = p.liveryRequested ? ` <small>${t('net.asked', { c: t(`net.liv.${p.liveryRequested}`) })}</small>` : '';
-  return `<tr class="${p.id === net?.me ? 'me' : ''}" data-pid="${esc(p.id)}"><td class="mono">#${p.num}</td><td>${colorDot(p.color)}<span class="nm">${esc(p.name)}</span>${asked}</td><td>${tags.join(' ')}</td></tr>`;
+  // every driver's setup is shown to everyone before the start (#133); a server older than setups names none (Balanced)
+  return `<tr class="${p.id === net?.me ? 'me' : ''}" data-pid="${esc(p.id)}" data-setup="${setupOr(p.setup)}"><td class="mono">#${p.num}</td><td>${colorDot(p.color)}<span class="nm">${esc(p.name)}</span>${asked} ${setupChip(p.setup)}</td><td>${tags.join(' ')}</td></tr>`;
 }
+
+/** A driver's setup as a small text label (#133), for the lobby and results tables. */
+const setupChip = (id: SetupId | undefined): string => `<small class="setup-chip" data-setup="${setupOr(id)}">${setupName(setupOr(id))}</small>`;
 
 /** The room: code to share, track, every driver's identity and state, AI slots, and what this browser may do. */
 function showLobby(): void {
@@ -1600,7 +1663,15 @@ function showLobby(): void {
     ? lengthRadiosHtml('nlen', len, net.lengths)
     : `<div class="lbl2">${t('len.label')}</div><div class="lobby-track lobby-len" id="l-len">${lengthTag(len)}</div>`;
   const aiRow = r.mode === 'multiplayer' ? (host ? `<label class="chk"><input type="checkbox" id="l-ai" ${r.settings.aiFill ? 'checked' : ''}> ${t('net.aiFill')}</label>` : `<small>${t(r.settings.aiFill ? 'net.aiOn' : 'net.aiOff')}</small>`) : '';
-  const aiRows = r.ai.map((a) => `<tr class="ai"><td class="mono">#${a.num}</td><td>${colorDot(a.color)}<span class="nm">${esc(a.name)}</span></td><td><span class="chip dim">${t('net.aiSlot')}</span></td></tr>`).join('');
+  const aiRows = r.ai.map((a) => `<tr class="ai" data-setup="${setupOr(a.setup)}"><td class="mono">#${a.num}</td><td>${colorDot(a.color)}<span class="nm">${esc(a.name)}</span> ${setupChip(a.setup)}</td><td><span class="chip dim">${t('net.aiSlot')}</span></td></tr>`).join('');
+  // this driver's own setup (#133): only on a server that runs setups (its rooms list `setups`), only in the lobby. A room
+  // a seated older page keeps to Balanced shows the others disabled and says why
+  const offered = net.setups;
+  const allowed = r.setups ?? [];
+  const mySetup = setupOr(meP?.setup);
+  const setupRow = r.setups !== undefined && offered.length > 1 && meP && !meP.left
+    ? setupRadiosHtml('nsetup', mySetup, offered, allowed.length > 1 ? t('setup.lobbyNote') : t('setup.lockNote'), allowed)
+    : '';
   const free = r.maxHumans - r.participants.filter((p) => !p.left).length;
   const livs = NET_LIVERIES.map((l) => `<button class="car sq ${meP?.livery === l.id ? 'sel' : ''}" data-mylivery="${l.id}" aria-label="${t(`net.liv.${l.id}`)}" title="${t(`net.liv.${l.id}`)}"><i style="background:${hexc(l.color)}"></i></button>`).join('');
   overlay.innerHTML = `<div class="card results lobby">
@@ -1614,6 +1685,7 @@ function showLobby(): void {
     <div class="tscroll"><table><thead><tr><th>${t('net.num')}</th><th>${t('res.driver')}</th><th>${t('net.state')}</th></tr></thead><tbody>${r.participants.map((p) => seatRow(p, r.hostId)).join('')}${aiRows}</tbody></table></div>
     ${r.mode === 'multiplayer' ? `<p><small>${t('net.seats', { n: Math.max(0, free), m: r.maxHumans })}</small></p>` : ''}
     <div class="lbl2">${t('net.yourColour')}</div><div class="cars">${livs}</div>
+    ${setupRow}
     <p id="l-msg" class="net-msg" role="status" aria-live="polite">${esc(host ? waitingFor : t('net.hostStarts'))}</p>
     <div class="row">
       ${host ? `<button class="cta" id="l-start" ${live} ${waitingFor && r.mode === 'multiplayer' ? 'aria-disabled="true"' : ''}>${t('net.start')}</button>` : `<button class="cta" id="l-ready" ${live}>${t(meP?.ready ? 'net.unready' : 'net.readyBtn')}</button>`}
@@ -1631,6 +1703,7 @@ function showLobby(): void {
   overlay.querySelectorAll<HTMLElement>('[data-ntrack]').forEach((b) => b.addEventListener('click', () => net?.settings({ track: b.dataset.ntrack! })));
   bindRadios('nlen', (id) => { chooseLength(id); net?.settings({ length: lengthOr(id) }); });
   overlay.querySelector<HTMLInputElement>('#l-ai')?.addEventListener('change', (e) => net?.settings({ aiFill: (e.target as HTMLInputElement).checked }));
+  bindRadios('nsetup', (id) => { chooseSetup(id); syncSetupDesc('nsetup', setupOr(id)); net?.setup(setupOr(id)); });
   overlay.querySelectorAll<HTMLElement>('[data-mylivery]').forEach((b) => b.addEventListener('click', () => { try { localStorage.setItem(NLIV_KEY, b.dataset.mylivery!); } catch { /* ignore */ } net?.livery(b.dataset.mylivery as LiveryId); }));
   overlay.querySelector('#l-start')?.addEventListener('click', () => net?.start());
   overlay.querySelector('#l-ready')?.addEventListener('click', () => net?.ready(!meP?.ready));
@@ -1659,10 +1732,10 @@ function showNetMenu(): void {
 }
 
 /** Standings rows from the server: positions only for classified finishers, explicit DQ and DNF, nothing estimated. */
-function standingRows(rows: { id: string; name: string; color: number; num: number; pos: number | null; status: string; time: number | null; best: number; pits: number; reason: string; lap?: string }[]): string {
+function standingRows(rows: { id: string; name: string; color: number; num: number; pos: number | null; status: string; time: number | null; best: number; pits: number; reason: string; lap?: string; setup?: SetupId }[]): string {
   return rows.map((x) => {
     const cell = x.status === 'dq' ? `<td class="mono dq">${t('res.dq')}</td>` : x.status === 'dnf' ? `<td class="mono">${t('res.dnf')}</td>` : x.status === 'running' ? `<td class="mono"><small>${t('net.stillRacing')}${x.lap ? ` · ${x.lap}` : ''}</small></td>` : `<td class="mono">${fmt(x.time ?? NaN)}</td>`;
-    return `<tr class="${x.id === localId ? 'me' : ''}" data-status="${x.status}"><td>${x.pos ?? '–'}</td><td>${colorDot(x.color)}#${x.num} ${esc(x.id === localId ? t('hud.you') : x.name)}</td>${cell}<td class="mono">${fmt(x.best)}</td><td>${x.pits}</td><td>${x.reason}</td></tr>`;
+    return `<tr class="${x.id === localId ? 'me' : ''}" data-status="${x.status}"><td>${x.pos ?? '–'}</td><td>${colorDot(x.color)}#${x.num} ${esc(x.id === localId ? t('hud.you') : x.name)} ${setupChip(x.setup)}</td>${cell}<td class="mono">${fmt(x.best)}</td><td>${x.pits}</td><td>${x.reason}</td></tr>`;
   }).join('');
 }
 const STAND_HEAD = (): string => `<thead><tr><th>#</th><th>${t('res.driver')}</th><th>${t('res.time')}</th><th>${t('res.best')}</th><th>${t('res.pits')}</th><th>${t('res.pen')}</th></tr></thead>`;
@@ -1715,6 +1788,7 @@ function renderNetWait(): void {
   const rows = race.order().map((c) => ({
     id: c.id, name: c.name, color: c.color, num: c.num, pos: null, status: c.status, time: c.status === 'finished' ? c.finishTime + c.timePen : null,
     best: c.bestLap, pits: c.pitStops, reason: c.status === 'dq' ? t(`res.dqReason.${c.dqReason}`) : c.status === 'dnf' ? t(`net.dnf.${c.dnfReason}`) : flags(c), lap: `${Math.min(race.targetLaps, c.lapsDone + 1)}/${race.targetLaps}`,
+    setup: c.setup.id,
   }));
   const head = p.status === 'dq' ? `${t('res.youDq')} · ${t(`res.dqReason.${p.dqReason}`)}` : p.status === 'dnf' ? t('res.youDnf') : t('net.youFinished');
   const body = standingRows(rows);
@@ -1733,7 +1807,7 @@ function showNetResults(r: ResultView): void {
   let body: string, head: string;
   if (r.classification) {
     const rows = r.classification.map((x) => ({
-      id: x.id, name: byId.get(x.id)?.name ?? x.id, color: liv(x.id), num: byId.get(x.id)?.num ?? 0, pos: x.pos, status: x.status, time: x.time,
+      id: x.id, name: byId.get(x.id)?.name ?? x.id, color: liv(x.id), num: byId.get(x.id)?.num ?? 0, pos: x.pos, status: x.status, time: x.time, setup: byId.get(x.id)?.setup,
       best: x.bestLap, pits: x.pitStops, reason: x.status === 'dq' ? `<span class="flag sg">${t('hud.flagDq')}</span> <small>${t(`res.dqReason.${x.dqReason}`)}</small>` : x.status === 'dnf' ? `<small>${t(`net.dnf.${x.dnfReason}`)}</small>` : x.timePen > 0 ? `<span class="flag tp">+${x.timePen}s</span>` : '–',
     }));
     const mine = r.classification.find((x) => x.id === localId);
@@ -1870,17 +1944,18 @@ if (ONLINE_ENABLED) {
  * without a server, so the banner layout can be checked in the default build, where online play is off. The session has no
  * socket and never opens one (its constructor throws); calling again with another state re-renders the same room.
  */
-function qaNetLobby(room: PublicRoom, meId: string, conn: Conn, lengths?: RaceLengthId[]): void {
+function qaNetLobby(room: PublicRoom, meId: string, conn: Conn, lengths?: RaceLengthId[], setups?: SetupId[]): void {
   if (!net) {
     const NoSocket = function () { throw new Error('qa lobby: no socket'); } as unknown as SocketCtor;
     net = new NetSession('', NoSocket, {}, null);
     mode = 'online';
   }
   // `lengths`: the race-length presets the pretend server's welcome lists (#132); omitted, a server older than presets
-  net.client.welcome = lengths ? { t: 'welcome', v: 0, server: 'qa', rules: 'qa', now: 0, lengths } : null;
+  // `setups`: the car setups it lists (#133); omitted, a server older than setups
+  net.client.welcome = lengths || setups ? { t: 'welcome', v: 0, server: 'qa', rules: 'qa', now: 0, ...(lengths ? { lengths } : {}), ...(setups ? { setups } : {}) } : null;
   net.room = room; net.me = meId; net.conn = conn;
   showLobby();
   syncBanner();
 }
 
-(window as unknown as { __game: unknown }).__game = { get online() { return online; }, get auth() { return { state: accounts.auth.state, busy: accounts.busy, displayName: accounts.account?.displayName ?? null }; }, get net() { return net && { conn: net.conn, me: net.me, room: net.room, result: net.result, reconnects: net.reconnects, tick: netTick, lagMs: netLag, buf: netBuf.stats, raceId: netRaceId, held: net.client.held, ctlSeq: net.client.ctlSeq, actSeq: net.client.actSeq }; }, netDrop: () => net?.client.ws?.close(4000, 'qa drop'), qaNetLobby, get race() { return race; }, T, R, applyTrack, startSession, showTitle, get mode() { return mode; }, get preset() { return preset; }, get touchMode() { return touchMode; }, setTouchMode, input, get audio() { return sfx.ctx?.state ?? null; }, get muted() { return sfx.muted; }, suspendAudio: () => sfx.ctx?.suspend(), get champ() { return champ; }, get raceLen() { return raceLen; }, get bays() { return bayPaint; }, get ghost() { return ghost; }, get pbMs() { return pbMs; }, get screen() { return screen; }, get view() { return camMode; }, get aspect() { return camera.aspect; }, get mini() { return { w: hud.mW, h: hud.mH }; }, stepper, advance: (sec: number) => { for (let t = 0; t < sec && simulating(); t += STEP) tick(STEP); }, setView: (m: 'follow' | 'full') => { camMode = m; }, zoom: (span: number) => { camMode = 'follow'; followSpan = span; curSpan = span; }, snapCam: () => { const p = me(); camLead.set(0, 0); camTarget.set(p.x, 0, -p.y); }, get marker() { return playerMarker; }, get localId() { return localId; }, setLocalSlot: (n: number) => { localSlot = Math.max(0, Math.min(DRIVERS.length - 1, Math.floor(n))); }, get camTarget() { return { x: camTarget.x, z: camTarget.z }; }, get motorMix() { return motorMix; }, arrows: { lane: laneArrow, pit: pitArrow }, info: () => ({ calls: renderer.info.render.calls, tris: renderer.info.render.triangles, objects: world.root.children.length, frames: renderer.info.render.frame, geometries: renderer.info.memory.geometries, textures: renderer.info.memory.textures }) };
+(window as unknown as { __game: unknown }).__game = { get online() { return online; }, get auth() { return { state: accounts.auth.state, busy: accounts.busy, displayName: accounts.account?.displayName ?? null }; }, get net() { return net && { conn: net.conn, me: net.me, room: net.room, result: net.result, reconnects: net.reconnects, tick: netTick, lagMs: netLag, buf: netBuf.stats, raceId: netRaceId, held: net.client.held, ctlSeq: net.client.ctlSeq, actSeq: net.client.actSeq }; }, netDrop: () => net?.client.ws?.close(4000, 'qa drop'), qaNetLobby, get race() { return race; }, T, R, applyTrack, startSession, showTitle, get mode() { return mode; }, get preset() { return preset; }, get touchMode() { return touchMode; }, setTouchMode, input, get audio() { return sfx.ctx?.state ?? null; }, get muted() { return sfx.muted; }, suspendAudio: () => sfx.ctx?.suspend(), get champ() { return champ; }, get raceLen() { return raceLen; }, get carSetup() { return carSetupId; }, get bays() { return bayPaint; }, get ghost() { return ghost; }, get pbMs() { return pbMs; }, get screen() { return screen; }, get view() { return camMode; }, get aspect() { return camera.aspect; }, get mini() { return { w: hud.mW, h: hud.mH }; }, stepper, advance: (sec: number) => { for (let t = 0; t < sec && simulating(); t += STEP) tick(STEP); }, setView: (m: 'follow' | 'full') => { camMode = m; }, zoom: (span: number) => { camMode = 'follow'; followSpan = span; curSpan = span; }, snapCam: () => { const p = me(); camLead.set(0, 0); camTarget.set(p.x, 0, -p.y); }, get marker() { return playerMarker; }, get localId() { return localId; }, setLocalSlot: (n: number) => { localSlot = Math.max(0, Math.min(DRIVERS.length - 1, Math.floor(n))); }, get camTarget() { return { x: camTarget.x, z: camTarget.z }; }, get motorMix() { return motorMix; }, arrows: { lane: laneArrow, pit: pitArrow }, info: () => ({ calls: renderer.info.render.calls, tris: renderer.info.render.triangles, objects: world.root.children.length, frames: renderer.info.render.frame, geometries: renderer.info.memory.geometries, textures: renderer.info.memory.textures }) };

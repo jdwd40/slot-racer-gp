@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Bounded browser validation of the real game. Procedure and results: docs/validation.md.
 //
-//   node scripts/browser-check.mjs [tracks race controlled routing practice championship touch responsive touchrace reverse service lastchance stall queue autosg autobay localslot online memory netbanner racelength]   functional checks (default: all)
+//   node scripts/browser-check.mjs [tracks race controlled routing practice championship touch responsive touchrace reverse service lastchance stall queue autosg autobay localslot online memory netbanner racelength carsetup]   functional checks (default: all)
 //   node scripts/browser-check.mjs perf --label updated --machine "<name>"          frame-time capture
 //   node scripts/browser-check.mjs compare <baseline.json> <updated.json>           like-for-like comparison
 //
@@ -194,6 +194,195 @@ function scriptedTime() {
   const g = window.__game;
   const advance = g.advance;
   g.advance = (sec) => { advance(sec); for (const c of g.race.cars) { c.stallT = 0; c.stallRun = 0; } };
+}
+
+/**
+ * Car setups (#133): the title's Car setup selector (mouse, keyboard, touch), its plain-words strength and cost, the setup
+ * reaching the race and results, practice ghosts and leaderboards kept per setup (a legacy ghost is Balanced's), a
+ * championship's setup changed between rounds, and the lobby: every driver's setup shown, the driver's own selector, a room
+ * locked to Balanced by an older page, and a server older than setups.
+ */
+async function carsetup(run, c) {
+  const titleState = (page) => read(page, () => ({
+    opts: [...document.querySelectorAll('[data-rsetup]')].map((b) => ({ id: b.dataset.rsetup, on: b.getAttribute('aria-checked') === 'true', text: b.textContent.replace(/\s+/g, ' ').trim(), label: b.getAttribute('aria-label') })),
+    group: document.querySelector('[data-rsetup]')?.closest('[role="radiogroup"]')?.getAttribute('aria-labelledby') ?? null,
+    desc: document.getElementById('o-rsetup-desc')?.textContent ?? '', live: document.getElementById('o-rsetup-desc')?.getAttribute('aria-live') ?? null,
+    chosen: window.__game.carSetup, car: window.__game.race.car(window.__game.localId).setup.id, ai: window.__game.race.cars.filter((x) => !x.human).map((x) => x.setup.id).join(),
+    stored: localStorage.getItem('srgp.setup'),
+  }));
+  const selected = (t) => t.opts.filter((o) => o.on).map((o) => o.id).join();
+  const name = (id) => STRINGS[`setup.${id}`];
+  const stag = (id) => STRINGS['setup.tag'].replace('{name}', name(id));
+  const toFlag = async (page, keys, lap) => {
+    await read(page, (n) => {
+      const gm = window.__game, T = gm.T, r = gm.race, p = r.car(gm.localId);
+      gm.advance(7);
+      r.cars.forEach((x, i) => { if (x !== p) x.u += 40 + i * 8; });
+      p.u = T.FINISH_S + n * T.L - 3; p.hiU = p.u; p.crossed = n; p.lapsDone = n - 1; p.sectors = 7; p.v = 16; p.mode = 'race';
+    }, lap);
+    await keys.set('KeyW', true);
+    await read(page, () => window.__game.advance(5));
+    await keys.release();
+  };
+  const selectorBox = (page, attr) => read(page, (a) => {
+    const bs = [...document.querySelectorAll(`[data-${a}]`)].map((b) => { b.scrollIntoView({ block: 'center' }); const r = b.getBoundingClientRect(); return { id: b.dataset[a], x: r.x, y: r.y, r: r.right, b: r.bottom, w: r.width, h: r.height, top: document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2)?.closest('button') === b, clipped: b.scrollWidth > b.clientWidth + 1 }; });
+    const hit = (p, q) => p.x < q.r - 0.5 && q.x < p.r - 0.5 && p.y < q.b - 0.5 && q.y < p.b - 0.5;
+    const card = document.querySelector('.overlay.show .card').getBoundingClientRect();
+    const desc = document.querySelector(`[data-for="${a}"] .setup-desc`)?.getBoundingClientRect();
+    return { bs, overlap: bs.some((p, i) => bs.some((q, j) => i < j && hit(p, q))) || (!!desc && bs.some((p) => hit(p, { x: desc.x, y: desc.y, r: desc.right, b: desc.bottom }))), inside: bs.every((b) => b.x >= card.x - 0.5 && b.r <= card.right + 0.5 && b.x >= 0 && b.r <= innerWidth + 0.5), oneRow: new Set(bs.map((b) => Math.round(b.y))).size === 1 };
+  }, attr);
+
+  // ---- desktop: mouse and keyboard
+  const d = await open(run, { viewport: { width: 1280, height: 800 } });
+  {
+    const { page, keys } = d;
+    const t0 = await titleState(page);
+    c.ok('Desktop title: a labelled Car setup group offers Balanced (chosen by default), Speed and Grip, each with its strength in a word', t0.group === 'o-rsetup' && t0.opts.map((o) => o.text).join('|') === ['balanced', 'speed', 'grip'].map((id) => `${name(id)} ${STRINGS[`setup.${id}.short`]}`).join('|') && selected(t0) === 'balanced' && t0.chosen === 'balanced' && t0.car === 'balanced' && t0.stored === null, t0);
+    c.ok('Desktop: the chosen setup\'s strength and cost are written out under the selector (a live region); every choice\'s label carries its own', t0.desc === STRINGS['setup.balanced.desc'] && t0.live === 'polite' && t0.opts.every((o) => o.label === STRINGS[`setup.${o.id}.desc`] && o.label.startsWith(`${name(o.id)}:`)) && /Cost/.test(STRINGS['setup.speed.desc']) && /Cost/.test(STRINGS['setup.grip.desc']), { desc: t0.desc, labels: t0.opts.map((o) => o.label) });
+    await page.click('[data-rsetup="speed"]');
+    const t1 = await titleState(page);
+    c.ok('Desktop: picking Speed shows its strength and cost, puts it on the grid behind the menu (rivals stay Balanced) and is remembered', selected(t1) === 'speed' && t1.desc === STRINGS['setup.speed.desc'] && t1.car === 'speed' && t1.ai === 'balanced,balanced,balanced' && t1.stored === '"speed"', t1);
+    await page.focus('[data-rsetup="speed"]');
+    await keys.tap('ArrowRight');
+    const t2 = await titleState(page);
+    const focus = await read(page, () => document.activeElement?.dataset.rsetup ?? null);
+    c.ok('Desktop: the arrow keys move the choice (Speed -> Grip), focus following, description following', selected(t2) === 'grip' && focus === 'grip' && t2.desc === STRINGS['setup.grip.desc'] && t2.car === 'grip', { ...t2, focus });
+    await d.load();
+    const t3 = await titleState(page);
+    c.ok('Desktop: after a reload the remembered choice (Grip) is selected again', selected(t3) === 'grip' && t3.car === 'grip', t3);
+    const box = await selectorBox(page, 'rsetup');
+    const menu = await read(page, measureMenu);
+    c.ok('Desktop: the selector sits on one row inside the card, apart from its description, unclipped; no sideways overflow', box.oneRow && !box.overlap && box.inside && box.bs.every((b) => b.top && !b.clipped) && menu.pageX <= 0 && menu.cardX <= 0, { box, pageX: menu.pageX, cardX: menu.cardX });
+    await page.screenshot({ path: path.join(run.out, 'carsetup-title-1280x800.png') });
+
+    // a Grip race to its flag: the results name the setup, each row is labelled
+    await page.click('[data-rlen="sprint"]');
+    await page.click('#o-start');
+    await waitFor(page, () => window.__game.screen === 'race');
+    const live = await read(page, () => window.__game.race.cars.map((x) => `${x.human ? 'me' : x.id}:${x.setup.id}`).join());
+    c.ok('Desktop Grip race: the local car races Grip, the AI rivals carry their explicit Balanced setup', live === 'me:grip,ai1:balanced,ai2:balanced,ai3:balanced', live);
+    await toFlag(page, keys, 5);
+    await waitFor(page, () => window.__game.screen === 'results');
+    const res = await read(page, () => ({ head: document.querySelector('.res-setup')?.textContent ?? '', chips: [...document.querySelectorAll('.results tbody .setup-chip')].map((x) => x.dataset.setup) }));
+    c.ok('Desktop results: the setup is named in the heading and every row carries its car\'s setup as text', res.head === stag('grip') && res.chips.length === 4 && res.chips.filter((x) => x === 'grip').length === 1 && res.chips.filter((x) => x === 'balanced').length === 3, res);
+    await page.screenshot({ path: path.join(run.out, 'carsetup-results-1280x800.png') });
+    await page.click('#o-menu');
+    await waitFor(page, () => window.__game.screen === 'title');
+
+    // practice ghosts: a ghost from before setups is a Balanced lap, challenged with Balanced only
+    await read(page, () => {
+      const T = window.__game.T, L = +T.L.toFixed(3);
+      localStorage.setItem(`srgp.ghost.${T.DEF.id}.sunburst.Annon`, JSON.stringify({ v: 1, track: T.DEF.id, car: 'sunburst', initials: 'Annon', L, ms: 15000, s: [0, 0, 0, 0, 5, 80, 0, 0, 10, 160, 0, 0, 15, L, 0, 0] }));
+      localStorage.setItem(`srgp.lb.practice.${T.DEF.id}`, JSON.stringify([{ id: 'legacy1', initials: 'OLD', car: 'sunburst', ms: 15000, at: 1 }]));
+    });
+    await d.load();
+    await page.click('[data-rsetup="speed"]');
+    await page.click('#o-practice');
+    await waitFor(page, () => window.__game.screen === 'race');
+    const gs = await read(page, () => ({ ghost: !!window.__game.ghost.data, pb: window.__game.pbMs, car: window.__game.race.car(window.__game.localId).setup.id }));
+    c.ok('Desktop practice with Speed: the Balanced (legacy) ghost is not loaded and there is no personal best to beat', gs.car === 'speed' && !gs.ghost && gs.pb === 0, gs);
+    await keys.tap('Escape');
+    await page.click('#o-menu');
+    await waitFor(page, () => window.__game.screen === 'title');
+    await page.click('[data-rsetup="balanced"]');
+    await page.click('#o-practice');
+    await waitFor(page, () => window.__game.screen === 'race');
+    const gb = await read(page, () => ({ ghost: window.__game.ghost.data?.ms ?? null, pb: window.__game.pbMs }));
+    c.ok('Desktop practice with Balanced: the same legacy ghost is Balanced\'s, loaded with its personal best', gb.ghost === 15000 && gb.pb === 15000, gb);
+    await keys.tap('Escape');
+    await page.click('#o-menu');
+    await waitFor(page, () => window.__game.screen === 'title');
+    await page.click('#o-boards');
+    await waitFor(page, () => window.__game.screen === 'boards');
+    const b1 = await read(page, () => ({ rows: [...document.querySelectorAll('.boards tbody tr')].map((r) => r.textContent), head: document.querySelector('.lb-setup')?.textContent ?? '', sel: document.querySelector('[data-lbsetup][aria-checked="true"]')?.dataset.lbsetup }));
+    await page.click('[data-lbsetup="speed"]');
+    const b2 = await read(page, () => ({ rows: [...document.querySelectorAll('.boards tbody tr')].map((r) => r.textContent), head: document.querySelector('.lb-setup')?.textContent ?? '' }));
+    c.ok('Desktop leaderboards: filtered and labelled by setup; the legacy lap is on Balanced\'s board, Speed\'s is empty', b1.sel === 'balanced' && b1.head.endsWith(stag('balanced')) && b1.rows.length === 1 && b1.rows[0].includes('OLD') && b2.head.endsWith(stag('speed')) && b2.rows.length === 1 && b2.rows[0].includes(STRINGS['boards.empty']), { b1, b2 });
+    await page.click('#o-back');
+    await waitFor(page, () => window.__game.screen === 'title');
+
+    // a championship: started with Grip, changed to Speed between rounds, never during one
+    await page.click('[data-rsetup="grip"]');
+    await page.click('#o-champ');
+    await waitFor(page, () => window.__game.screen === 'race');
+    const c1 = await read(page, () => ({ car: window.__game.race.car(window.__game.localId).setup.id, save: JSON.parse(localStorage.getItem('srgp.champ')).setup }));
+    c.ok('Desktop championship: the first round races the chosen setup (Grip), stored with the save', c1.car === 'grip' && c1.save === 'grip', c1);
+    await toFlag(page, keys, 5);
+    await waitFor(page, () => window.__game.screen === 'champ');
+    const sel = await read(page, () => [...document.querySelectorAll('[data-csetup]')].map((b) => `${b.dataset.csetup}:${b.getAttribute('aria-checked')}`).join());
+    await page.click('[data-csetup="speed"]');
+    const c2 = await read(page, () => JSON.parse(localStorage.getItem('srgp.champ')));
+    c.ok('Desktop: between rounds the standings card offers the setup (on Grip); choosing Speed is saved for the next round, round 1 keeps Grip', sel === 'balanced:false,speed:false,grip:true' && c2.setup === 'speed' && c2.rounds[0].setup === 'grip', { sel, setup: c2.setup, r1: c2.rounds[0].setup });
+    await page.click('#o-next');
+    await waitFor(page, () => window.__game.screen === 'race');
+    const c3 = await read(page, () => window.__game.race.car(window.__game.localId).setup.id);
+    await keys.tap('Escape');
+    const pause = await read(page, () => document.querySelectorAll('[data-csetup], [data-rsetup]').length);
+    c.ok('Desktop: round 2 races Speed; the race menu offers no setup change mid-round', c3 === 'speed' && pause === 0, { c3, pause });
+    await d.context.close();
+  }
+  c.ok('Desktop part: no page or console errors', d.errors.length === 0, d.errors.slice(0, 5));
+
+  // ---- phone: emulated touch
+  const s = await open(run, { viewport: { width: 360, height: 640 }, dpr: 2, device: PHONE, fixtures: { 'srgp.track': TRACK } });
+  const { page } = s;
+  const f = new Fingers(page, await s.context.newCDPSession(page));
+  for (const [label, w, h] of LAYOUTS) {
+    await page.setViewportSize({ width: w, height: h });
+    await frames(page, 2);
+    const box = await selectorBox(page, 'rsetup');
+    const m = await read(page, measureMenu);
+    c.ok(`Touch title at ${w}x${h} (${label}): the three setups on one row, 44 px or more, apart from each other and the text, unclipped, and the menu fits`, box.oneRow && !box.overlap && box.inside && box.bs.every((b) => b.top && !b.clipped && b.w >= 44 && b.h >= 44) && menuOk(m), { box: box.bs.map((b) => `${b.id} ${Math.round(b.w)}x${Math.round(b.h)}`), m });
+  }
+  await page.setViewportSize({ width: 360, height: 640 });
+  await frames(page, 2);
+  await page.screenshot({ path: path.join(run.out, 'carsetup-title-360x640.png') });
+  await f.tap('[data-rsetup="grip"]');
+  const tt = await titleState(page);
+  c.ok('Touch: a tap picks Grip, its strength and cost shown', selected(tt) === 'grip' && tt.car === 'grip' && tt.desc === STRINGS['setup.grip.desc'] && tt.stored === '"grip"', tt);
+  // the lobby: everyone's setup, the driver's own selector
+  const part = (id, num, nm, extra = {}) => ({ id, name: nm, slot: num - 1, num, bay: num - 1, livery: ['yellow', 'orange', 'blue'][num - 1], color: [0xffd23f, 0xfb923c, 0x2a6df0][num - 1], liveryRequested: null, ready: false, connected: true, host: num === 1, guest: true, joinOrder: num, left: false, ...extra });
+  const room = { id: 'qa-room', code: 'S8AJ37', mode: 'multiplayer', state: 'lobby', rev: 1, hostId: 'p1', settings: { track: TRACK, aiFill: true, length: 'standard' }, championship: null,
+    participants: [part('p1', 1, 'Host', { setup: 'speed', tuning: 1 }), part('p2', 2, 'Guest', { setup: 'grip', tuning: 1, ready: true }), part('p3', 3, 'Third', { setup: 'balanced', tuning: 0 })],
+    ai: [{ id: 'ai_3', name: 'Green Viper (AI)', slot: 3, num: 24, bay: 3, livery: 'green', color: 0x22b04b, ai: true, setup: 'balanced', tuning: 0 }], raceId: null, maxHumans: 4, minHumans: 2, graceS: 20, setups: ['balanced', 'speed', 'grip'] };
+  const lobbyState = () => read(page, () => ({
+    rows: [...document.querySelectorAll('.lobby tbody tr')].map((r) => `${r.querySelector('.nm')?.textContent}:${r.querySelector('.setup-chip')?.textContent}`),
+    radios: [...document.querySelectorAll('[data-nsetup]')].map((b) => `${b.dataset.nsetup}:${b.getAttribute('aria-checked')}${b.disabled ? ':off' : ''}`),
+    note: document.querySelector('[data-for="nsetup"] .len-note')?.textContent ?? null,
+  }));
+  for (const [label, w, h] of LAYOUTS.slice(0, 4)) {
+    await page.setViewportSize({ width: w, height: h });
+    await read(page, (r) => window.__game.qaNetLobby(r, 'p2', 'connected', ['sprint', 'standard', 'endurance'], ['balanced', 'speed', 'grip']), room);
+    await waitFor(page, () => window.__game.screen === 'lobby');
+    await frames(page, 2);
+    const st = await lobbyState();
+    const box = await selectorBox(page, 'nsetup');
+    const m = await read(page, measureMenu);
+    const lobbyOk = m.pageX <= 0 && m.cardX <= 0 && m.inside && m.blocked.length === 0 && m.small.filter((x) => !x.startsWith('l-ai ')).every((x) => Number(/(\d+)x(\d+)$/.exec(x)?.[2]) >= 40 && Number(/(\d+)x(\d+)$/.exec(x)?.[1]) >= 40);
+    c.ok(`Touch lobby at ${w}x${h} (${label}): every driver's and the AI's setup is shown in words; the guest's own selector is on Grip, 40 px+, apart; the lobby fits`,
+      st.rows.join('|') === `Host:${name('speed')}|Guest:${name('grip')}|Third:${name('balanced')}|Green Viper (AI):${name('balanced')}` && st.radios.join() === 'balanced:false,speed:false,grip:true' && st.note === STRINGS['setup.lobbyNote'] && !box.overlap && box.inside && box.bs.every((b) => b.top && !b.clipped && b.w >= 44 && b.h >= 40) && lobbyOk, { st, box: box.bs.map((b) => `${b.id} ${Math.round(b.w)}x${Math.round(b.h)}`), m });
+    if (w === 360) await page.screenshot({ path: path.join(run.out, 'carsetup-lobby-360x640.png') });
+  }
+  await page.setViewportSize({ width: 360, height: 640 });
+  await frames(page, 2);
+  // a tap on Balanced: the choice goes to the server (here a pretend one with no socket) and is remembered for the next seat
+  // (scrolled to the middle of the card: at its bottom edge the card's pinned action row lies over it, as over any control there)
+  await read(page, () => document.querySelector('[data-nsetup="balanced"]').scrollIntoView({ block: 'center' }));
+  await f.tap('[data-nsetup="balanced"]');
+  const tap = await read(page, () => ({ pref: localStorage.getItem('srgp.setup'), on: document.querySelector('[data-nsetup][aria-checked="true"]')?.dataset.nsetup }));
+  c.ok('Touch lobby: a tap on Balanced selects it and is remembered', tap.pref === '"balanced"' && tap.on === 'balanced', tap);
+  // a room an older page keeps to Balanced: the other setups stay visible but disabled, and the note says why
+  await read(page, (r) => window.__game.qaNetLobby({ ...r, setups: ['balanced'], participants: r.participants.map((p) => ({ ...p, setup: 'balanced', tuning: 0 })) }, 'p2', 'connected', ['sprint', 'standard', 'endurance'], ['balanced', 'speed', 'grip']), room);
+  await frames(page, 2);
+  const lock = await lobbyState();
+  c.ok('Touch lobby locked by an older page: Speed and Grip disabled, Balanced on, and the reason in words', lock.radios.join() === 'balanced:true,speed:false:off,grip:false:off' && lock.note === STRINGS['setup.lockNote'], lock);
+  // a server older than setups: no selector at all, and every car reads Balanced
+  await read(page, (r) => { const old = { ...r, participants: r.participants.map(({ setup, tuning, ...p }) => p), ai: r.ai.map(({ setup, tuning, ...a }) => a) }; delete old.setups; window.__game.qaNetLobby(old, 'p2', 'connected', ['sprint', 'standard', 'endurance']); }, room);
+  await frames(page, 2);
+  const old = await lobbyState();
+  c.ok('Touch lobby on a server older than setups: no setup selector, every car labelled Balanced', old.radios.length === 0 && old.rows.every((x) => x.endsWith(`:${name('balanced')}`)), old);
+  c.ok('Touch part: no page or console errors', s.errors.length === 0, s.errors.slice(0, 5));
+  return s;
 }
 
 async function open(run, { seed = SEED, fixtures = null, viewport = run.viewport, dpr = run.dpr, preset = run.preset, device = {} } = {}) {
@@ -3090,8 +3279,8 @@ async function racelength(run, c) {
   return s;
 }
 
-const SCENARIOS = { tracks, race, controlled, routing, practice, championship, touch, responsive, touchrace, reverse, service, lastchance, stall, queue, autosg, autobay, localslot, online, memory, netbanner, racelength };
-const USAGE = 'usage: browser-check.mjs [tracks|race|controlled|routing|practice|championship|touch|responsive|touchrace|reverse|service|lastchance|stall|queue|autosg|autobay|localslot|online|memory|netbanner|racelength ...] | perf | compare <a.json> <b.json>\n'
+const SCENARIOS = { tracks, race, controlled, routing, practice, championship, touch, responsive, touchrace, reverse, service, lastchance, stall, queue, autosg, autobay, localslot, online, memory, netbanner, racelength, carsetup };
+const USAGE = 'usage: browser-check.mjs [tracks|race|controlled|routing|practice|championship|touch|responsive|touchrace|reverse|service|lastchance|stall|queue|autosg|autobay|localslot|online|memory|netbanner|racelength|carsetup ...] | perf | compare <a.json> <b.json>\n'
   + 'options: --dist <dir> --url <url> --commit <sha> --machine <name> --label <name> --viewport WxH --dpr N --preset low|balanced|high\n'
   + '         --seconds N --headed --channel <chrome|msedge> --out <dir> --max-minutes N';
 

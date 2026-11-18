@@ -105,7 +105,8 @@ describe('championship', () => {
     localStorage.setItem('srgp.lb.race.circuit-1', JSON.stringify([{ id: 'a', initials: 'JD', car: 'frost', ms: 19000, at: 1 }]));
     const c = R.loadChamp()!;
     // #132: a save from before race-length presets loads as a Standard championship (the length it was raced at)
-    expect(c).toEqual({ ...old, length: 'standard' });
+    // #133: ...and as a Balanced one (the handling it was raced with)
+    expect(c).toEqual({ ...old, length: 'standard', setup: 'balanced' });
     expect(R.standings(c, 4).map((x) => [x.idx, x.points])).toEqual([[1, 10], [0, 6], [2, 4], [3, 0]]);
     expect(R.roundPoints(c.rounds[0], 1)).toBe(6);
     // a new round with a DQ is added beside it, and the old round is untouched

@@ -11,7 +11,7 @@ After Pit is selected, the car takes the outside route, enters, queues and stops
 
 ## Driving
 
-`Race.sgUpdate()` (the automatic pit controller) now drives fuel visits as well as stop-and-go visits. It runs for the player before each car step and sets `sgCtl` (the controller has the pedals) and `sgPhase` (what the HUD shows).
+`Race.sgUpdate()` (the automatic pit controller) now drives fuel visits as well as stop-and-go visits. It runs for the player before each car step and sets `sgCtl` (the controller has the pedals) and `sgPhase` (what the HUD shows). Its speed-holding throttle and its corner limit on the approach are the car's own setup's (#133: `holdThrottle(car.setup, v)`, `Race.playerProfile(car, side)`), never Balanced's for every car; its braking plan, the pit limit, the queue and the box and bay stops are the same for every setup ([car-setup.md](car-setup.md#where-a-cars-setup-is-read)).
 
 | Where | Phase | HUD chip / status |
 | --- | --- | --- |

@@ -92,6 +92,19 @@ export class PgResultSink implements ResultSink {
       );
     }
     for (const b of lapBests(e)) {
+      // #133: a Balanced lap at tuning 0 (the handling before setups) is kept where every best always was, under the same key,
+      // so bests from before setups stay current for Balanced; any other setup or tuning has its own row in setup_bests
+      if (b.setup !== 'balanced' || b.tuning !== 0) {
+        await c.query(
+          `INSERT INTO setup_bests (account_id, track_id, track_version, mode, rules_version, setup, tuning, lap_ms, lap, race_id, livery, set_at)
+           SELECT a.id, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12 FROM accounts a WHERE a.id = $1
+           ON CONFLICT (account_id, track_id, track_version, mode, rules_version, setup, tuning) DO UPDATE
+             SET lap_ms = EXCLUDED.lap_ms, lap = EXCLUDED.lap, race_id = EXCLUDED.race_id, livery = EXCLUDED.livery, set_at = EXCLUDED.set_at
+             WHERE EXCLUDED.lap_ms < setup_bests.lap_ms`,
+          [b.accountId, b.trackId, b.trackVersion, b.mode, b.rulesVersion, b.setup, b.tuning, b.lapMs, b.lap, b.raceId, b.livery, e.times.finishedAt],
+        );
+        continue;
+      }
       // monotonic: a slower (or equal) lap never replaces a stored one, whatever order concurrent transactions commit in
       await c.query(
         `INSERT INTO personal_bests (account_id, track_id, track_version, mode, rules_version, lap_ms, lap, race_id, livery, set_at)

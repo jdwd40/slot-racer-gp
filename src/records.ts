@@ -3,12 +3,13 @@
 // `srgp.` prefix and degrades silently when storage is unavailable.
 import * as T from './track';
 import { DEFAULT_LENGTH, isRaceLengthId, lengthOr, type RaceLengthId } from './raceLength';
+import { DEFAULT_SETUP, currentTag, isSetupId, recordTag, sameTag, setupOr, type SetupId, type SetupTag } from './carSetup';
 
 export const ANON = 'Annon';
 export const MAX_INITIALS = 3;
 
 export interface Livery { id: string; name: string; color: number; }
-/** player liveries: identical handling, different paint */
+/** player liveries: identical handling, different paint (handling is the car setup's, src/carSetup.ts, chosen separately) */
 export const LIVERIES: Livery[] = [
   { id: 'sunburst', name: 'Sunburst', color: 0xffcc1a },
   { id: 'blaze', name: 'Blaze', color: 0xff6a1a },
@@ -35,21 +36,43 @@ export function currentInitials(): string { return normaliseInitials(savedInitia
 export function savedCar(): string { return livery(get<string>('srgp.car', LIVERIES[0].id)).id; }
 export function saveCar(id: string): void { set('srgp.car', id); }
 
+// ---------------------------------------------------------------- record compatibility (#133)
+/**
+ * Where a record of a setup tag is stored. Balanced at tuning 0 is the handling every lap had before setups, so it keeps the
+ * keys records always had: every board row and ghost saved before setups (which names no setup) is a Balanced tuning-0 record
+ * and stays current for Balanced, because Balanced's physics did not change. Any other setup, or any setup at another tuning,
+ * has keys of its own (`~speed.1`), so a lap driven under one set of physics never competes with, overwrites or loads as a
+ * record of another. A retune raises the preset's tuning: its older records stay readable under their own key, never current.
+ */
+const tagSuffix = (t: SetupTag): string => (t.setup === DEFAULT_SETUP && t.tuning === 0 ? '' : `~${t.setup}.${t.tuning}`);
+
 // ---------------------------------------------------------------- leaderboards
 export type BoardKind = 'practice' | 'race';
-export interface LapRecord { id: string; initials: string; car: string; ms: number; at: number; }
+/** `setup` / `tuning` (#133): what the lap was driven with. A row saved before setups has neither: Balanced at tuning 0. */
+export interface LapRecord { id: string; initials: string; car: string; ms: number; at: number; setup?: SetupId; tuning?: number; }
 const BOARD_SIZE = 10;
-const boardKey = (kind: BoardKind, track: string): string => `srgp.lb.${kind}.${track}`;
+const boardKey = (kind: BoardKind, track: string, tag: SetupTag): string => `srgp.lb.${kind}.${track}${tagSuffix(tag)}`;
 
-export function board(kind: BoardKind, track: string): LapRecord[] {
-  const rows = get<LapRecord[]>(boardKey(kind, track), []);
-  return rows.filter((r) => r && typeof r.ms === 'number' && r.ms > 0).sort((a, b) => a.ms - b.ms).slice(0, BOARD_SIZE);
+/**
+ * The ten fastest laps of one setup (at its current tuning unless `tag` names another) on a circuit. A board holds one setup's
+ * laps only: a row that names another setup or tuning than its board's (never written by this code) is left out, not shown.
+ */
+export function board(kind: BoardKind, track: string, setup: SetupId | SetupTag = DEFAULT_SETUP): LapRecord[] {
+  const tag = typeof setup === 'string' ? currentTag(setup) : setup;
+  const rows = get<LapRecord[]>(boardKey(kind, track, tag), []);
+  if (!Array.isArray(rows)) return [];
+  return rows.filter((r) => {
+    if (!r || typeof r.ms !== 'number' || !(r.ms > 0)) return false;
+    const rt = recordTag(r.setup, r.tuning);
+    return !!rt && sameTag(rt, tag);
+  }).sort((a, b) => a.ms - b.ms).slice(0, BOARD_SIZE);
 }
-/** Insert a valid lap; returns the record if it made the top ten, else null. */
-export function submitLap(kind: BoardKind, track: string, initials: string, car: string, ms: number): LapRecord | null {
-  const rec: LapRecord = { id: `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`, initials, car, ms: Math.round(ms), at: Date.now() };
-  const rows = [...board(kind, track), rec].sort((a, b) => a.ms - b.ms).slice(0, BOARD_SIZE);
-  set(boardKey(kind, track), rows);
+/** Insert a valid lap driven with `setup` (at its current tuning); returns the record if it made that setup's top ten, else null. */
+export function submitLap(kind: BoardKind, track: string, initials: string, car: string, ms: number, setup: SetupId = DEFAULT_SETUP): LapRecord | null {
+  const tag = currentTag(setupOr(setup));
+  const rec: LapRecord = { id: `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`, initials, car, ms: Math.round(ms), at: Date.now(), setup: tag.setup, tuning: tag.tuning };
+  const rows = [...board(kind, track, tag), rec].sort((a, b) => a.ms - b.ms).slice(0, BOARD_SIZE);
+  set(boardKey(kind, track, tag), rows);
   return rows.includes(rec) ? rec : null;
 }
 export function fmtMs(ms: number): string {
@@ -65,18 +88,31 @@ export interface GhostData {
   v: number; track: string; car: string; initials: string; L: number; ms: number;
   /** flat samples: t, u (distance from the timing line), d (lateral), yaw offset */
   s: number[];
+  /** #133: the setup and tuning the lap was driven with; a ghost saved before setups has neither (Balanced at tuning 0) */
+  setup?: SetupId; tuning?: number;
 }
-const ghostKey = (track: string, car: string, initials: string): string => `srgp.ghost.${track}.${car}.${encodeURIComponent(initials)}`;
+const ghostKey = (track: string, car: string, initials: string, tag: SetupTag): string => `srgp.ghost.${track}.${car}${tagSuffix(tag)}.${encodeURIComponent(initials)}`;
 
-export function loadGhost(track: string, car: string, initials: string): GhostData | null {
-  const g = get<GhostData | null>(ghostKey(track, car, initials), null);
+/**
+ * The personal-best ghost to challenge with `setup` (#133): only a lap driven with that setup at its current tuning. A ghost
+ * of another setup or tuning is never loaded (it was driven under other physics), whatever its key.
+ */
+export function loadGhost(track: string, car: string, initials: string, setup: SetupId = DEFAULT_SETUP): GhostData | null {
+  const want = currentTag(setupOr(setup));
+  const g = get<GhostData | null>(ghostKey(track, car, initials, want), null);
   if (!g || g.v !== GHOST_VERSION || g.track !== track || g.car !== car || !Array.isArray(g.s) || g.s.length < 8) return null;
+  const tag = recordTag(g.setup, g.tuning);
+  if (!tag || !sameTag(tag, want)) return null;
   // reject recordings made on a different build of the same circuit
   if (Math.abs(g.L - T.L) > 0.05) return null;
   return g;
 }
-export function saveGhost(g: GhostData): void { set(ghostKey(g.track, g.car, g.initials), g); }
-export function clearGhost(track: string, car: string, initials: string): void { del(ghostKey(track, car, initials)); }
+/** Save a ghost under its own setup and tuning (a ghost naming none is Balanced at tuning 0). */
+export function saveGhost(g: GhostData): void {
+  const tag = recordTag(g.setup, g.tuning);
+  if (tag) set(ghostKey(g.track, g.car, g.initials, tag), g);
+}
+export function clearGhost(track: string, car: string, initials: string, setup: SetupId = DEFAULT_SETUP): void { del(ghostKey(track, car, initials, currentTag(setupOr(setup)))); }
 
 // ---------------------------------------------------------------- championship
 export const CHAMP_TRACKS = ['circuit-1', 'circuit-2', 'circuit-4', 'circuit-5'];
@@ -85,21 +121,32 @@ export const CHAMP_POINTS = [10, 6, 4, 2];
  * Finishing order: driver indices (0 = player). Classified finishers come first; DNF and DQ entries score nothing.
  * `dq` was added later: saves from before it simply have no disqualifications, so they load and score exactly as they did.
  */
-export interface RoundResult { track: string; order: { idx: number; dnf: boolean; dq?: boolean; time: number }[]; }
+export interface RoundResult {
+  track: string; order: { idx: number; dnf: boolean; dq?: boolean; time: number }[];
+  /** #133: the player's setup in this round (rounds saved before setups have none: Balanced) */
+  setup?: SetupId;
+}
 /**
  * `length` (#132): the race-length preset every round of this championship runs, chosen when it starts and kept through
  * resume. Saves from before presets have none and load as Standard, the length they were raced at (loadChamp fills it in).
  */
-export interface Championship { v: number; car: string; initials: string; rounds: RoundResult[]; startedAt: number; length: RaceLengthId; }
+export interface Championship {
+  v: number; car: string; initials: string; rounds: RoundResult[]; startedAt: number; length: RaceLengthId;
+  /**
+   * #133: the setup the player races the next round with. Chosen when the championship starts and changeable between rounds
+   * (never during one); saves from before setups have none and load as Balanced.
+   */
+  setup: SetupId;
+}
 const CHAMP_KEY = 'srgp.champ';
 
 export function loadChamp(): Championship | null {
   const c = get<Championship | null>(CHAMP_KEY, null);
   if (!c || c.v !== 1 || !Array.isArray(c.rounds)) return null;
-  return { ...c, length: lengthOr(c.length) };
+  return { ...c, length: lengthOr(c.length), setup: setupOr(c.setup) };
 }
-export function newChamp(car: string, initials: string, length: RaceLengthId = DEFAULT_LENGTH): Championship {
-  const c: Championship = { v: 1, car, initials, rounds: [], startedAt: Date.now(), length: isRaceLengthId(length) ? length : DEFAULT_LENGTH };
+export function newChamp(car: string, initials: string, length: RaceLengthId = DEFAULT_LENGTH, setup: SetupId = DEFAULT_SETUP): Championship {
+  const c: Championship = { v: 1, car, initials, rounds: [], startedAt: Date.now(), length: isRaceLengthId(length) ? length : DEFAULT_LENGTH, setup: isSetupId(setup) ? setup : DEFAULT_SETUP };
   set(CHAMP_KEY, c);
   return c;
 }
@@ -111,11 +158,12 @@ export function champDone(c: Championship): boolean { return c.rounds.length >= 
  * A round's record from the race result rows. Only classified finishers keep a time and a scoring place; a DQ is stored
  * as a DQ, and anything else not classified as a DNF. No estimated time ever reaches a record.
  */
-export function roundRecord(track: string, rows: { car: { idx: number }; status: 'running' | 'finished' | 'dq' | 'dnf'; time: number }[]): RoundResult {
+export function roundRecord(track: string, rows: { car: { idx: number }; status: 'running' | 'finished' | 'dq' | 'dnf'; time: number }[], setup?: SetupId): RoundResult {
   const fin = rows.filter((r) => r.status === 'finished');
   const rest = rows.filter((r) => r.status !== 'finished').sort((a, b) => (a.status === 'dq' ? 1 : 0) - (b.status === 'dq' ? 1 : 0));
   return {
     track,
+    ...(setup ? { setup } : {}),
     order: [
       ...fin.map((r) => ({ idx: r.car.idx, dnf: false, time: Math.round(r.time * 10) / 10 })),
       ...rest.map((r) => (r.status === 'dq' ? { idx: r.car.idx, dnf: false, dq: true, time: 0 } : { idx: r.car.idx, dnf: true, time: 0 })),
@@ -149,3 +197,9 @@ const LENGTH_KEY = 'srgp.raceLength';
 /** The race length last chosen on this device (local and online setup share it); Standard when none or unreadable. */
 export function savedLength(): RaceLengthId { return lengthOr(get<unknown>(LENGTH_KEY, DEFAULT_LENGTH)); }
 export function saveLength(id: RaceLengthId): void { if (isRaceLengthId(id)) set(LENGTH_KEY, id); }
+
+// ---------------------------------------------------------------- car setup (#133)
+const SETUP_KEY = 'srgp.setup';
+/** The car setup last chosen on this device (local and online share it); Balanced when none or unreadable (old saves, new drivers). */
+export function savedSetup(): SetupId { return setupOr(get<unknown>(SETUP_KEY, DEFAULT_SETUP)); }
+export function saveSetup(id: SetupId): void { if (isSetupId(id)) set(SETUP_KEY, id); }

@@ -3,6 +3,7 @@
 import type { ActionType, Input } from '../race';
 import type { StateFrame } from './snapwire';
 import type { RaceLengthId } from '../raceLength';
+import type { SetupId } from '../carSetup';
 
 /**
  * Wire protocol version. Bump on any incompatible message change; a client and server must agree exactly. History: 1 first
@@ -70,14 +71,22 @@ export interface ChampionshipTag { id: string; round: number; }
  * to a server whose `welcome` lists presets (an older server refuses unknown fields). Omitted means a client older than
  * presets: the server keeps it out of any race of a preset it cannot show (refused with `bad_settings`).
  */
+/**
+ * `setups` on create/join (#133): the car-setup preset list this client can show (src/carSetup.ts SETUP_SET), and `setup` the
+ * driver's own choice (an allowlisted id; never a number). Both are sent only to a server whose `welcome` lists setups (an
+ * older server refuses unknown fields). Omitted `setup` is Balanced; omitted `setups` is a client older than setups, which
+ * the server never seats in a race with a setup it cannot show. `setup` (the message) changes this seat's own setup in the
+ * lobby; it has no driver field, so it can only ever name the sender's own car.
+ */
 export type ClientMsg =
   | { t: 'hello'; v: number; proto: string }
-  | { t: 'create'; name: string; livery?: LiveryId; mode: Mode; settings: Partial<RoomSettings>; championship?: ChampionshipTag; expectAccount?: string; lengths?: number }
-  | { t: 'join'; code: string; name: string; livery?: LiveryId; expectAccount?: string; lengths?: number }
+  | { t: 'create'; name: string; livery?: LiveryId; mode: Mode; settings: Partial<RoomSettings>; championship?: ChampionshipTag; expectAccount?: string; lengths?: number; setup?: SetupId; setups?: number }
+  | { t: 'join'; code: string; name: string; livery?: LiveryId; expectAccount?: string; lengths?: number; setup?: SetupId; setups?: number }
   | { t: 'resume'; room: string; participant: string; token: string }
   | { t: 'ready'; ready: boolean }
   | { t: 'settings'; settings: Partial<RoomSettings> }
   | { t: 'livery'; livery: LiveryId }
+  | { t: 'setup'; setup: SetupId }
   | { t: 'start' }
   | { t: 'rematch' }
   | { t: 'leave' }
@@ -98,8 +107,14 @@ export interface PublicParticipant {
   ready: boolean; connected: boolean; host: boolean; guest: boolean; joinOrder: number;
   /** left the room or retired from the race; the seat stays out of reach until the race ends */
   left: boolean;
+  /**
+   * #133: this driver's car setup and its tuning (everyone in the room sees every choice before the start). Always sent by
+   * a current server; absent from an older one, whose cars are all Balanced
+   */
+  setup?: SetupId; tuning?: number;
 }
-export interface PublicAi { id: string; name: string; slot: number; num: number; bay: number; livery: LiveryId; color: number; ai: true; }
+/** `setup` / `tuning` (#133): the AI car's setup, Balanced unless the server assigns another; absent from an older server */
+export interface PublicAi { id: string; name: string; slot: number; num: number; bay: number; livery: LiveryId; color: number; ai: true; setup?: SetupId; tuning?: number; }
 export interface PublicRoom {
   id: string; code: string; mode: Mode; state: RoomState; rev: number;
   hostId: string | null; settings: RoomSettings; championship: ChampionshipTag | null;
@@ -109,6 +124,12 @@ export interface PublicRoom {
   raceId: string | null; maxHumans: number; minHumans: number;
   /** a reconnect grace in seconds, so clients can show how long a dropped seat is held */
   graceS: number;
+  /**
+   * #133: the car setups a driver may choose in this room now: every preset this server runs that every seated page can show.
+   * A page older than setups seated here keeps it to Balanced alone until that driver reloads or leaves (another choice is
+   * refused meanwhile). Always sent by a current server; absent from an older one, which runs Balanced only.
+   */
+  setups?: SetupId[];
 }
 
 export type ErrorCode =
@@ -116,9 +137,12 @@ export type ErrorCode =
   | 'already_in_room' | 'forbidden' | 'stale' | 'duplicate' | 'out_of_order' | 'bad_state' | 'bad_settings' | 'not_ready'
   | 'unavailable' | 'superseded' | 'expired' | 'overloaded' | 'origin' | 'already_joined';
 
-/** `lengths` in `welcome` (#132): the race-length presets this server runs (absent: a server older than presets, Standard only). */
+/**
+ * `lengths` in `welcome` (#132): the race-length presets this server runs (absent: a server older than presets, Standard only).
+ * `setups` (#133): the car-setup presets it accepts (absent: a server older than setups, every car Balanced).
+ */
 export type ServerMsg =
-  | { t: 'welcome'; v: number; server: string; rules: string; now: number; lengths?: RaceLengthId[] }
+  | { t: 'welcome'; v: number; server: string; rules: string; now: number; lengths?: RaceLengthId[]; setups?: SetupId[] }
   | { t: 'joined'; room: PublicRoom; you: string; token: string; ctlSeq: number; actSeq: number; resumed: boolean }
   | { t: 'room'; room: PublicRoom }
   /**
@@ -159,9 +183,15 @@ export interface CareerStats {
   displayName: string;
   scoring: { version: string; podium: number[] };
   career: { points: number; races: number; wins: number; seconds: number; thirds: number; dq: number; dnf: number };
-  bests: { track: string; trackVersion: string; current: boolean; mode: Mode; rules: string; lapMs: number; lap: number; livery: string; raceId: string; setAt: string }[];
-  /** `length`: the race's length preset (#132), Standard for every result stored before presets */
-  recent: { raceId: string; mode: Mode; championship: ChampionshipTag | null; track: string; length: RaceLengthId; pos: number | null; status: 'finished' | 'dq' | 'dnf'; points: number; field: number; humans: number; scoring: string; rules: string; finishedAt: string }[];
+  /**
+   * One best per circuit version, mode, rules, setup and tuning (#133): a lap is only ever compared with laps driven with the
+   * same setup at the same tuning. `current`: the circuit layout and the setup's tuning are both today's (a best set under an
+   * older layout or an older tuning is kept and shown, never passed off as current). Bests stored before setups are Balanced
+   * at tuning 0, which is today's Balanced.
+   */
+  bests: { track: string; trackVersion: string; current: boolean; mode: Mode; rules: string; setup: SetupId; tuning: number; tuningCurrent: boolean; lapMs: number; lap: number; livery: string; raceId: string; setAt: string }[];
+  /** `length`: the race's length preset (#132), Standard for every result stored before presets; `setup` (#133): the driver's own, Balanced before setups */
+  recent: { raceId: string; mode: Mode; championship: ChampionshipTag | null; track: string; length: RaceLengthId; setup: SetupId; pos: number | null; status: 'finished' | 'dq' | 'dnf'; points: number; field: number; humans: number; scoring: string; rules: string; finishedAt: string }[];
 }
 
 // ------------------------------------------------------------------------------------------------ validation
@@ -169,12 +199,13 @@ export type Parsed = { ok: true; msg: ClientMsg } | { ok: false; code: 'malforme
 
 const SHAPES: Record<ClientMsgType, Record<string, 'string' | 'number' | 'boolean' | 'object' | '?string' | '?object' | '?number'>> = {
   hello: { v: 'number', proto: 'string' },
-  create: { name: 'string', livery: '?string', mode: 'string', settings: 'object', championship: '?object', expectAccount: '?string', lengths: '?number' },
-  join: { code: 'string', name: 'string', livery: '?string', expectAccount: '?string', lengths: '?number' },
+  create: { name: 'string', livery: '?string', mode: 'string', settings: 'object', championship: '?object', expectAccount: '?string', lengths: '?number', setup: '?string', setups: '?number' },
+  join: { code: 'string', name: 'string', livery: '?string', expectAccount: '?string', lengths: '?number', setup: '?string', setups: '?number' },
   resume: { room: 'string', participant: 'string', token: 'string' },
   ready: { ready: 'boolean' },
   settings: { settings: 'object' },
   livery: { livery: 'string' },
+  setup: { setup: 'string' },
   start: {}, rematch: {}, leave: {},
   ctl: { seq: 'number', up: 'boolean', down: 'boolean', driver: '?string' },
   act: { seq: 'number', type: 'string', driver: '?string' },
@@ -215,6 +246,9 @@ export function parseClientMessage(raw: unknown): Parsed {
   if (t === 'act' && v.type !== 'lane' && v.type !== 'pit' && v.type !== 'defer') return bad;
   if (t === 'ping' && !Number.isSafeInteger(v.id)) return bad;
   if ((t === 'create' || t === 'join') && v.lengths !== undefined && (!Number.isSafeInteger(v.lengths) || (v.lengths as number) < 0 || (v.lengths as number) > 99)) return bad;
+  // #133: a setup is named by its id only (a string: the room checks it is an allowlisted preset, bad_settings otherwise);
+  // any numeric physics, object or extra field is refused here as malformed
+  if ((t === 'create' || t === 'join') && v.setups !== undefined && (!Number.isSafeInteger(v.setups) || (v.setups as number) < 0 || (v.setups as number) > 99)) return bad;
   if (t === 'create' || t === 'settings') {
     // settings shape only: whether the track or length preset is one this server runs is the room's check (bad_settings)
     const s = v.settings as Record<string, unknown>;
