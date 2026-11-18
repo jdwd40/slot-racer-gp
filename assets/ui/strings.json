@@ -164,6 +164,7 @@
     { "id": "hud.sgBox", "text": "Auto entry — stopping in the penalty box, no pedals needed" },
     { "id": "hud.sgServing", "text": "SERVING STOP-AND-GO · {n}s — held automatically" },
     { "id": "hud.timePen", "text": "+{n}s TIME PENALTY" },
+    { "id": "hud.moreChips", "text": "+{n} MORE" },
     { "id": "hud.sgChip", "text": "STOP-AND-GO" },
     { "id": "msg.pitRequired", "text": "Pit stop required — stop-and-go outstanding" },
     { "id": "msg.pitInPen", "text": "Pit lane — the car stops in the penalty box for you" },

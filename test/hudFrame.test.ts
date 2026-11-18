@@ -109,8 +109,9 @@ beforeEach(() => {
   dpr = 1; canvases.length = 0;
   vi.stubGlobal('localStorage', memStorage());
   vi.stubGlobal('window', { get devicePixelRatio() { return dpr; } });
-  vi.stubGlobal('getComputedStyle', () => ({ width: '230px', height: '200px' }));
+  vi.stubGlobal('getComputedStyle', () => ({ width: '230px', height: '200px', getPropertyValue: () => '' }));
   vi.stubGlobal('document', {
+    body: new StubEl(),
     createElement: (tag: string) => {
       if (tag === 'canvas') { const c = new StubCanvas(); canvases.push(c); return c; }
       return tag === 'div' ? new StubRoot() : new StubEl();

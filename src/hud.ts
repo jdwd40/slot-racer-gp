@@ -17,6 +17,21 @@ export function fmt(sec: number): string {
 export function routeChipId(r: { stay: boolean; override: boolean }): string {
   return `hud.route${r.override ? 'Inside' : 'Outside'}${r.stay ? 'Stay' : 'Move'}`;
 }
+/**
+ * A very short window has room for only a few chips (#130 item 3). They come in priority order (stopped on track and last chance
+ * first, then fuel and the service deadlines), so with more than `cap` the first `cap - 1` stay and the rest are hidden behind
+ * one "+N MORE" chip: never more than `cap` chips showing, and never a "+1" in place of the one chip it hides. Hidden rather than
+ * dropped, so the text is still in the DOM. The keyboard-only chip never shows with touch, so it does not count there.
+ */
+export function capChips(chips: string[], cap: number, touch: boolean): string[] {
+  const counts = (c: string): boolean => !(touch && c.includes('kbd-only'));
+  const total = chips.filter(counts).length;
+  if (total <= cap) return chips;
+  let seen = 0;
+  const out = chips.map((c) => (!counts(c) || ++seen < cap ? c : c.replace('<span class="chip', '<span hidden class="chip')));
+  out.push(`<span class="chip extra">${t('hud.moreChips', { n: total - cap + 1 })}</span>`);
+  return out;
+}
 const QUEUE_CHIP = { queued: 'hud.qQueued', bay: 'hud.qBay', exit: 'hud.qExit' } as const;
 const hex = (c: number): string => '#' + c.toString(16).padStart(6, '0');
 const VIEW_ICON = '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 5V1h4M11 1h4v4M15 11v4h-4M5 15H1v-4"/></svg>';
@@ -33,6 +48,10 @@ export class Hud {
   miniPit: { x: number; y: number }[] = [];
   mScale = 1; mOx = 0; mOy = 0; mW = 230; mH = 200;
   toastT = 0;
+  /** How many chips the layout has room for (CSS --chip-cap on the chip list: very short windows only, #130), and whether the
+   *  touch layout is on. Read with the minimap's size, on every resize and touch change, rather than every frame */
+  chipCap = Infinity;
+  touch = false;
   fuelVisit = false;
   /** laps of fuel left (#87): one estimator per race and local car, and the steadied figure it shows */
   fuelEst = new FuelLapsEstimator(); fuelFig = new SteadyFigure();
@@ -105,6 +124,9 @@ export class Hud {
    * Computed style still answers while the HUD is hidden on the menus. The backing store follows the device, not the graphics preset, so it stays sharp on Low.
    */
   fitMini(): void {
+    const cap = parseInt(getComputedStyle(this.el['h-chips']).getPropertyValue('--chip-cap'), 10);
+    this.chipCap = cap > 0 ? cap : Infinity;
+    this.touch = document.body.classList.contains('touch');
     const css = getComputedStyle(this.mini);
     const w = parseFloat(css.width) || this.mW, h = parseFloat(css.height) || this.mH;
     const dpr = Math.min(2, window.devicePixelRatio || 1);
@@ -258,7 +280,7 @@ export class Hud {
     if (wait && !(wait === 'queued' && sgp === 'queued') && !(wait === 'exit' && sgp === 'exit')) chips.push(`<span class="chip org">⏸ ${t(QUEUE_CHIP[wait])}</span>`);
     const rev = reversing(p);
     if (rev) chips.push(`<span class="chip rev">R ${t('hud.reverse')}</span>`);
-    this.set('h-chips', chips.join(''), true);
+    this.set('h-chips', capChips(chips, this.chipCap, this.touch).join(''), true);
     this.cue('lane', laneCue(p, route));
     this.cue('pit', p.finished ? 'idle' : pitCue(p, held));
     const dEl = this.el['t-defer'];
