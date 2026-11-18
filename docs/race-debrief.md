@@ -111,6 +111,8 @@ The static site deploys on merge; the room server is upgraded by hand later; old
 - `test/server/debrief.db.test.ts` (PostgreSQL): an envelope spooled while the database is down and replayed by a fresh process, stored byte for byte, awarded once, a duplicate a no-op; an envelope from before debriefs stored and listed as before.
 - Browser: `node scripts/browser-check.mjs debrief` (desktop and emulated touch, see [validation.md](validation.md)); online browsers: `node scripts/online-check.mjs debrief`.
 
+Results on `3bcc152`'s code with the final check scripts (SwiftShader, diagnostics; local servers only): `debrief` 18/18, `responsive` 251/251, `touch` 53/53, `championship` 9/9, `racelength` 36/36, `carsetup` 30/30, `netbanner` 49/49, `online` 3 pass + 1 n/a (default build); `online-check debrief` 8/8, `lengths` 10/10, `setups` 10/10. `npm test` 1072 passed, 35 skipped (the database files without a database); `npm run test:db` 35/35 in 7 files.
+
 ## Limitations
 
 - Local personal bests are this device's board (top ten per circuit, setup and tuning, by initials): a slower personal best that dropped off the board is unavailable, and two people sharing initials on one device share a baseline.

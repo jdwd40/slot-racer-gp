@@ -1150,17 +1150,16 @@ async function debrief(run, c) {
   await host.page.click('#l-start');
   for (const s of [host, phone]) await waitFor(s.page, () => window.__game.screen === 'race' && window.__game.net.raceId, undefined, 30000);
   phone.keys = new Keys(phone.page);
-  const fin = await driveAll([host, phone], done, 6 * 60000, { laps: 5 });
-  // a driver done before the race is: the pending card says the debrief comes with the final classification
-  const pend = await Promise.all([host, phone].map(async (s) => {
-    let seen = null;
-    for (const end = Date.now() + 180000; Date.now() < end; await sleep(50)) {
-      const v = await read(s.page, () => ({ scr: window.__game.screen, t: document.querySelector('.netwait .deb-pending')?.textContent ?? null }));
-      if (v.scr === 'netwait' && v.t !== null) seen = v.t;
-      if (v.scr === 'netres') break;
-    }
-    return seen;
+  // each page reads its own card the moment its driver is done: a driver done before the race is sees the pending card, which
+  // says the debrief comes with the final classification
+  const both = await Promise.all([host, phone].map(async (s) => {
+    const st = await driveUntil(s, done, { budgetMs: 6 * 60000, opts: { pace: PACE, laps: 5 } }).catch((e) => ({ error: String(e.message ?? e) }));
+    const v = await read(s.page, () => ({ scr: window.__game.screen, t: document.querySelector('.netwait .deb-pending')?.textContent ?? null }));
+    return { st, scr: v.scr, t: v.t };
   }));
+  const fin = both.map((x) => x.st);
+  const pend = both.map((x) => (x.scr === 'netwait' ? x.t ?? '' : null));
+  run.evidence.debriefScreens = both.map((x) => x.scr);
   for (const s of [host, phone]) await waitFor(s.page, () => window.__game.screen === 'netres', undefined, 180000);
   await sleep(800);
   const view = (s) => read(s.page, () => {
@@ -1182,7 +1181,7 @@ async function debrief(run, c) {
   const vp2 = await view(phone);
   c.ok('Phone: a tap expands the breakdown; Leave stays visible and on top', vp2.open === true && Object.keys(vp2.rows).length >= 6 && vp2.btns.every((b) => b.ok), { open: vp2.open, rows: Object.keys(vp2.rows), btns: vp2.btns });
   if (pend.some((x) => x !== null)) c.ok('A driver finished first saw the pending card say its debrief comes with the final classification', pend.filter((x) => x !== null).every((x) => x === STRINGS['deb.pending']), pend);
-  else c.unavailable('Pending card note', 'both drivers reached the results card together this run');
+  else c.unavailable('Pending card note', `no page was on the pending card when its driver was done (screens ${run.evidence.debriefScreens.join(' | ')})`);
   await snapshotOf(phone.page, 'debrief-netres-phone-open.png');
   await host.page.click('#r-rematch');
   for (const s of [host, phone]) await waitFor(s.page, () => window.__game.screen === 'lobby');
