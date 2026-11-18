@@ -16,7 +16,10 @@ export interface DriverDebrief {
   driver: string;
   /** laps completed (the lap events of this race, the flag lap included) */
   laps: number;
-  /** valid flying laps: valid in the race core (clean sectors, no pit, contact, reverse or recovery) and not lap 1 (standing start) */
+  /**
+   * valid flying laps: valid in the race core (clean sectors, no pit, contact, reverse or recovery) and begun at a flying crossing:
+   * not lap 1 (standing start) and not an out-lap (begun at a crossing in the pit lane, or in the bay after a tow or recovery)
+   */
   valid: number;
   /** fastest valid flying lap (s) and its lap number; null without one */
   best: number | null; bestLap: number | null;
@@ -51,13 +54,15 @@ export interface DriverDebrief {
 /** Mutable accumulator for one car while its race runs. */
 interface Acc {
   frozen: boolean; lastT: number; visit: VisitKind | null; open: VisitKind | null; wasBayIn: boolean;
+  /** the lap now under way began at a flying crossing: on the road, with no pit visit, tow or recovery open */
+  flyNext: boolean;
   laps: number; valid: number; mean: number; m2: number; best: number; bestLap: number;
   deslots: number; offS: number; offences: number; stopGos: number; hitBy: number; served: number; tows: number; recoveries: number;
   pitN: number; fuel: number; pitS: number; queueS: number; serveS: number; bayS: number;
   towS: number; recS: number; penS: number;
 }
 const fresh = (t: number): Acc => ({
-  frozen: false, lastT: t, visit: null, open: null, wasBayIn: false,
+  frozen: false, lastT: t, visit: null, open: null, wasBayIn: false, flyNext: false,
   laps: 0, valid: 0, mean: 0, m2: 0, best: 0, bestLap: 0,
   deslots: 0, offS: 0, offences: 0, stopGos: 0, hitBy: 0, served: 0, tows: 0, recoveries: 0,
   pitN: 0, fuel: 0, pitS: 0, queueS: 0, serveS: 0, bayS: 0, towS: 0, recS: 0, penS: 0,
@@ -98,8 +103,12 @@ export class DebriefCollector {
       case 'lap': {
         const a = live(e.car); if (!a) break;
         a.laps++;
-        // a flying lap: valid in the race core and started at a flying crossing (lap 1 starts from the grid)
-        if (e.valid && e.lapsDone >= 2) {
+        // a flying lap: valid in the race core and started at a flying crossing. Lap 1 starts from the grid; an out-lap starts
+        // at a crossing made in the pit lane (on circuits whose pit exit is past the timing line) or in the bay after a tow
+        // or recovery, which the race core does not void. Read only: the core's own lap validity is unchanged
+        const flying = a.flyNext;
+        a.flyNext = e.car.mode === 'race' && a.visit === null;
+        if (e.valid && e.lapsDone >= 2 && flying) {
           a.valid++;
           const d = e.time - a.mean; a.mean += d / a.valid; a.m2 += d * (e.time - a.mean);
           if (a.valid === 1 || e.time < a.best) { a.best = e.time; a.bestLap = e.lapsDone; }
@@ -228,5 +237,6 @@ export function takeaway(d: DriverDebrief | null, r: ResultFacts, pb: PbCompare 
   if (r.status === 'dnf') return { id: 'deb.tk.dnf', vars: { n: d.laps } };
   if (d.valid < 2) return { id: 'deb.tk.fewLaps', vars: { n: d.valid } };
   if (r.timePen > 0) return { id: 'deb.tk.timePen', vars: { n: r.timePen } };
-  return { id: 'deb.tk.clean' };
+  // "no incidents" only when every incident count on the card is zero, being hit included
+  return { id: d.hitBy > 0 ? 'deb.tk.noPen' : 'deb.tk.clean' };
 }

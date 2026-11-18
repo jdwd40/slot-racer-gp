@@ -18,7 +18,7 @@ From the green light (the first step out of the countdown) until **that driver's
 | Field | Definition |
 | --- | --- |
 | `laps` | Laps completed: the race core's `lap` events for this driver while running (the flag lap included). |
-| `valid` | **Valid flying laps**: laps the race core marks valid (`lap.valid`: all three sectors in order and not voided by a pit entry, contact, a de-slot, reversing, a tow or a stopped-on-track recovery) **and** not lap 1, which starts from the grid (a standing start). |
+| `valid` | **Valid flying laps**: laps the race core marks valid (`lap.valid`: all three sectors in order and not voided by a pit entry, contact, a de-slot, reversing, a tow or a stopped-on-track recovery) **and** begun at a **flying crossing**: the car crossed the timing line that started it on the road, with no pit visit, tow or recovery open. That excludes lap 1, which starts from the grid (a standing start), and **out-laps**: on every circuit the pit exit is past the timing line, so a car leaving the pits crosses the line in the pit lane and the race core starts its next lap as valid (records keep counting it, the core is unchanged); a lap begun in the bay after a tow or a recovery is an out-lap too. The collector notes at each crossing (each `lap` event) whether the car is on the road with no visit open, and counts the following lap only if it was. |
 | `best`, `bestLap` | The fastest valid flying lap (seconds) and its lap number. `null` without one. A fastest lap on the flag lap counts (the core emits the flag lap before classifying the finish). |
 | `mean` | Mean of the valid flying laps (seconds). |
 | `sd` | **Consistency**: the standard deviation of the valid flying laps in seconds (population form, the spread of the laps driven). Lower is more consistent. `null` (an em dash on the card) with fewer than two valid flying laps. |
@@ -59,7 +59,7 @@ The comparison is between this race's best valid lap (the race core's `bestLap`,
 - **Online**: only for a signed-in driver. When the race starts the page reads the account's career bests (`/api/profile/stats`); it keeps them only if they arrive before that race's result. At the result, a best counts only with the same circuit, circuit layout version, mode, rules version, setup and tuning as the envelope; earlier results shown in the same tab for the same account and key count too (their storage may still be pending). The baseline is fixed when the result is first shown, so a resend or reconnect never compares the race with itself.
 - No compatible baseline (a guest online, a first race on a setup, an incompatible layout, mode, rules, setup or tuning, or bests that did not arrive in time): **no comparison** is shown and no "new PB" is claimed.
 
-The card says "New PB: 0.240 s quicker than your previous best of 14.240 s", "Equalled your best…" or "0.312 s off your best…".
+The card names both laps it compares: "New PB: 0.240 s quicker · best valid lap 14.000 s (lap 1 included, as records count laps) against your previous best of 14.240 s", "Equalled your best…" or "0.312 s off your best…". Records (local boards and server bests) count any valid lap, lap 1 and out-laps included, so the comparison uses the same lap the standings' Best column shows; in the rare race where that is not a flying lap it can differ from Pace's fastest, and the label says which lap it is. Online, a career best set by this very race (a reloaded tab whose career read arrived before the result) is never used as its baseline.
 
 ## Takeaway
 
@@ -74,7 +74,7 @@ One line, from fixed rules in a fixed order (`takeaway()` in `src/debrief.ts`), 
 7. DNF: "Did not finish after N laps".
 8. Fewer than two valid flying laps: "Valid flying laps: N — clean laps give a pace and consistency score".
 9. A classification time penalty: "+N s time penalty this race".
-10. Otherwise: "No incidents or penalties this race".
+10. Otherwise: "No incidents or penalties this race" when every incident count on the card is zero, being hit by others included; with any "hit by others", "No offences or penalties of your own this race".
 
 Without a summary (an older result) there is **no takeaway**: a clean race is never inferred from missing metrics.
 
@@ -106,12 +106,14 @@ The static site deploys on merge; the room server is upgraded by hand later; old
 
 ## Tests
 
-- `test/debrief.test.ts`: lap validity (lap 1, invalid laps, no / one valid lap, a flag-lap best, laps after the finish), a real race against the core's own lap events; scripted scenarios with exact durations within one or two steps: a combined pit visit (queue, stop-and-go service, bay; components never summed), a tow from the road (its penalty held in the bay; not a fuel visit), running dry inside a pit visit (no double counting), a stopped-on-track recovery, a de-slot, an offence charged against being hit; freezing at a retirement mid-visit, after the flag, a DQ; a rematch starting from zero; bounded size; the takeaway rules; the personal-best comparison and the local baseline; reading a received summary.
+- `test/debrief.test.ts`: lap validity (lap 1, invalid laps, no / one valid lap, a flag-lap best, laps after the finish), an out-lap whose crossing is made in the pit lane on circuit-3 (valid in the core, not a flying lap) and the lap after a tow, a real race against the core's own lap events (with an out-lap); scripted scenarios with exact durations within one or two steps: a combined pit visit (queue, stop-and-go service, bay; components never summed), a tow from the road (its penalty held in the bay; not a fuel visit), running dry inside a pit visit (no double counting), a stopped-on-track recovery, a de-slot, an offence charged against being hit; freezing at a retirement mid-visit, after the flag, a DQ; a rematch starting from zero; bounded size; the takeaway rules; the personal-best comparison and the local baseline; reading a received summary.
 - `test/server/debrief.test.ts`: a two-human server race with a dropped and resumed seat: one summary per human in the envelope, frozen at each driver's terminal step (the run-on adds nothing), equal to a local replay of the same seed and inputs (`runOn: 'sync'`, as the browser), duplicates and resends, an older envelope, an aborted race.
 - `test/server/debrief.db.test.ts` (PostgreSQL): an envelope spooled while the database is down and replayed by a fresh process, stored byte for byte, awarded once, a duplicate a no-op; an envelope from before debriefs stored and listed as before.
 - Browser: `node scripts/browser-check.mjs debrief` (desktop and emulated touch, see [validation.md](validation.md)); online browsers: `node scripts/online-check.mjs debrief`.
 
 Results on `3bcc152`'s code with the final check scripts (SwiftShader, diagnostics; local servers only): `debrief` 18/18, `responsive` 251/251, `touch` 53/53, `championship` 9/9, `racelength` 36/36, `carsetup` 30/30, `netbanner` 49/49, `online` 3 pass + 1 n/a (default build); `online-check debrief` 8/8, `lengths` 10/10, `setups` 10/10. `npm test` 1072 passed, 35 skipped (the database files without a database); `npm run test:db` 35/35 in 7 files.
+
+After the out-lap fix (the review of #139): the 20-race seeded digest is still identical to `9ba30bf`; `npm test` 1074 passed, 35 skipped; `npm run test:db` 35/35 in 7 files; `debrief` 18/18.
 
 ## Limitations
 

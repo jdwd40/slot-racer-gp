@@ -1539,7 +1539,8 @@ function netPbBefore(r: ResultView): number | null {
   let before: number | null = null;
   if (key && netPbBase && netPbBase.raceId === r.raceId && netPbBase.account === pbAccount()) {
     const ms = [
-      ...netPbBase.bests.filter((b) => [b.track, b.trackVersion, b.mode, b.rules, setupOr(b.setup), b.tuning].join('|') === key).map((b) => b.lapMs),
+      // a best set by this very race (a reloaded tab whose career read beat the result) is never its own baseline
+      ...netPbBase.bests.filter((b) => b.raceId !== r.raceId && [b.track, b.trackVersion, b.mode, b.rules, setupOr(b.setup), b.tuning].join('|') === key).map((b) => b.lapMs),
       ...netSeenBests.filter((x) => x.key === key && x.account === netPbBase!.account && x.raceId !== r.raceId).map((x) => x.ms),
     ].filter((x) => x > 0);
     before = ms.length ? Math.min(...ms) : null;

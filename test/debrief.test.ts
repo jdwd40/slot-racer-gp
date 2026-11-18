@@ -70,31 +70,79 @@ describe('pace: valid flying laps only', () => {
   });
   it('a fastest lap on the flag lap counts; laps after the driver is terminal never do', () => {
     const r = solo(), c = r.cars[0];
-    lap(r, c, 2, 14.5, true); lap(r, c, 3, 14.6, true);
+    lap(r, c, 1, 15.5, true); lap(r, c, 2, 14.5, true); lap(r, c, 3, 14.6, true);
     // the race core emits the flag lap before classifying the finish: it is in
     lap(r, c, 4, 14.1, true);
     c.status = 'finished'; c.finished = true;
     lap(r, c, 5, 13.0, true);
     r.emit({ type: 'deslot', car: c });
     r.update(STEP, {});
-    expect(r.debrief('p')).toMatchObject({ laps: 3, valid: 3, best: 14.1, bestLap: 4, deslots: 0 });
+    expect(r.debrief('p')).toMatchObject({ laps: 4, valid: 3, best: 14.1, bestLap: 4, deslots: 0 });
     expect(r.debriefs.frozen('p')).toBe(true);
   });
+  it('an out-lap (begun at a crossing in the pit lane: the pit exit is past the timing line) is not a flying lap, though the core counts it valid', () => {
+    const r = racing([{ id: 'p', control: 'human', slot: 0 }], 'circuit-3');
+    const P = r.cars[0];
+    expect(T.PIT_OUT1).toBeGreaterThan(T.FINISH_S);   // the line is crossed inside the pit lane
+    place(P, LAP * T.L + T.PIT_IN0 - 60, -1, 14); P.fuel = 0.5;
+    r.requestPit('p');
+    const laps: { n: number; t: number; valid: boolean; mode: string }[] = [];
+    const road = (rr: Race): Input => {
+      if (P.mode !== 'race') return pulse(rr);
+      const prof = rr.profiles[P.laneSide > 0 ? '1' : '-1'];
+      const want = prof[Math.floor(((rr.T.wrapS(P.u) + 6) % rr.T.L) / rr.T.PROFILE_STEP) % prof.length] * 0.9;
+      return { up: P.v < want, down: P.v > want + 2 };
+    };
+    for (let i = 0; i < 120 * 90 && laps.length < 4; i++) {
+      r.update(STEP, { p: road(r) });
+      for (const e of r.events) if (e.type === 'lap' && e.car === P) laps.push({ n: e.lapsDone, t: e.time, valid: e.valid, mode: P.mode });
+      r.events.length = 0;
+    }
+    // laps[0] ends at the crossing made in the pit lane; laps[1] is the out-lap (valid in the core); laps[2..] are flying
+    expect(laps[0].mode).toBe('pitlane');
+    expect(laps[1]).toMatchObject({ valid: true, mode: 'race' });
+    expect(laps[2].valid && laps[3].valid).toBe(true);
+    expect(laps[1].t).toBeGreaterThan(Math.max(laps[2].t, laps[3].t) + 0.3);   // slower: the pit exit is part of it
+    const d = r.debrief('p')!;
+    expect(d.laps).toBe(4);
+    expect(d.valid).toBe(2);
+    expect(d.best).toBeCloseTo(Math.min(laps[2].t, laps[3].t), 3);
+    expect(d.mean).toBeCloseTo((laps[2].t + laps[3].t) / 2, 3);
+    expect(d.sd).toBeCloseTo(Math.abs(laps[2].t - laps[3].t) / 2, 3);
+  });
+
+  it('the lap after a tow (begun in the bay) is not a flying lap either', () => {
+    const r = solo(), P = r.cars[0];
+    const lap = (lapsDone: number, time: number, mode: Car['mode'], valid = true): void => { P.mode = mode; r.emit({ type: 'lap', car: P, time, best: false, valid, lapsDone }); };
+    lap(1, 16, 'race');
+    lap(2, 14.2, 'race');
+    r.emit({ type: 'tow', car: P });
+    lap(3, 30, 'service', false); // the tow's own crossing, made from the bay (the core voids the lap that ran dry)
+    P.mode = 'race'; r.update(STEP, {});   // back on the road: the visit closes
+    lap(4, 17, 'race');           // the out-lap from the bay: valid in the core, not a flying lap
+    lap(5, 14.4, 'race');
+    expect(r.debrief('p')).toMatchObject({ laps: 5, valid: 2, best: 14.2, mean: 14.3 });
+  });
+
   it('a real race: the summary agrees with the race core\'s own lap events and best lap', () => {
     T.setTrack('circuit-2');
     const r = new Race({ track: 'circuit-2', seed: 21, roster: [{ id: 'p', control: 'human', slot: 0 }, { id: 'a1', control: 'ai', slot: 1 }] });
-    const laps: { t: number; v: boolean; n: number }[] = [];
+    const laps: { t: number; v: boolean; n: number; fly: boolean }[] = [];
+    let flyNext = false;
     for (let i = 0; i < 120 * 600 && r.phase !== 'done'; i++) {
       const c = r.car('p')!;
       const prof = r.profiles[c.laneSide > 0 ? '1' : '-1'];
       const want = prof[Math.floor(((r.T.wrapS(c.u) + 6) % r.T.L) / r.T.PROFILE_STEP) % prof.length] * 0.93;
       if (c.fuel < 0.25 && !c.pitReq && c.mode === 'race' && i % 60 === 0) r.requestPit('p');
       r.update(STEP, { p: c.mode === 'race' ? { up: c.v < want, down: c.v > want + 2 } : { up: i % 80 < 40, down: false } });
-      for (const e of r.events) if (e.type === 'lap' && e.car.id === 'p') laps.push({ t: e.time, v: e.valid, n: e.lapsDone });
+      for (const e of r.events) if (e.type === 'lap' && e.car.id === 'p' && e.car.status === 'running') { laps.push({ t: e.time, v: e.valid, n: e.lapsDone, fly: flyNext }); flyNext = e.car.mode === 'race'; }
+      // (a car that finished with this lap is counted too: its lap event comes before the finish)
+      else if (e.type === 'lap' && e.car.id === 'p') { laps.push({ t: e.time, v: e.valid, n: e.lapsDone, fly: flyNext }); flyNext = false; }
       r.events.length = 0;
     }
     const c = r.car('p')!, d = r.debrief('p')!;
-    const fly = laps.filter((l) => l.v && l.n >= 2).map((l) => l.t);
+    const fly = laps.filter((l) => l.v && l.n >= 2 && l.fly).map((l) => l.t);
+    expect(laps.some((l) => l.v && l.n >= 2 && !l.fly)).toBe(true);   // this race has an out-lap the core counts valid
     const mean = fly.reduce((a, b) => a + b, 0) / fly.length;
     expect(c.status).toBe('finished');
     expect(d.laps).toBe(laps.length);
@@ -286,6 +334,8 @@ describe('takeaway: fixed rules, every one backed by a figure on the card', () =
     expect(takeaway({ ...base(), valid: 1, sd: null }, fin, null)).toEqual({ id: 'deb.tk.fewLaps', vars: { n: 1 } });
     expect(takeaway(base(), { ...fin, timePen: 5 }, null)).toEqual({ id: 'deb.tk.timePen', vars: { n: 5 } });
     expect(takeaway(base(), fin, comparePb(13900, 14))).toEqual({ id: 'deb.tk.clean' });
+    // being hit is an incident on the card: never "no incidents" then
+    expect(takeaway({ ...base(), hitBy: 2 }, fin, null)).toEqual({ id: 'deb.tk.noPen' });
   });
   it('no summary (an older result): no takeaway at all, never an inferred clean race', () => {
     expect(takeaway(null, fin, null)).toBeNull();

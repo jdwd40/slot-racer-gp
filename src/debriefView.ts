@@ -42,8 +42,11 @@ export function debriefHtml(c: DebriefCard): string {
     ? `${t('deb.paceBest', { best: s3(d.best), lap: d.bestLap ?? 0 })} · ${t('deb.paceMean', { mean: s3(d.mean ?? 0) })} · ${t('deb.paceValid', { n: d.valid, laps: d.laps })}`
     : `— ${small(t('deb.paceNone', { laps: d.laps }))}`;
   const cons = d.sd !== null ? `±${s3(d.sd)} s ${small(t('deb.consHelp'))}` : `— ${small(t('deb.consNone'))}`;
-  const pbRow = pb ? row('pb', t('deb.pb'), pb.improved ? `<span class="deb-new">${t('deb.pbNew', { d: s3(-pb.delta) })}</span> ${small(t('deb.pbWas', { was: s3(pb.before / 1000) }))}`
-    : pb.delta === 0 ? t('deb.pbEqual', { was: s3(pb.before / 1000) }) : t('deb.pbOff', { d: s3(pb.delta), was: s3(pb.before / 1000) })) : '';
+  // the comparison names the lap it compares: records (local boards, server bests) count any valid lap, lap 1 included, so the
+  // race's best valid lap is compared and shown here, even in the rare race where it is lap 1 and differs from Pace's fastest
+  const pv = pb ? { was: s3(pb.before / 1000), best: s3(pb.best / 1000) } : null;
+  const pbRow = pb && pv ? row('pb', t('deb.pb'), pb.improved ? `<span class="deb-new">${t('deb.pbNew', { d: s3(-pb.delta) })}</span> ${small(t('deb.pbWas', pv))}`
+    : pb.delta === 0 ? t('deb.pbEqual', pv) : t('deb.pbOff', { d: s3(pb.delta), ...pv })) : '';
   const inc = [
     t('deb.incDeslots', { n: d.deslots }) + (d.deslots ? ` ${small(t('deb.incOff', { s: s1(d.offS) }))}` : ''),
     t('deb.incOffences', { n: d.offences }),
