@@ -81,3 +81,6 @@ Every race finished; all-AI fields finish within 14 s of each other with three t
 - `test/server/career.db.test.ts`: recent results name each length, results stored before presets read as Standard.
 - `test/records.test.ts`: the remembered choice and championship saves.
 - Browser: `node scripts/browser-check.mjs racelength` (desktop and emulated-touch flows, see [validation.md](validation.md)).
+- Online browsers: `node scripts/online-check.mjs lengths` (two Chromium pages against the local time-scaled room server: the menu selector, a Sprint room, an older page refused, the host's switch to Endurance seen by the touch guest with its Ready cleared, a Sprint race flagged on lap 5 for both, rematch keeping Sprint).
+
+Results on `606def1`'s code (SwiftShader, diagnostics): `racelength` 36/36, `responsive` 251/251, `touch` 53/53, `netbanner` 49/49, `championship` 9/9, `online` 3 pass + 1 n/a (default build), `touchrace` 7/7 on its rerun (the first run stalled in a stopped-on-track recovery bay, the known flake); `online-check lengths` 10/10, `layout` 24/24.
