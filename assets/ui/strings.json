@@ -309,7 +309,7 @@
     { "id": "deb.consNone", "text": "needs two valid flying laps" },
     { "id": "deb.pb", "text": "Personal best" },
     { "id": "deb.pbNew", "text": "New PB: {d} s quicker" },
-    { "id": "deb.pbWas", "text": "best valid lap {best} s (lap 1 included, as records count laps) against your previous best of {was} s" },
+    { "id": "deb.pbWas", "text": "· best valid lap {best} s (lap 1 included, as records count laps) against your previous best of {was} s" },
     { "id": "deb.pbEqual", "text": "Equalled your best of {was} s with a best valid lap of {best} s" },
     { "id": "deb.pbOff", "text": "{d} s off your best of {was} s (best valid lap {best} s, lap 1 included, as records count laps)" },
     { "id": "deb.inc", "text": "Incidents" },
