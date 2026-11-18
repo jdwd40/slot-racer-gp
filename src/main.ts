@@ -5,6 +5,8 @@ import * as T from './track';
 import { Race, Car, RaceEvent, DRIVERS, PEN, SOLO_ID, DriverId, RosterEntry } from './race';
 import { LENGTH_IDS, lengthOr, raceLength, type RaceLengthId } from './raceLength';
 import { DEFAULT_SETUP, SETUP_IDS, setupOr, type SetupId } from './carSetup';
+import { comparePb, readDebrief, type PbCompare } from './debrief';
+import { debriefHtml, debriefOpen } from './debriefView';
 import { buildWorld, disposeWorld, arrowGeometry, bayPaints, BayPaint, World } from './world';
 import { Y0, disposeObject } from './gfx';
 import { makeCar, makePlayerMarker, dimCar, CarVisual } from './carModel';
@@ -145,6 +147,11 @@ function setRace(r: Race): void { race = r; autoQuality.beginRace(); laneArrowKe
 const recorder = new GhostRecorder();
 const ghost = new GhostPlayer(scene);
 let pbMs = 0;
+/**
+ * The local driver's compatible personal best (ms) read when this race started (#134): their own fastest lap on this device's
+ * race board for this circuit and setup (current tuning), before any lap of this race could change it; null when none.
+ */
+let pbBefore: number | null = null;
 let lastCrossed = 0;
 let pendingLap: Extract<RaceEvent, { type: 'lap' }> | null = null;
 const freshIds = new Set<string>();
@@ -527,11 +534,27 @@ function showResults(): void {
     <h2>${pos === 1 && mine.status === 'finished' ? '🏆 ' + t('res.win') : t('res.title')}</h2>
     <div class="place">${place}</div>
     <div class="tscroll"><table><thead><tr><th>#</th><th>${t('res.driver')}</th><th>${t('res.time')}</th><th>${t('res.best')}</th><th>${t('res.pits')}</th><th>${t('res.pen')}</th></tr></thead><tbody>${rows}</tbody></table></div>
+    ${localDebrief(mine.status === 'finished' ? pos : null)}
     ${localCareerNote()}
     <div class="row"><button class="cta" id="o-again">${t('res.again')} <small>(R)</small></button><button class="cta alt" id="o-menu">${t('pause.menu')}</button></div>
   </div>`;
   overlay.querySelector('#o-again')!.addEventListener('click', restartSession);
   overlay.querySelector('#o-menu')!.addEventListener('click', toMenu);
+}
+
+/**
+ * The local driver's debrief (#134) from this device's own race: frozen at the driver's finish, DQ or DNF, so the AI run-on
+ * and the cool-down lap add nothing, and computed again identically however often the card is drawn.
+ */
+function localDebrief(pos: number | null): string {
+  const p = me();
+  if (race.phase !== 'done') return '';
+  const d = race.debrief(p.id);
+  return debriefHtml({
+    d, pb: comparePb(pbBefore, p.bestLap > 0 ? p.bestLap : null), open: debriefOpen(),
+    facts: { status: p.status, dqReason: p.dqReason, dnfReason: p.dnfReason, timePen: p.timePen, pos },
+    where: `${t(`track.${race.T.DEF.id}.name`)} · ${lengthTag(race.length.id)} · ${setupTag(p.setup.id)}`,
+  });
 }
 
 // ---- championship
@@ -569,6 +592,11 @@ function showChamp(finished: Race | null): void {
     const rows = last.order.map((o, i) => `<tr class="${o.idx === 0 ? 'me' : ''}"><td>${o.dq || o.dnf ? '–' : i + 1}</td><td>${colorDot(driverColor(o.idx))}${driverName(o.idx)}</td><td class="mono">${o.dq ? t('champ.dq') : o.dnf ? t('champ.dnf') : fmt(o.time)}</td><td class="mono">${R.roundPoints(last, i)}</td></tr>`).join('');
     roundHtml = `<h3>${t('champ.roundResults')} · ${t(`track.${last.track}.name`)}</h3>
       <div class="tscroll"><table><thead><tr><th>#</th><th>${t('res.driver')}</th><th>${t('res.time')}</th><th>${t('champ.points')}</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+    // the round's own race (#134): the player's debrief under the round's classification (slot 0 is the player in a championship)
+    if (finished === race && race.final) {
+      const i = last.order.findIndex((o) => o.idx === 0);
+      roundHtml += localDebrief(i >= 0 && !last.order[i].dnf && !last.order[i].dq ? i + 1 : null);
+    }
   }
   const st = R.standings(c, 4);
   const stRows = st.map((x, i) => `<tr class="${x.idx === 0 ? 'me' : ''}"><td>${i + 1}</td><td>${colorDot(driverColor(x.idx))}${driverName(x.idx)}</td><td class="mono">${x.points}</td><td class="mono">${x.wins}</td><td class="mono">${x.seconds}</td></tr>`).join('');
@@ -636,6 +664,8 @@ function startSession(m: Mode): void {
     const g = R.loadGhost(T.DEF.id, carId, R.currentInitials(), me().setup.id);
     ghost.setData(g); pbMs = g ? g.ms : 0;
   } else { ghost.setData(null); pbMs = 0; }
+  // the debrief's baseline (#134), read before this race can add a lap to the board; a restart reads it afresh
+  pbBefore = mode === 'practice' ? null : R.personalBest('race', T.DEF.id, me().setup.id, R.currentInitials());
   resume();
   camLead.set(0, 0);
   const p = me();
@@ -1035,6 +1065,18 @@ let netNotice = '';
 let netResult: ResultView | null = null;
 /** the local driver's car became terminal and the pending card was dismissed to watch the race */
 let netWatch = false;
+/**
+ * #134: the signed-in driver's server bests as read when this race started, before its result could be stored (the
+ * debrief's personal-best baseline); null for a guest, before the read returns, or if it failed.
+ */
+let netPbBase: { raceId: string; account: string; bests: CareerStats['bests'] } | null = null;
+/** best laps of results already shown in this tab, per account and record key: a baseline never misses one still being stored */
+const netSeenBests: { raceId: string; account: string; key: string; ms: number }[] = [];
+/** each race's baseline, fixed when its result is first shown, so a resend or reconnect never compares a race with itself */
+const netPbFixed = new Map<string, number | null>();
+/** diagnostics only (qaNetResult): the pretend signed-in account of a result card shown without a server */
+let qaAccount: string | null = null;
+const pbAccount = (): string | null => accounts.account?.id ?? qaAccount;
 /** the latest server time seen (ms) and its lag, for the diagnostics hook */
 let netTick = -1, netLag = 0;
 const NAME_KEY = 'srgp.netName', NLIV_KEY = 'srgp.netLivery';
@@ -1452,6 +1494,7 @@ function onNetState(m: Extract<ServerMsg, { t: 'state' }>, at: number): void {
     netBuf.push(m.tick, at, snap);
     netTick = m.tick;
     recorder.stop(); ghost.setData(null); pbMs = 0;
+    if (netRaceId) readNetPbBase(netRaceId);
     camMode = 'follow'; camLead.set(0, 0);
     const p = me(); camTarget.set(p.x, 0, -p.y);
     resume();
@@ -1467,6 +1510,51 @@ function onNetState(m: Extract<ServerMsg, { t: 'state' }>, at: number): void {
   const p = me();
   if (p.status !== 'running' && !netWatch && screen === 'race') showNetWait();
   else if (screen === 'netwait') renderNetWait();
+}
+
+/**
+ * The debrief's personal-best baseline (#134) for a server race: a signed-in driver's career bests, read as the race starts.
+ * Kept only if it arrives before this race's result (so it can never already hold this race's own laps).
+ */
+function readNetPbBase(raceId: string): void {
+  netPbBase = null;
+  const account = accounts.account?.id;
+  if (!account) return;
+  void accounts.stats().then((r) => {
+    if (r.ok && netRaceId === raceId && netResult?.raceId !== raceId && accounts.account?.id === account) netPbBase = { raceId, account, bests: r.stats.bests };
+  });
+}
+/** A record's compatibility key: circuit and layout version, mode, rules, setup and its tuning (docs/race-debrief.md). */
+const pbKey = (r: ResultView, setup: SetupId, tuning: number): string | null => (r.track.version && r.rules?.version ? [r.track.id, r.track.version, r.mode, r.rules.version, setup, tuning].join('|') : null);
+/**
+ * The compatible personal best from before this race (ms), or null: no baseline means no comparison. Only for a signed-in
+ * driver whose bests were read at the start of this race; earlier results shown in this tab for the same account and key count
+ * too (their storage may still be pending). Fixed at the first showing of the race.
+ */
+function netPbBefore(r: ResultView): number | null {
+  if (netPbFixed.has(r.raceId)) return netPbFixed.get(r.raceId)!;
+  const mine = r.participants.find((x) => x.id === localId);
+  const setup = setupOr(mine?.setup), tuning = mine?.tuning ?? 0;
+  const key = pbKey(r, setup, tuning);
+  let before: number | null = null;
+  if (key && netPbBase && netPbBase.raceId === r.raceId && netPbBase.account === pbAccount()) {
+    const ms = [
+      // a best set by this very race (a reloaded tab whose career read beat the result) is never its own baseline
+      ...netPbBase.bests.filter((b) => b.raceId !== r.raceId && [b.track, b.trackVersion, b.mode, b.rules, setupOr(b.setup), b.tuning].join('|') === key).map((b) => b.lapMs),
+      ...netSeenBests.filter((x) => x.key === key && x.account === netPbBase!.account && x.raceId !== r.raceId).map((x) => x.ms),
+    ].filter((x) => x > 0);
+    before = ms.length ? Math.min(...ms) : null;
+  }
+  netPbFixed.set(r.raceId, before);
+  while (netPbFixed.size > 32) netPbFixed.delete(netPbFixed.keys().next().value!);
+  // this race's own best now counts for the next race's baseline (once, whatever the resends)
+  const best = r.classification?.find((x) => x.id === localId)?.bestLap ?? 0;
+  const account = pbAccount();
+  if (key && account && best > 0 && r.outcome === 'completed' && !netSeenBests.some((x) => x.raceId === r.raceId)) {
+    netSeenBests.push({ raceId: r.raceId, account, key, ms: Math.round(best * 1000) });
+    if (netSeenBests.length > 32) netSeenBests.shift();
+  }
+  return before;
 }
 
 /** Results are the server's alone. Shown as often as asked; nothing is recorded locally, so a repeat changes nothing. */
@@ -1753,6 +1841,7 @@ function showNetWait(): void {
     <h2>${t('net.pendingTitle')}</h2>
     <div class="place" id="w-head"></div>
     <p><small>${t('net.pendingNote')}</small></p>
+    <p class="deb-pending"><small>${t('deb.pending')}</small></p>
     <p id="w-lost" class="net-msg" role="status" aria-live="polite"></p>
     <div class="tscroll"><table>${STAND_HEAD()}<tbody id="w-rows"></tbody></table></div>
     <div class="row"><button class="cta" id="w-watch">${t('net.watch')}</button><button class="cta alt" id="w-leave">${t('net.leave')}</button></div>
@@ -1813,6 +1902,16 @@ function showNetResults(r: ResultView): void {
     const mine = r.classification.find((x) => x.id === localId);
     head = !mine ? '' : mine.status === 'dq' ? `${t('res.youDq')} · ${t(`res.dqReason.${mine.dqReason}`)}` : mine.status === 'dnf' ? t('res.youDnf') : t('res.youPlace', { n: mine.pos ?? 0 });
     body = `<div class="tscroll"><table>${STAND_HEAD()}<tbody>${standingRows(rows)}</tbody></table></div>`;
+    // #134: this driver's debrief, as the server collected it (never from events this page received); an older server's
+    // result has none, which is shown as unavailable
+    if (mine && r.outcome === 'completed') {
+      const setup = setupOr(byId.get(mine.id)?.setup);
+      body += debriefHtml({
+        d: readDebrief(r, mine.id), pb: comparePb(netPbBefore(r), mine.bestLap > 0 ? mine.bestLap : null), open: debriefOpen(),
+        facts: { status: mine.status, dqReason: mine.dqReason, dnfReason: mine.dnfReason, timePen: mine.timePen, pos: mine.pos },
+        where: `${t(`track.${r.track.id}.name`)} · ${lengthTag(lengthOr(r.settings?.length))} · ${setupTag(setup)}`,
+      });
+    }
   } else {
     head = t('net.noResult');
     body = `<p>${t(r.outcome === 'aborted' ? 'net.aborted' : 'net.ended', { why: esc(r.abortReason ?? '') })}</p>`;
@@ -1958,4 +2057,24 @@ function qaNetLobby(room: PublicRoom, meId: string, conn: Conn, lengths?: RaceLe
   syncBanner();
 }
 
-(window as unknown as { __game: unknown }).__game = { get online() { return online; }, get auth() { return { state: accounts.auth.state, busy: accounts.busy, displayName: accounts.account?.displayName ?? null }; }, get net() { return net && { conn: net.conn, me: net.me, room: net.room, result: net.result, reconnects: net.reconnects, tick: netTick, lagMs: netLag, buf: netBuf.stats, raceId: netRaceId, held: net.client.held, ctlSeq: net.client.ctlSeq, actSeq: net.client.actSeq }; }, netDrop: () => net?.client.ws?.close(4000, 'qa drop'), qaNetLobby, get race() { return race; }, T, R, applyTrack, startSession, showTitle, get mode() { return mode; }, get preset() { return preset; }, get touchMode() { return touchMode; }, setTouchMode, input, get audio() { return sfx.ctx?.state ?? null; }, get muted() { return sfx.muted; }, suspendAudio: () => sfx.ctx?.suspend(), get champ() { return champ; }, get raceLen() { return raceLen; }, get carSetup() { return carSetupId; }, get bays() { return bayPaint; }, get ghost() { return ghost; }, get pbMs() { return pbMs; }, get screen() { return screen; }, get view() { return camMode; }, get aspect() { return camera.aspect; }, get mini() { return { w: hud.mW, h: hud.mH }; }, stepper, advance: (sec: number) => { for (let t = 0; t < sec && simulating(); t += STEP) tick(STEP); }, setView: (m: 'follow' | 'full') => { camMode = m; }, zoom: (span: number) => { camMode = 'follow'; followSpan = span; curSpan = span; }, snapCam: () => { const p = me(); camLead.set(0, 0); camTarget.set(p.x, 0, -p.y); }, get marker() { return playerMarker; }, get localId() { return localId; }, setLocalSlot: (n: number) => { localSlot = Math.max(0, Math.min(DRIVERS.length - 1, Math.floor(n))); }, get camTarget() { return { x: camTarget.x, z: camTarget.z }; }, get motorMix() { return motorMix; }, arrows: { lane: laneArrow, pit: pitArrow }, info: () => ({ calls: renderer.info.render.calls, tris: renderer.info.render.triangles, objects: world.root.children.length, frames: renderer.info.render.frame, geometries: renderer.info.memory.geometries, textures: renderer.info.memory.textures }) };
+/**
+ * Diagnostics only (scripts/browser-check.mjs `debrief`, #134): show a server result card for a given result without a
+ * server (default build). `pbBests` stands in for the career bests a signed-in driver's page read at the race's start.
+ */
+function qaNetResult(r: ResultView, meId: string, pbBests?: CareerStats['bests']): void {
+  if (!net) {
+    const NoSocket = function () { throw new Error('qa result: no socket'); } as unknown as SocketCtor;
+    net = new NetSession('', NoSocket, {}, null);
+    mode = 'online';
+  }
+  net.me = meId; net.result = r;
+  qaAccount = pbBests ? 'qa' : null;
+  netPbBase = pbBests ? { raceId: r.raceId, account: 'qa', bests: pbBests } : null;
+  netResult = r;
+  // the card is drawn for that seat; the local race behind it (which has no such driver) keeps its own driver
+  const keep = localId;
+  localId = meId;
+  try { showNetResults(r); } finally { localId = keep; }
+}
+
+(window as unknown as { __game: unknown }).__game = { get online() { return online; }, get auth() { return { state: accounts.auth.state, busy: accounts.busy, displayName: accounts.account?.displayName ?? null }; }, get net() { return net && { conn: net.conn, me: net.me, room: net.room, result: net.result, reconnects: net.reconnects, tick: netTick, lagMs: netLag, buf: netBuf.stats, raceId: netRaceId, held: net.client.held, ctlSeq: net.client.ctlSeq, actSeq: net.client.actSeq }; }, netDrop: () => net?.client.ws?.close(4000, 'qa drop'), qaNetLobby, qaNetResult, get race() { return race; }, T, R, applyTrack, startSession, showTitle, get mode() { return mode; }, get preset() { return preset; }, get touchMode() { return touchMode; }, setTouchMode, input, get audio() { return sfx.ctx?.state ?? null; }, get muted() { return sfx.muted; }, suspendAudio: () => sfx.ctx?.suspend(), get champ() { return champ; }, get raceLen() { return raceLen; }, get carSetup() { return carSetupId; }, get bays() { return bayPaint; }, get ghost() { return ghost; }, get pbMs() { return pbMs; }, get screen() { return screen; }, get view() { return camMode; }, get aspect() { return camera.aspect; }, get mini() { return { w: hud.mW, h: hud.mH }; }, stepper, advance: (sec: number) => { for (let t = 0; t < sec && simulating(); t += STEP) tick(STEP); }, setView: (m: 'follow' | 'full') => { camMode = m; }, zoom: (span: number) => { camMode = 'follow'; followSpan = span; curSpan = span; }, snapCam: () => { const p = me(); camLead.set(0, 0); camTarget.set(p.x, 0, -p.y); }, get marker() { return playerMarker; }, get localId() { return localId; }, setLocalSlot: (n: number) => { localSlot = Math.max(0, Math.min(DRIVERS.length - 1, Math.floor(n))); }, get camTarget() { return { x: camTarget.x, z: camTarget.z }; }, get motorMix() { return motorMix; }, arrows: { lane: laneArrow, pit: pitArrow }, info: () => ({ calls: renderer.info.render.calls, tris: renderer.info.render.triangles, objects: world.root.children.length, frames: renderer.info.render.frame, geometries: renderer.info.memory.geometries, textures: renderer.info.memory.textures }) };

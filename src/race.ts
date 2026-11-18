@@ -4,6 +4,7 @@ import { PIT_Q } from './pitConst';
 import { outOfTraffic } from './traffic';
 import { raceLength, type RaceLength, type RaceLengthId } from './raceLength';
 import { carSetup, isSetupId, DEFAULT_SETUP, type CarSetup, type SetupId } from './carSetup';
+import { DebriefCollector, type DriverDebrief } from './debrief';
 
 // No lap count lives here: each Race takes its target from an allowlisted preset (src/raceLength.ts, #132), as `race.targetLaps`.
 // Drive, top speed, drag and grip are not here either: each car has its own setup preset (src/carSetup.ts, #133, Car.setup).
@@ -604,6 +605,11 @@ export class Race {
   /** highest action sequence number applied, per driver: a null-prototype table, so any string driver ID (even `__proto__`) is an own key */
   lastSeq: Record<DriverId, number> = Object.create(null) as Record<DriverId, number>;
   private pending: DriverAction[] = [];
+  /**
+   * Post-race debrief metrics (#134, src/debrief.ts): read-only observation of events and per-step state, collected from the
+   * green light until each driver's own terminal result. Never read by the simulation.
+   */
+  readonly debriefs = new DebriefCollector();
 
   constructor(opts: RaceOpts = {}) {
     this.practice = !!opts.practice;
@@ -684,7 +690,7 @@ export class Race {
 
   s(c: Car): number { return this.T.wrapS(c.u); }
 
-  emit(e: RaceEvent): void { this.events.push(e); }
+  emit(e: RaceEvent): void { this.events.push(e); this.debriefs.event(this, e); }
   /** a personal message for one human driver: AI cars get none */
   pmsg(c: Car, text: string, kind: MsgKind, vars?: Record<string, string | number>): void {
     if (c.human) this.emit(vars ? { type: 'msg', to: c.id, text, kind, vars } : { type: 'msg', to: c.id, text, kind });
@@ -1054,6 +1060,8 @@ export class Race {
     if (this.raceTime > this.timeLimit) this.classifyRunning('timeout');
     // after the terminal classification, so a car the window or the time limit ends on this step gets that one outcome only
     this.stallUpdate(dt, inputs);
+    // every transition of this step is done: the debrief observes it (read only), before a close can run the field on
+    this.debriefs.observe(this);
     if (this.phase !== 'racing') return;
     // one human finishing never ends anyone else's race: it closes once every human is terminal (with no human, every car)
     const humans = this.cars.filter((c) => c.human);
@@ -2341,6 +2349,9 @@ export class Race {
       final: this.final ? this.final.map((x) => ({ ...x })) : null,
     };
   }
+
+  /** One driver's debrief summary (#134): final once that driver is terminal; null for an unknown driver or before the green. */
+  debrief(id: DriverId): DriverDebrief | null { return this.debriefs.summary(id); }
 
   /** Take this step's events in wire form (and clear them). */
   drainEvents(): WireEvent[] {

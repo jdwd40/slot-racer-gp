@@ -5,6 +5,7 @@ import type { Standing } from '../src/race';
 import { TRACKS } from '../src/track';
 import { PROTOCOL_VERSION, RULES_VERSION, type ChampionshipTag, type LiveryId, type Mode, type RoomSettings } from '../src/net/protocol';
 import type { SetupId } from '../src/carSetup';
+import type { DriverDebrief } from '../src/debrief';
 
 export const ENVELOPE_SCHEMA = 1;
 
@@ -34,6 +35,12 @@ export interface ResultEnvelope {
   classification: Standing[] | null;
   laps: EnvelopeLap[];
   times: { roomCreatedAt: string; startedAt: string; greenAt: string | null; finishedAt: string; raceTimeS: number; ticks: number };
+  /**
+   * #134: each human driver's post-race debrief, as the race core collected it (src/debrief.ts, model `v` DEBRIEF_VERSION),
+   * frozen at that driver's own finish, DQ or DNF. Only in a completed race's envelope. Optional and additive (schema stays
+   * 1): an envelope from before debriefs has none, and every reader shows that as unavailable, never as zeros.
+   */
+  debrief?: { v: number; drivers: DriverDebrief[] };
   /** SHA-256 over every other field: two envelopes for one race are the same result exactly when their digests match */
   digest: string;
 }
@@ -73,6 +80,7 @@ export function buildEnvelope(e: Omit<ResultEnvelope, 'digest' | 'schema' | 'rul
     classification: rest.classification ? rest.classification.map((s) => ({ ...s })) : null,
     laps: rest.laps.map((l) => ({ ...l })),
     times: { ...rest.times },
+    ...(rest.debrief ? { debrief: { v: rest.debrief.v, drivers: rest.debrief.drivers.map((d) => ({ ...d })) } } : {}),
   };
   // a round trip makes the envelope plain JSON (no undefined, no Infinity) before it is hashed
   const plain = JSON.parse(JSON.stringify(body)) as Omit<ResultEnvelope, 'digest'>;

@@ -8,6 +8,7 @@ import pitConstSrc from '../src/pitConst.ts?raw';
 import trafficSrc from '../src/traffic.ts?raw';
 import raceLengthSrc from '../src/raceLength.ts?raw';
 import carSetupSrc from '../src/carSetup.ts?raw';
+import debriefSrc from '../src/debrief.ts?raw';
 import trackSrc from '../src/track.ts?raw';
 import * as T from '../src/track';
 import { Race, Car, Input, Controls, RaceOpts, RosterEntry, DriverAction, PEN, SERVICE_READY, CLOSE_DELAY, REV_CAP, DRIVERS, SOLO_ID, RaceEvent, SgPhase, wireEvent, soloRoster } from '../src/race';
@@ -469,10 +470,11 @@ describe('authoritative state', () => {
     expect(typeof (globalThis as { window?: unknown }).window).toBe('undefined');
     expect(typeof (globalThis as { document?: unknown }).document).toBe('undefined');
     // src/traffic.ts (#74 review): the one out-of-traffic predicate the race core and the pit traffic share; src/raceLength.ts
-    // (#132): the race-length preset table, plain data; src/carSetup.ts (#133): the car-setup preset table, plain data
-    for (const src of [raceSrc, pitSrc, pitConstSrc, trackSrc, trafficSrc, raceLengthSrc, carSetupSrc]) {
+    // (#132): the race-length preset table, plain data; src/carSetup.ts (#133): the car-setup preset table, plain data;
+    // src/debrief.ts (#134): the post-race metrics collector, read-only observation of the race (type imports of race only)
+    for (const src of [raceSrc, pitSrc, pitConstSrc, trackSrc, trafficSrc, raceLengthSrc, carSetupSrc, debriefSrc]) {
       const imports = [...src.matchAll(/from '([^']+)'/g)].map((m) => m[1]);
-      expect(imports.every((x) => x === './track' || x === './pit' || x === './pitConst' || x === './race' || x === './traffic' || x === './raceLength' || x === './carSetup')).toBe(true);
+      expect(imports.every((x) => x === './track' || x === './pit' || x === './pitConst' || x === './race' || x === './traffic' || x === './raceLength' || x === './carSetup' || x === './debrief')).toBe(true);
       expect(src).not.toMatch(/\b(window|document|localStorage|requestAnimationFrame|AudioContext|performance)\b\./);
     }
     const r = new Race({ roster: [{ id: 'a', control: 'ai' }, { id: 'b', control: 'ai' }], seed: 5 });

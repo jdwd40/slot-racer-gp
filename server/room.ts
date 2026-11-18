@@ -14,6 +14,7 @@ import { SnapEncoder } from '../src/net/snapwire';
 import { CHAMP_TRACKS } from '../src/records';
 import { DEFAULT_LENGTH, LENGTH_SET, isRaceLengthId, knowsLength, raceLength, type RaceLengthId } from '../src/raceLength';
 import { DEFAULT_SETUP, SETUP_IDS, SETUP_SET, carSetup, isSetupId, knowsSetup, type SetupId } from '../src/carSetup';
+import { DEBRIEF_VERSION, type DriverDebrief } from '../src/debrief';
 import { computeAwards, makeScoring, type Scoring } from './career';
 import type { Config } from './config';
 import type { Logger } from './log';
@@ -599,6 +600,8 @@ export class Room {
       trackId: this.settings.track, settings: { ...this.settings, length: race.length.id }, participants,
       classification: outcome === 'completed' && race.final ? [...race.final] : null,
       laps: this.laps,
+      // #134: each human's own debrief, frozen at that driver's terminal result (a completed race only: every car is terminal)
+      ...(outcome === 'completed' ? { debrief: { v: DEBRIEF_VERSION, drivers: this.roster.filter((e) => e.control === 'human').map((e) => race.debrief(e.id)).filter((d): d is DriverDebrief => d !== null) } } : {}),
       times: {
         roomCreatedAt: iso(this.createdAt), startedAt: iso(this.startedAt), greenAt: this.greenAt === null ? null : iso(this.greenAt),
         finishedAt: iso(now), raceTimeS: round3(race.raceTime), ticks: this.stepsDone,
