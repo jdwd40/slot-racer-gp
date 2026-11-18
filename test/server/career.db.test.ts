@@ -7,7 +7,9 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import WebSocket from 'ws';
 import pg from 'pg';
-import { LAPS, PEN, type RaceSnapshot, type Standing } from '../../src/race';
+import { PEN, type RaceSnapshot, type Standing } from '../../src/race';
+import { LAPS } from '../helpers';
+import type { RaceLengthId } from '../../src/raceLength';
 import { OnlineClient, type SocketCtor } from '../../src/net/client';
 import type { AwardsView, CareerStats, ServerMsg } from '../../src/net/protocol';
 import { createApp, type App } from '../../server/app';
@@ -99,7 +101,8 @@ describe.skipIf(!URL)('PostgreSQL: career points, award ledger, personal bests',
   const ledger = async (raceId: string) => (await pool.query<{ account_id: string; position: number | null; status: string; points: number }>('SELECT account_id::text, position, status, points FROM career_awards WHERE race_id = $1 ORDER BY position NULLS LAST, account_id', [raceId])).rows;
 
   let raceN = 0;
-  function envelope(o: { accounts: (string | null)[]; status?: Standing['status'][]; laps?: [number, number, boolean][]; mode?: ResultEnvelope['mode']; outcome?: ResultEnvelope['outcome']; track?: string; lapDriver?: number }): Readonly<ResultEnvelope> {
+  /** `length` (#132): omitted, the settings have none, as every result stored before race-length presets */
+  function envelope(o: { accounts: (string | null)[]; status?: Standing['status'][]; laps?: [number, number, boolean][]; mode?: ResultEnvelope['mode']; outcome?: ResultEnvelope['outcome']; track?: string; lapDriver?: number; length?: RaceLengthId }): Readonly<ResultEnvelope> {
     raceN++;
     const raceId = `00000000-0000-4000-8000-${String(raceN).padStart(12, '0')}`;
     const track = o.track ?? 'circuit-1';
@@ -112,7 +115,7 @@ describe.skipIf(!URL)('PostgreSQL: career points, award ledger, personal bests',
     const outcome = o.outcome ?? (o.mode === 'practice' ? 'ended' : 'completed');
     return buildEnvelope({
       raceId, roomId: '55555555-5555-4555-8555-555555555555', mode: o.mode ?? 'multiplayer', championship: null, outcome, abortReason: null,
-      trackId: track, settings: { track, aiFill: false }, participants,
+      trackId: track, settings: { track, aiFill: false, ...(o.length ? { length: o.length } : {}) }, participants,
       classification: outcome === 'completed' ? classification : null,
       laps: (o.laps ?? []).map(([lap, time, valid]) => ({ driver: `p${o.lapDriver ?? 0}`, lap, time, valid, raceT: lap * 8 })),
       times: { roomCreatedAt: '2026-11-09T10:00:00.000Z', startedAt: '2026-11-09T10:00:01.000Z', greenAt: null, finishedAt: new Date(Date.UTC(2026, 10, 9, 10, raceN)).toISOString(), raceTimeS: 100, ticks: 1 },
@@ -167,6 +170,24 @@ describe.skipIf(!URL)('PostgreSQL: career points, award ledger, personal bests',
     // totals are always the sum of the ledger
     const sum = (await pool.query('SELECT COALESCE(sum(points), 0)::int AS p FROM career_awards WHERE account_id = $1', [a[0].id])).rows[0].p;
     expect(sum).toBe(14);
+  });
+
+  it('recent results name each race\'s length (#132): results stored before presets read as Standard, nothing is migrated', async () => {
+    nextIp();
+    const a = await register('len_a');
+    const sink = new PgResultSink(pool);
+    const legacy = envelope({ accounts: [a.id, 'ai'] });
+    const sprint = envelope({ accounts: [a.id, 'ai'], length: 'sprint' });
+    const endurance = envelope({ accounts: ['ai', a.id], length: 'endurance', laps: [[26, 9.5, true]] });
+    for (const e of [legacy, sprint, endurance]) expect(await sink.consume(e)).toBe('stored');
+    const s = await stats(a.cookie);
+    expect(s.recent.map((x) => [x.raceId, x.length])).toEqual([[endurance.raceId, 'endurance'], [sprint.raceId, 'sprint'], [legacy.raceId, 'standard']]);
+    // the stored envelope is the one built (immutable, digest intact): the legacy one still has no length setting at all
+    const row = (await pool.query<{ envelope: ResultEnvelope }>('SELECT envelope FROM race_results WHERE race_id = $1', [legacy.raceId])).rows[0];
+    expect(row.envelope.settings).toEqual({ track: 'circuit-1', aiFill: false });
+    // same points policy at every length (this issue changes no scoring): a win is 10 whatever the length
+    expect(s.career).toMatchObject({ points: 10 + 10 + 6, races: 3, wins: 2 });
+    expect((await pool.query('SELECT id FROM schema_migrations ORDER BY id')).rows.map((r) => r.id).at(-1)).toBe('003_career_awards_bests');
   });
 
   it('personal bests only ever get faster, per circuit layout version, mode and rules; invalid, slower, duplicate and concurrent laps cannot replace one', async () => {

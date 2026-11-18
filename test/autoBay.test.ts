@@ -3,7 +3,8 @@
 // See docs/auto-bay.md.
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import * as T from '../src/track';
-import { AUTO, Car, DRIVERS, Input, LAPS, PEN, REFUEL_RATE, Race, SERVICE_READY, SgPhase } from '../src/race';
+import { AUTO, Car, DRIVERS, Input, PEN, REFUEL_RATE, Race, SERVICE_READY, SgPhase } from '../src/race';
+import { LAPS } from './helpers';
 import { DrivingInput } from '../src/input';
 import * as R from '../src/records';
 import type { RaceEvent } from '../src/race';

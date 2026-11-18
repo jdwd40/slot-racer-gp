@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Bounded browser checks of online play: independent browser contexts against the real room server. Results: docs/online-client-evidence.md.
 //
-//   node scripts/online-check.mjs [gate lobby service connection layout accounts career]   (default: all)
+//   node scripts/online-check.mjs [gate lobby service connection layout accounts career lengths]   (default: all)
 //   accounts and career need SLOTRUSH_TEST_DATABASE_URL (e.g. $(node scripts/local-pg.mjs env) after `node scripts/local-pg.mjs start`)
 //   node scripts/online-check.mjs race2 --url https://slotrush.jdwd40.com [--origin https://slotrush.jdwd40.com]
 //     the 2-browser race alone against a deployed site (no local build or servers): one multiplayer room with AI fill, two
@@ -15,7 +15,7 @@
 // Browsers are Chromium (Playwright) with SwiftShader on a GPU-less host, and touch is Chromium's touch emulation:
 // diagnostics only, not evidence of smooth play on a physical phone or tablet. Exit code 0 pass, 1 fail, 2 time limit.
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import net from 'node:net';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -27,6 +27,8 @@ import { instrument, Keys, Checks, Fingers, PadKeys, PHONE, environment, driveUn
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const OUT = path.join(ROOT, '.qa/online-check', new Date().toISOString().replace(/[:.]/g, '-'));
 const MAX_MIN = Number(process.env.ONLINE_CHECK_MAX_MIN ?? 40);
+/** the protocol this checkout speaks, for the raw-socket checks */
+const PROTOCOL = Number(/PROTOCOL_VERSION = (\d+)/.exec(readFileSync(path.join(ROOT, 'src/net/protocol.ts'), 'utf8'))?.[1]);
 const str = (id) => STRINGS[id].split('{')[0].trim();
 const waitUntil = async (f, ms) => { const end = Date.now() + ms; while (!f()) { if (Date.now() > end) throw new Error('timeout'); await sleep(10); } };
 
@@ -994,7 +996,72 @@ async function race2(run, c) {
   return [a, b];
 }
 
-const SCENARIOS = { gate, lobby, service, connection, layout, accounts, career, race2 };
+/**
+ * Race-length presets online (#132), two browsers against the time-scaled local server: the online menu's selector (the
+ * server lists presets), a Sprint room whose host's lobby has the selector and whose guest's shows the label, a page older
+ * than presets refused from it, the host switching to Endurance (seen by the guest, Ready cleared) and back, then a Sprint
+ * race flagged on lap 5 for both with the results naming it, and a rematch keeping the length.
+ */
+async function lengths(run, c) {
+  const url = run.fastUrl;
+  const tag = (id, n) => STRINGS['len.tag'].replace('{name}', STRINGS[`len.${id}`]).replace('{n}', n);
+  const host = await openPage(run, url, 'small', { name: 'host', fpsCap: CAP });
+  const phone = await openPage(run, url, 'phoneLo', { touch: true, name: 'phone', fpsCap: CAP });
+  await goOnline(host, 'Len Host');
+  const menu = await read(host.page, () => ({ lengths: window.__game.online.lengths, opts: [...document.querySelectorAll('[data-nrlen]')].map((b) => `${b.dataset.nrlen}:${b.getAttribute('aria-checked')}`), old: !!document.querySelector('.len-old') }));
+  c.ok('Online menu: the server lists the presets, so the Race length selector is offered (Standard by default)', menu.lengths.join() === 'sprint,standard,endurance' && menu.opts.join() === 'sprint:false,standard:true,endurance:false' && !menu.old, menu);
+  await host.page.click('[data-nrlen="sprint"]');
+  await host.page.click('#n-create');
+  await waitFor(host.page, () => window.__game.screen === 'lobby');
+  const lob = await read(host.page, () => ({ code: window.__game.net.room.code, length: window.__game.net.room.settings.length, on: [...document.querySelectorAll('[data-nlen]')].filter((b) => b.getAttribute('aria-checked') === 'true').map((b) => b.dataset.nlen).join() }));
+  c.ok('Create: the room races Sprint, and the host\'s lobby shows the length selector on Sprint', lob.length === 'sprint' && lob.on === 'sprint', lob);
+  // a page from before presets sends no `lengths`: the server refuses it from a Sprint room rather than seat a HUD counting to 13
+  const oldJoin = await read(host.page, ([wsUrl, v, code]) => new Promise((resolve) => {
+    const ws = new WebSocket(wsUrl);
+    const out = { msgs: [] };
+    const done = () => { try { ws.close(); } catch { /* closed */ } resolve(out); };
+    setTimeout(done, 10000);
+    ws.onopen = () => ws.send(JSON.stringify({ t: 'hello', v, proto: 'slotrush' }));
+    ws.onmessage = (e) => { const m = JSON.parse(e.data); out.msgs.push(m.t); if (m.t === 'welcome') { out.welcome = m.lengths; ws.send(JSON.stringify({ t: 'join', code, name: 'Old page' })); } if (m.t === 'nack' || m.t === 'joined') { out.reply = m; done(); } };
+  }), [await read(host.page, () => window.__game.online.wsUrl), PROTOCOL, lob.code]);
+  c.ok('A page older than presets (no `lengths` on join) is refused from the Sprint room with a reason', oldJoin.reply?.t === 'nack' && oldJoin.reply.code === 'bad_settings' && /reload/.test(oldJoin.reply.detail ?? '') && oldJoin.welcome?.join() === 'sprint,standard,endurance', oldJoin);
+  await joinRoom(phone, 'Len Phone', lob.code);
+  await waitFor(phone.page, () => window.__game.screen === 'lobby');
+  const guest = await read(phone.page, () => ({ text: document.getElementById('l-len')?.textContent ?? null, radios: document.querySelectorAll('[data-nlen]').length }));
+  c.ok('Guest (touch) lobby: "Sprint · 5 laps" shown before Ready, no selector', guest.text === tag('sprint', 5) && guest.radios === 0, guest);
+  await phone.page.locator('#l-ready').tap();
+  await waitFor(host.page, () => window.__game.net.room.participants.filter((p) => p.ready).length === 1);
+  await host.page.click('[data-nlen="endurance"]');
+  await waitFor(phone.page, () => window.__game.net.room.settings.length === 'endurance');
+  const sw = await read(phone.page, () => ({ text: document.getElementById('l-len')?.textContent ?? null, ready: window.__game.net.room.participants.find((p) => p.id === window.__game.net.me).ready, btn: document.getElementById('l-ready')?.textContent ?? null }));
+  c.ok('Host switches to Endurance: the guest sees "Endurance · 26 laps" at once and its Ready is cleared', sw.text === tag('endurance', 26) && sw.ready === false && sw.btn === STRINGS['net.readyBtn'], sw);
+  await host.page.click('[data-nlen="sprint"]');
+  await waitFor(phone.page, () => window.__game.net.room.settings.length === 'sprint');
+  await phone.page.locator('#l-ready').tap();
+  await waitFor(host.page, () => window.__game.net.room.participants.filter((p) => p.ready).length === 1);
+  await host.page.click('#l-start');
+  for (const s of [host, phone]) await waitFor(s.page, () => window.__game.screen === 'race' && window.__game.net.raceId, undefined, 30000);
+  const hud = await Promise.all([host, phone].map((s) => read(s.page, () => ({ lap: document.getElementById('h-lap').textContent, laps: window.__game.race.targetLaps }))));
+  c.ok('Both browsers race to 5: the mirror\'s target and the HUD (1/5) follow the server', hud.every((h) => h.lap === '1/5' && h.laps === 5), hud);
+  // the lobby taps above were the touch part; the race itself is driven by keyboard on both (the pad under four drawn frames a
+  // second is what lobby and service exercise), so only the length rules decide this race
+  phone.keys = new Keys(phone.page);
+  const fin = await driveAll([host, phone], done, 6 * 60000, { laps: 5 });
+  for (const s of [host, phone]) await waitFor(s.page, () => window.__game.screen === 'netres', undefined, 180000);
+  const res = await Promise.all([host, phone].map((s) => read(s.page, () => ({ r: window.__game.net.result, head: document.querySelector('.netres .lbl2')?.textContent ?? '' }))));
+  const cls = res[0].r.classification;
+  // the scripted SwiftShader drivers (4 drawn frames a second) are slow, so the second may run out of finish window: the flag
+  // itself is what is checked here (finishers on lap 5, nobody past it); full fields at every length are the server tests'
+  c.ok('Sprint race: the flag falls on lap 5 (every finisher classified at 5 laps, nobody past it), identical results on both naming the length', fin.every((x) => !x.error) && res[0].r.settings.length === 'sprint' && res[0].r.digest === res[1].r.digest && cls.length === 2 && cls.some((x) => x.status === 'finished') && cls.every((x) => x.laps <= 5 && (x.status !== 'finished' || x.laps === 5)) && res.every((x) => x.head.includes(tag('sprint', 5))), { fin, cls: cls.map((x) => `${x.pos ?? '-'}:${x.status}:${x.laps}`), heads: res.map((x) => x.head) });
+  await host.page.click('#r-rematch');
+  for (const s of [host, phone]) await waitFor(s.page, () => window.__game.screen === 'lobby');
+  const again = await Promise.all([host, phone].map((s) => read(s.page, () => window.__game.net.room.settings.length)));
+  c.ok('Rematch: back in the same room, still Sprint', again.every((x) => x === 'sprint'), again);
+  for (const s of [host, phone]) { const l = s.page.locator('#l-leave'); if (await l.count()) await l.click(); }
+  return [host, phone];
+}
+
+const SCENARIOS = { gate, lobby, service, connection, layout, accounts, career, race2, lengths };
 
 /** `race2` alone against a deployed site: no build, no local servers, one room (see the header). */
 async function remote(url, origin, names) {

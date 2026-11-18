@@ -461,6 +461,8 @@ describe('the room server streams v2 states', () => {
     // core the 11.6 digest still results (no seat ever holds Brake, so none backs up), so the version string is the only change
     // (979392e8…7d318 for 11.7). Re-pinned for #110 (rules race-core-2026.11.8) on the same grounds: with 11.7 in place and #110's
     // race core the 11.7 digest still results (circuit-1's pit exit is short of its squeeze), so the version string is the only change
+    // (3fc80036…68629 for 11.8). Re-pinned for #132 (race-length presets; rules unchanged): the envelope's settings gained
+    // `length: 'standard'`, and with that key removed the 11.8 digest still results, so the key is the only change
     const run = () => {
       const h = harness({}, 4242);
       const peers = [new FakePeer(), new FakePeer()];
@@ -474,12 +476,22 @@ describe('the room server streams v2 states', () => {
       h.advance(2_000_000, 50, () => { n++; ids.forEach((id, k) => room.handle(id, { t: 'ctl', seq: n, up: (n + 7 * k) % 40 < 31, down: false }, h.now)); }, () => room.state !== 'race');
       const env = room.result!;
       expect(env.rules).toEqual({ version: RULES_VERSION, protocol: PROTOCOL_VERSION });
-      const norm = ids.reduce((s, id, k) => s.split(id).join(`H${k}`), JSON.stringify({ ...env, digest: '', raceId: '', roomId: '', rules: { version: env.rules.version } }));
-      return { digest: createHash('sha256').update(norm).digest('hex'), outcome: env.outcome, ticks: env.times.ticks };
+      const norm = (e: object) => ids.reduce((s, id, k) => s.split(id).join(`H${k}`), JSON.stringify({ ...e, digest: '', raceId: '', roomId: '', rules: { version: env.rules.version } }));
+      // #132: the envelope's settings now always name the race length. Without that one key (a Standard race's `length:
+      // 'standard'`) the envelope is byte for byte the one before presets, so the race itself is unchanged
+      const { length, ...before } = env.settings;
+      expect(length).toBe('standard');
+      return {
+        digest: createHash('sha256').update(norm(env)).digest('hex'), outcome: env.outcome, ticks: env.times.ticks,
+        withoutLength: createHash('sha256').update(norm({ ...env, settings: before })).digest('hex'),
+      };
     };
     const a = run(), b = run();
     expect(b).toEqual(a);
-    expect(a).toEqual({ digest: '3fc80036feb8faedd8c8c6faca71d2fa7e622ad6ccf168dcab02bf4f95f68629', outcome: 'completed', ticks: 18031 });
+    expect(a).toEqual({
+      digest: 'e88a181af25a611e9dfc02dae9ed7cef42993a0c38b0932ba6bdad30d27df675', outcome: 'completed', ticks: 18031,
+      withoutLength: '3fc80036feb8faedd8c8c6faca71d2fa7e622ad6ccf168dcab02bf4f95f68629',
+    });
   });
 });
 

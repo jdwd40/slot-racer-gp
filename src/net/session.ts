@@ -4,6 +4,7 @@
 import { OnlineClient, type SocketCtor } from './client';
 import type { AwardsView, ChampionshipTag, ClientMsg, ErrorCode, LiveryId, Mode, PublicRoom, RoomSettings, ServerMsg } from './protocol';
 import type { ActionType, DriverId, Standing } from '../race';
+import { LENGTH_SET, isRaceLengthId, type RaceLengthId } from '../raceLength';
 
 export type Conn = 'offline' | 'connecting' | 'connected' | 'reconnecting';
 /**
@@ -18,7 +19,10 @@ export interface Seat { room: string; participant: string; token: string; code: 
 /** The parts of the server's result envelope (server/envelope.ts) the client shows. */
 export interface ResultView {
   raceId: string; roomId: string; mode: Mode; championship?: ChampionshipTag | null; outcome: 'completed' | 'aborted' | 'ended'; abortReason: string | null;
-  track: { id: string }; participants: { id: string; control: 'human' | 'ai'; slot: number; num: number; name: string; livery: string }[];
+  track: { id: string };
+  /** the room settings the race ran with; `length` (#132) is absent from a server older than presets (Standard) */
+  settings?: { length?: RaceLengthId };
+  participants: { id: string; control: 'human' | 'ai'; slot: number; num: number; name: string; livery: string }[];
   classification: Standing[] | null; digest: string;
 }
 
@@ -100,7 +104,7 @@ export class NetSession {
       return msg.includes('protocol') ? { ok: false, code: 'protocol' } : { ok: false, code: 'unreachable' };
     }
     let r: ServerMsg;
-    try { r = await this.client.request(req); } catch { this.client.drop(); this.setConn('offline'); return { ok: false, code: 'unreachable' }; }
+    try { r = await this.client.request(this.forServer(req)); } catch { this.client.drop(); this.setConn('offline'); return { ok: false, code: 'unreachable' }; }
     if (r.t !== 'joined') {
       const n = r as Extract<ServerMsg, { t: 'nack' }>;
       this.closing = true; this.client.close(); this.setConn('offline');
@@ -110,6 +114,24 @@ export class NetSession {
     this.adopt(r);
     return { ok: true };
   }
+
+  /**
+   * Fit a create or join to the server it is going to (#132). A server whose `welcome` lists race-length presets is told
+   * which preset list this page can show (`lengths`), and gets the preset asked for if it runs it. An older server would
+   * refuse both fields as malformed, so it gets neither: the room is Standard, which is all it races.
+   */
+  private forServer(req: ClientMsg): ClientMsg {
+    if (req.t !== 'create' && req.t !== 'join') return req;
+    const runs = this.client.welcome?.lengths;
+    const presets = Array.isArray(runs) && runs.length > 0;
+    if (req.t === 'join') return presets ? { ...req, lengths: LENGTH_SET } : req;
+    const { length, ...rest } = req.settings;
+    const keep = presets && length !== undefined && isRaceLengthId(length) && runs.includes(length);
+    return { ...req, settings: keep ? { ...rest, length } : rest, ...(presets ? { lengths: LENGTH_SET } : {}) };
+  }
+
+  /** Whether the server this session is connected to runs race-length presets (its `welcome` lists them). */
+  get lengths(): readonly RaceLengthId[] { return this.client.welcome?.lengths ?? []; }
 
   private adopt(r: Extract<ServerMsg, { t: 'joined' }>): void {
     this.room = r.room; this.me = r.you;
@@ -231,7 +253,12 @@ export class NetSession {
   // lobby commands go only over a resumed seat: a reconnect attempt's socket is not in the room yet
   private command(m: ClientMsg): void { if (this.conn === 'connected') this.client.send(m); }
   ready(on: boolean): void { this.command({ t: 'ready', ready: on }); }
-  settings(s: Partial<RoomSettings>): void { this.command({ t: 'settings', settings: s }); }
+  /** A host's settings change. A length goes only to a server that runs presets (an older one refuses the field, #132). */
+  settings(s: Partial<RoomSettings>): void {
+    const { length, ...rest } = s;
+    const send = length !== undefined && this.lengths.includes(length) ? s : rest;
+    if (Object.keys(send).length) this.command({ t: 'settings', settings: send });
+  }
   livery(l: LiveryId): void { this.command({ t: 'livery', livery: l }); }
   start(): void { this.command({ t: 'start' }); }
   rematch(): void { this.command({ t: 'rematch' }); }
@@ -256,5 +283,5 @@ export class NetSession {
 
 /** Plain-language reason for a refused request; the caller shows it with a way back. */
 export function refusalText(code: string): string {
-  return `net.err.${['not_found', 'full', 'started', 'expired', 'protocol', 'unavailable', 'overloaded', 'rate', 'unreachable', 'already_joined', 'malformed', 'forbidden'].includes(code) ? code : 'other'}`;
+  return `net.err.${['not_found', 'full', 'started', 'expired', 'protocol', 'unavailable', 'overloaded', 'rate', 'unreachable', 'already_joined', 'malformed', 'forbidden', 'bad_settings'].includes(code) ? code : 'other'}`;
 }

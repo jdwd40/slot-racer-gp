@@ -1,7 +1,8 @@
 // Lap counting, finishing and lap validity.
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import * as T from '../src/track';
-import { LAPS, RaceEvent } from '../src/race';
+import { RaceEvent } from '../src/race';
+import { LAPS } from './helpers';
 import { fresh, place, park, stepEvents, seedRandom, UP, DT, all, me } from './helpers';
 
 beforeEach(() => seedRandom(3));

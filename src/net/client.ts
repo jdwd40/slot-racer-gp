@@ -75,6 +75,8 @@ export class OnlineClient {
   /** The newest message of each type (bounded by the number of message types). */
   readonly latest: Partial<Record<ServerMsg['t'], ServerMsg>> = {};
   closed: { code: number; reason: string } | null = null;
+  /** the current connection's `welcome` (null until a hello is answered): what this server says it supports (#132 `lengths`) */
+  welcome: Extract<ServerMsg, { t: 'welcome' }> | null = null;
   private waiters: { pred: (m: ServerMsg) => boolean; res: (m: ServerMsg) => void; rej: (e: Error) => void; timer: ReturnType<typeof setTimeout> }[] = [];
   private hb: ReturnType<typeof setInterval> | null = null;
   private ka: ReturnType<typeof setInterval> | null = null;
@@ -110,6 +112,7 @@ export class OnlineClient {
   /** Open the socket and complete the versioned hello. Rejects on a protocol mismatch. */
   async connect(version = PROTOCOL_VERSION): Promise<void> {
     this.closed = null;
+    this.welcome = null;
     // never leave the previous socket open behind a new one (a failed reconnect attempt): each holds a server connection slot
     this.drop();
     const ws = new this.Ctor(this.url, undefined, this.opts as never);
@@ -131,6 +134,7 @@ export class OnlineClient {
     try { m = await this.wait((x) => x.t === 'welcome' || (x.t === 'nack' && x.ref === 'hello')); } catch (e) { this.drop(); throw e; }
     // a refused hello is closed by the server, with a code the caller reads from `closed`
     if (m.t !== 'welcome') throw new Error(`hello refused: ${(m as { code: string }).code}`);
+    this.welcome = m;
     if (this.ws === ws) { this.answered = false; this.startKeepalive(ws); }
   }
 

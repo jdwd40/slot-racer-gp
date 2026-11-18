@@ -3,7 +3,8 @@
 // interact with it. See docs/auto-stop-go.md.
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import * as T from '../src/track';
-import { AUTO, BRAKE as BRAKE_DECEL, COAST, DRAG, VMAX, Car, Input, LAPS, PEN, Race, SgPhase } from '../src/race';
+import { AUTO, BRAKE as BRAKE_DECEL, COAST, DRAG, VMAX, Car, Input, PEN, Race, SgPhase } from '../src/race';
+import { LAPS } from './helpers';
 import { DrivingInput } from '../src/input';
 import type { RaceEvent } from '../src/race';
 import { DT, NONE, UP, fresh, msgs, place, seedRandom, all, me } from './helpers';

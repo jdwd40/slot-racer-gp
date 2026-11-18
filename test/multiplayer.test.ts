@@ -6,12 +6,11 @@ import raceSrc from '../src/race.ts?raw';
 import pitSrc from '../src/pit.ts?raw';
 import pitConstSrc from '../src/pitConst.ts?raw';
 import trafficSrc from '../src/traffic.ts?raw';
+import raceLengthSrc from '../src/raceLength.ts?raw';
 import trackSrc from '../src/track.ts?raw';
 import * as T from '../src/track';
-import {
-  Race, Car, Input, Controls, RaceOpts, RosterEntry, DriverAction, LAPS, PEN, SERVICE_READY, CLOSE_DELAY, REV_CAP,
-  DRIVERS, SOLO_ID, RaceEvent, SgPhase, wireEvent, soloRoster,
-} from '../src/race';
+import { Race, Car, Input, Controls, RaceOpts, RosterEntry, DriverAction, PEN, SERVICE_READY, CLOSE_DELAY, REV_CAP, DRIVERS, SOLO_ID, RaceEvent, SgPhase, wireEvent, soloRoster } from '../src/race';
+import { LAPS } from './helpers';
 import * as R from '../src/records';
 import { carLabel } from '../src/hud';
 
@@ -468,10 +467,11 @@ describe('authoritative state', () => {
   it('the simulation core imports no browser, rendering, audio or storage code and runs headless', () => {
     expect(typeof (globalThis as { window?: unknown }).window).toBe('undefined');
     expect(typeof (globalThis as { document?: unknown }).document).toBe('undefined');
-    // src/traffic.ts (#74 review): the one out-of-traffic predicate the race core and the pit traffic share
-    for (const src of [raceSrc, pitSrc, pitConstSrc, trackSrc, trafficSrc]) {
+    // src/traffic.ts (#74 review): the one out-of-traffic predicate the race core and the pit traffic share; src/raceLength.ts
+    // (#132): the race-length preset table, plain data
+    for (const src of [raceSrc, pitSrc, pitConstSrc, trackSrc, trafficSrc, raceLengthSrc]) {
       const imports = [...src.matchAll(/from '([^']+)'/g)].map((m) => m[1]);
-      expect(imports.every((x) => x === './track' || x === './pit' || x === './pitConst' || x === './race' || x === './traffic')).toBe(true);
+      expect(imports.every((x) => x === './track' || x === './pit' || x === './pitConst' || x === './race' || x === './traffic' || x === './raceLength')).toBe(true);
       expect(src).not.toMatch(/\b(window|document|localStorage|requestAnimationFrame|AudioContext|performance)\b\./);
     }
     const r = new Race({ roster: [{ id: 'a', control: 'ai' }, { id: 'b', control: 'ai' }], seed: 5 });

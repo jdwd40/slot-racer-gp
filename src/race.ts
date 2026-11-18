@@ -2,8 +2,9 @@ import * as T from './track';
 import { PitTraffic, PitWait } from './pit';
 import { PIT_Q } from './pitConst';
 import { outOfTraffic } from './traffic';
+import { raceLength, type RaceLength, type RaceLengthId } from './raceLength';
 
-export const LAPS = 13;
+// No lap count lives here: each Race takes its target from an allowlisted preset (src/raceLength.ts, #132), as `race.targetLaps`.
 export const ACC = 30, VMAX = 26, COAST = 9, BRAKE = 30, DRAG = 0.006;
 export const AI_GRIP = 36;   // cornering speeds the AI aims for
 export const GRIP = 52;      // real grip of the slot (well above the AI's target, so cars stick)
@@ -33,7 +34,10 @@ export const PEN = {
  */
 /** stationary service in a bay before the car may leave: the same time a deferred fuel stop needs to count */
 export const SERVICE_READY = 0.5;
-/** simulated seconds the field is run on for after the race ends, so every car gets a real result rather than an estimate */
+/**
+ * simulated seconds the field is run on for after the race ends, so every car gets a real result rather than an estimate:
+ * Standard's (and Sprint's) run-on; each preset has its own (RaceLength.runOutS), so Endurance has twice this
+ */
 export const RUN_OUT_MAX = 240;
 /** shown for the last human finish (or terminal result) before the race closes and the rest of the field is run on */
 export const CLOSE_DELAY = 3.2;
@@ -457,6 +461,12 @@ export type ActResult = 'queued' | 'stale' | 'unknown';
 export interface RaceOpts {
   /** practice: one driver, unlimited laps, no fuel consumption */
   practice?: boolean;
+  /**
+   * race-length preset (#132): the lap target and the default bounded-end limits, fixed for this race. Default Standard (13
+   * laps). Only an allowlisted preset id is accepted (an unknown one throws); there is no way to ask for an arbitrary count.
+   * Practice never ends on a lap count, whatever the preset.
+   */
+  length?: RaceLengthId;
   /** livery colour of the slot-0 human in the default solo roster */
   playerColor?: number;
   /** entries (1–4 cars, any mix of human and AI). Default: the solo human in slot 0 and three AI (practice: the solo human only) */
@@ -467,9 +477,9 @@ export interface RaceOpts {
   rng?: Rng;
   /** seed for a private seeded random source (ignored when `rng` is given) */
   seed?: number;
-  /** seconds after the first car takes the flag before every car still running is terminally classified. Default: unlimited with one human, 90 s with more */
+  /** seconds after the first car takes the flag before every car still running is terminally classified. Default: unlimited with one human, the preset's finishWindowS (Standard 90 s) with more */
   finishWindow?: number;
-  /** race-time limit (seconds of racing) after which every car still running is terminally classified. Default: unlimited with one human, 1200 s with more */
+  /** race-time limit (seconds of racing) after which every car still running is terminally classified. Default: unlimited with one human, the preset's timeLimitS (Standard 1200 s) with more */
   timeLimit?: number;
   /**
    * How the AI field is finished once every human is terminal. 'sync' (default, the browser): run on synchronously at close,
@@ -546,6 +556,13 @@ export class Race {
   practice = false;
   /** this race's own circuit geometry: never the displayed-track globals */
   readonly T: T.Track;
+  /**
+   * this race's length preset (#132), fixed at construction (a frozen preset in a non-writable property): the flag, every
+   * deadline and the AI's fuel plan read `targetLaps` from it
+   */
+  readonly length: RaceLength;
+  /** laps to the flag: this race's own target, never a process-wide count */
+  get targetLaps(): number { return this.length.laps; }
   readonly rng: Rng;
   readonly finishWindow: number;
   readonly timeLimit: number;
@@ -559,11 +576,13 @@ export class Race {
   constructor(opts: RaceOpts = {}) {
     this.practice = !!opts.practice;
     this.T = opts.track instanceof T.Track ? opts.track : opts.track ? T.trackFor(opts.track) : T.ACTIVE;
+    this.length = raceLength(opts.length);
+    Object.defineProperty(this, 'length', { writable: false, configurable: false });
     this.rng = opts.rng ?? (opts.seed !== undefined ? seededRng(opts.seed) : () => Math.random());
     const roster = resolveRoster(opts.roster ?? soloRoster(this.practice));
     const humans = roster.filter((e) => e.control === 'human').length;
-    this.finishWindow = opts.finishWindow ?? (humans > 1 ? 90 : Infinity);
-    this.timeLimit = opts.timeLimit ?? (humans > 1 ? 1200 : Infinity);
+    this.finishWindow = opts.finishWindow ?? (humans > 1 ? this.length.finishWindowS : Infinity);
+    this.timeLimit = opts.timeLimit ?? (humans > 1 ? this.length.timeLimitS : Infinity);
     this.runOn = opts.runOn ?? 'sync';
     for (const P of Object.values(PERSONAS)) for (const side of [-1, 1]) {
       this.profiles[`${P.id}:${side}`] = this.T.buildProfile(side, AI_GRIP * P.grip, VMAX, P.brake);
@@ -747,7 +766,7 @@ export class Race {
     if (c.mode !== 'race') return 'pit';
     if (c.routeHold === k) return 'held';
     if (fuelNow || (sgNow && (c.sgDeferred || c.sgDue < k))) return 'used';
-    if (k + 1 > LAPS) return 'final';
+    if (k + 1 > this.targetLaps) return 'final';
     return null;
   }
 
@@ -760,7 +779,7 @@ export class Race {
   /** Where an obligation due by the end of lap `due` stands against the lap being raced. */
   dueState(c: Car, due: number): DueState {
     if (due <= 0) return 'none';
-    if (due > LAPS) return 'late';
+    if (due > this.targetLaps) return 'late';
     const lap = Math.max(1, c.crossed);
     return due > lap ? 'next' : due === lap ? 'due' : 'overdue';
   }
@@ -776,7 +795,7 @@ export class Race {
     if (this.practice || c.finished || c.status !== 'running' || c.svcBreach) return false;
     const lap = Math.max(1, c.crossed);
     if (c.fuelDue > 0 && c.fuelDue === lap && !this.fuelVisit(c)) return true;
-    return c.sgOwed > 0 && c.sgDue === lap && (c.sgDeferred || lap >= LAPS) && !this.sgVisit(c);
+    return c.sgOwed > 0 && c.sgDue === lap && (c.sgDeferred || lap >= this.targetLaps) && !this.sgVisit(c);
   }
 
   /**
@@ -857,9 +876,10 @@ export class Race {
 
   /**
    * Once every human is done, run the rest of the field on to the flag (no rendering, every pedal neutral) so every car gets a
-   * real result. Anything still running after RUN_OUT_MAX is terminally classified. Only result events are kept from the run.
+   * real result. Anything still running after the preset's runOutS (RUN_OUT_MAX for Standard and Sprint) is terminally
+   * classified. Only result events are kept from the run.
    */
-  runOut(maxSec = RUN_OUT_MAX): void {
+  runOut(maxSec = this.length.runOutS): void {
     const keep = this.events.length;
     for (let t = 0; t < maxSec && this.cars.some((c) => c.status === 'running'); t += 1 / 120) this.step(1 / 120, {});
     this.classifyRunning('runout');
@@ -1157,7 +1177,7 @@ export class Race {
         // Judged once per approach, so backing up and passing again changes nothing
         if (!entered && c.human && c.fuelReq && !c.finished && !this.practice && fresh(this.T.PIT_IN0)) {
           const k = Math.round((u0 + this.T.gapS(s0, this.T.PIT_IN0) - this.T.PIT_IN0) / this.T.L);
-          if (c.overAppr === k && k + 1 <= LAPS) { c.fuelReq = false; c.fuelDue = k + 1; this.syncRoute(c); this.pmsg(c, 'msg.fuelOverride', 'bad'); }
+          if (c.overAppr === k && k + 1 <= this.targetLaps) { c.fuelReq = false; c.fuelDue = k + 1; this.syncRoute(c); this.pmsg(c, 'msg.fuelOverride', 'bad'); }
         }
       }
       // squeeze priority queue
@@ -1432,11 +1452,11 @@ export class Race {
         this.emit({ type: 'lap', car: c, time: lt, best, valid, lapsDone: c.lapsDone });
         // service earlier in this step (box, bay) is already applied; deadlines are judged before the finish is classified
         const prior = c.svcBreach;
-        const flag = c.lapsDone >= LAPS && !this.practice;
+        const flag = c.lapsDone >= this.targetLaps && !this.practice;
         const sgWasDeferred = c.sgDeferred;
         // "Final lap!" first: the HUD shows only the newest toast, so any deadline warning or breach posted at this same
         // crossing must come after it, or the cheerful message would hide the DQ one (#65)
-        if (!flag && c.human && c.lapsDone === LAPS - 1 && !this.practice) this.pmsg(c, 'msg.finalLap', 'good');
+        if (!flag && c.human && c.lapsDone === this.targetLaps - 1 && !this.practice) this.pmsg(c, 'msg.finalLap', 'good');
         this.serviceDeadline(c, flag);
         if (flag) this.finishCar(c, tCross, prior);
         // a compulsory stop now on its last lap gets a one-off warning a whole lap before the entrance that decides it
@@ -1536,7 +1556,7 @@ export class Race {
 
   /** fuel the AI needs to reach the flag from here, planned at a realistic burn rate */
   fuelToFinish(c: Car, s: number): number {
-    const lapsLeft = LAPS - c.lapsDone;
+    const lapsLeft = this.targetLaps - c.lapsDone;
     return (lapsLeft * this.T.L - this.T.ahead(this.T.FINISH_S, s)) * this.fuelRate() * PLAN_BURN;
   }
 
@@ -2100,9 +2120,9 @@ export class Race {
     if (this.practice) return;
     const ended = c.crossed - 1;
     if (c.sgOwed > 0 && c.sgDue > 0 && c.sgDue <= ended) {
-      if (!c.sgDeferred && c.crossed <= LAPS) {
+      if (!c.sgDeferred && c.crossed <= this.targetLaps) {
         c.sgDeferred = true; c.sgDue = c.crossed;
-        this.pmsg(c, c.crossed === LAPS ? 'msg.sgLastLapFinal' : 'msg.sgLastLap', 'bad');
+        this.pmsg(c, c.crossed === this.targetLaps ? 'msg.sgLastLapFinal' : 'msg.sgLastLap', 'bad');
       } else this.breach(c, 'stopGo', flag);
     }
     if (c.fuelDue > 0 && c.fuelDue <= ended) this.breach(c, 'fuel', flag);
@@ -2148,7 +2168,7 @@ export class Race {
         if (first) c.routeHold = -1;
         this.syncRoute(c);
         // awarded after the last entrance it could be served at: still owed, and the consequence is shown now
-        if (first && c.sgDue > LAPS && !c.finished && !this.practice) this.pmsg(c, 'msg.sgLate', 'bad');
+        if (first && c.sgDue > this.targetLaps && !c.finished && !this.practice) this.pmsg(c, 'msg.sgLate', 'bad');
       }
     }
     this.emit({ type: 'offence', car: c, other, n: c.offences, cause, stop });
@@ -2235,7 +2255,7 @@ export class Race {
     const idOf = (slot: number): DriverId | null => (slot < 0 ? null : this.cars.find((c) => c.idx === slot)?.id ?? null);
     const fin = (x: number): number | null => (Number.isFinite(x) ? x : null);
     return {
-      v: 1, track: this.T.DEF.id, laps: LAPS, practice: this.practice,
+      v: 1, track: this.T.DEF.id, laps: this.targetLaps, practice: this.practice,
       phase: this.phase, t: this.t, raceTime: this.raceTime, goT: this.goT, lights: this.lights, firstFlagT: this.firstFlagT,
       finishWindow: fin(this.finishWindow), timeLimit: fin(this.timeLimit),
       cars: this.cars.map((c) => ({
@@ -2283,7 +2303,7 @@ export class Race {
       if (c.status === 'finished') return { car: c, time: c.finishTime + c.timePen, est: false, status: c.status };
       if (c.status !== 'running') return { car: c, time: NaN, est: false, status: c.status };
       const prog = Math.max(1, c.u - this.T.FINISH_S);
-      const remain = LAPS * this.T.L - prog;
+      const remain = this.targetLaps * this.T.L - prog;
       const avg = prog / Math.max(1, this.raceTime);
       return { car: c, time: this.raceTime + remain / Math.max(4, avg) + c.timePen, est: true, status: c.status };
     });

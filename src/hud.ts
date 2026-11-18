@@ -1,9 +1,10 @@
 import * as T from './track';
-import { Race, LAPS, LOW_FUEL, Car, SERVICE_READY, DriverId, SOLO_ID, STALL, stallCountPaused } from './race';
+import { Race, LOW_FUEL, Car, SERVICE_READY, DriverId, SOLO_ID, STALL, stallCountPaused } from './race';
 import { t } from './i18n';
 import { fmtMs } from './records';
 import { laneCue, pitCue } from './input';
 import { FuelLapsEstimator, SteadyFigure, fuelLapsVisible, fuelWarning, lapsToFlag } from './fuelLaps';
+import { raceLength } from './raceLength';
 
 /** `me` is the local driver: the HUD shows that car's state, whatever its grid slot. */
 export interface HudExtra { mode: 'race' | 'practice' | 'champ'; pbMs: number; round: string; me: DriverId; }
@@ -65,7 +66,7 @@ export class Hud {
       <div class="topbar">
         <div class="panel tl">
           <div class="big"><span class="lbl" data-t="hud.pos"></span><span id="h-pos">1/4</span></div>
-          <div class="big"><span class="lbl" data-t="hud.lap"></span><span id="h-lap">1/${LAPS}</span></div>
+          <div class="big"><span class="lbl" data-t="hud.lap"></span><span id="h-lap">1/${raceLength().laps}</span></div>
           <div id="h-round" class="round"></div>
           <div id="h-stand" class="stand"></div>
         </div>
@@ -211,7 +212,7 @@ export class Hud {
     this.el['b-ghost'].style.display = practice ? '' : 'none';
     this.set('h-round', x.round ? `${t('hud.round')} ${x.round}` : '');
     this.set('h-pos', practice ? '–' : `${pos}/${race.cars.length}`);
-    this.set('h-lap', practice ? `${Math.max(1, p.lapsDone + 1)}` : `${Math.min(LAPS, Math.max(1, p.lapsDone + 1))}/${LAPS}`);
+    this.set('h-lap', practice ? `${Math.max(1, p.lapsDone + 1)}` : `${Math.min(race.targetLaps, Math.max(1, p.lapsDone + 1))}/${race.targetLaps}`);
     if (practice) {
       // live lap time, previous lap and the stored personal best (millisecond precision)
       const live = p.crossed >= 1 && race.phase === 'racing' ? (race.raceTime - p.lapStartT) * 1000 : 0;
@@ -365,7 +366,7 @@ export class Hud {
     const L = race.T.L;
     const r = this.fuelEst.update({ fuel: p.fuel, u: p.u, L, now: race.raceTime });
     const n = this.fuelFig.show(r.laps, race.raceTime);
-    const warn = fuelWarning(Number(n), lapsToFlag(LAPS, p.lapsDone, race.T.ahead(race.T.FINISH_S, race.s(p)), L, p.crossed));
+    const warn = fuelWarning(Number(n), lapsToFlag(race.targetLaps, p.lapsDone, race.T.ahead(race.T.FINISH_S, race.s(p)), L, p.crossed));
     const long = t('hud.fuelLaps', { n });
     if (this.cache['h-fuellaps'] !== long + warn) {
       this.cache['h-fuellaps'] = long + warn;

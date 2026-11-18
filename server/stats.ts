@@ -4,6 +4,7 @@ import type { Pool } from 'pg';
 import type { CareerStats, Mode } from '../src/net/protocol';
 import type { Scoring } from './career';
 import { trackVersion } from './envelope';
+import { lengthOr } from '../src/raceLength';
 
 const RECENT = 10;
 
@@ -18,9 +19,13 @@ export async function careerStats(pool: Pool, accountId: string, displayName: st
     pool.query<{ track_id: string; track_version: string; mode: Mode; rules_version: string; lap_ms: number; lap: number; livery: string; race_id: string; set_at: Date }>(
       `SELECT track_id, track_version, mode, rules_version, lap_ms, lap, livery, race_id::text, set_at
        FROM personal_bests WHERE account_id = $1 ORDER BY track_id, mode, set_at DESC`, [accountId]),
-    pool.query<{ race_id: string; mode: Mode; championship_id: string | null; championship_round: number | null; track_id: string; position: number | null; status: 'finished' | 'dq' | 'dnf'; points: number; field_size: number; humans: number; scoring_version: string; rules_version: string; finished_at: Date }>(
-      `SELECT race_id::text, mode, championship_id, championship_round, track_id, position, status, points, field_size, humans, scoring_version, rules_version, finished_at
-       FROM career_awards WHERE account_id = $1 ORDER BY finished_at DESC, race_id LIMIT ${RECENT}`, [accountId]),
+    // the race length (#132) is read from the stored result's own envelope (every award row references one): no column or
+    // migration is needed, and a result stored before presets (no `length` setting) reads as Standard, which it was
+    pool.query<{ race_id: string; mode: Mode; championship_id: string | null; championship_round: number | null; track_id: string; length: string | null; position: number | null; status: 'finished' | 'dq' | 'dnf'; points: number; field_size: number; humans: number; scoring_version: string; rules_version: string; finished_at: Date }>(
+      `SELECT a.race_id::text, a.mode, a.championship_id, a.championship_round, a.track_id, r.envelope->'settings'->>'length' AS length,
+              a.position, a.status, a.points, a.field_size, a.humans, a.scoring_version, a.rules_version, a.finished_at
+       FROM career_awards a JOIN race_results r ON r.race_id = a.race_id
+       WHERE a.account_id = $1 ORDER BY a.finished_at DESC, a.race_id LIMIT ${RECENT}`, [accountId]),
   ]);
   const t = tot.rows[0];
   const cur = (id: string): string | null => { try { return trackVersion(id); } catch { return null; } };
@@ -34,7 +39,7 @@ export async function careerStats(pool: Pool, accountId: string, displayName: st
     })),
     recent: recent.rows.map((r) => ({
       raceId: r.race_id, mode: r.mode, championship: r.championship_id ? { id: r.championship_id, round: r.championship_round ?? 0 } : null,
-      track: r.track_id, pos: r.position, status: r.status, points: r.points, field: r.field_size, humans: r.humans,
+      track: r.track_id, length: lengthOr(r.length), pos: r.position, status: r.status, points: r.points, field: r.field_size, humans: r.humans,
       scoring: r.scoring_version, rules: r.rules_version, finishedAt: r.finished_at.toISOString(),
     })),
   };

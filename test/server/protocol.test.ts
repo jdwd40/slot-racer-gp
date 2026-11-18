@@ -81,11 +81,15 @@ describe('online gate (browser)', () => {
     const f = vi.fn(() => res(200, { ok: true, protocol: PROTOCOL_VERSION, version: 'abc' }));
     expect(await probeOnline(false, f as unknown as typeof fetch, 'https://slotrush.jdwd40.com')).toEqual({ state: 'off' });
     expect(f).not.toHaveBeenCalled();
-    expect(await probeOnline(true, f as unknown as typeof fetch, 'https://slotrush.jdwd40.com')).toEqual({ state: 'available', version: 'abc', wsUrl: 'wss://slotrush.jdwd40.com/ws', accounts: false });
+    expect(await probeOnline(true, f as unknown as typeof fetch, 'https://slotrush.jdwd40.com')).toEqual({ state: 'available', version: 'abc', wsUrl: 'wss://slotrush.jdwd40.com/ws', accounts: false, lengths: [] });
     // sign-in is offered only when the server reports accounts and profiles (a database is attached)
     expect(await probeOnline(true, (() => res(200, { ok: true, protocol: PROTOCOL_VERSION, version: 'abc', accounts: true, profiles: true })) as unknown as typeof fetch, 'https://x')).toMatchObject({ state: 'available', accounts: true });
     expect(await probeOnline(true, (() => res(200, { ok: true, protocol: PROTOCOL_VERSION, version: 'abc', accounts: true })) as unknown as typeof fetch, 'https://x')).toMatchObject({ state: 'available', accounts: false });
     expect(f).toHaveBeenCalledWith('https://slotrush.jdwd40.com/api/health', expect.anything());
+    // race-length presets (#132) are offered online only when health lists them; only ids this page knows are kept, and a
+    // server older than presets (no list, or not an array) offers none, so the page never sends it a length
+    expect(await probeOnline(true, (() => res(200, { ok: true, protocol: PROTOCOL_VERSION, version: 'abc', lengths: ['endurance', 'marathon', 'sprint', 'standard'] })) as unknown as typeof fetch, 'https://x')).toMatchObject({ state: 'available', lengths: ['sprint', 'standard', 'endurance'] });
+    expect(await probeOnline(true, (() => res(200, { ok: true, protocol: PROTOCOL_VERSION, version: 'abc', lengths: 'all' })) as unknown as typeof fetch, 'https://x')).toMatchObject({ state: 'available', lengths: [] });
     // a newer server means this page is outdated (it says so and offers a reload, #67); an older one is just unavailable
     expect(await probeOnline(true, (() => res(200, { ok: true, protocol: PROTOCOL_VERSION + 1 })) as unknown as typeof fetch, 'https://x')).toEqual({ state: 'outdated', server: PROTOCOL_VERSION + 1 });
     expect(await probeOnline(true, (() => res(200, { ok: true, protocol: PROTOCOL_VERSION - 1 })) as unknown as typeof fetch, 'https://x')).toEqual({ state: 'behind', server: PROTOCOL_VERSION - 1 });

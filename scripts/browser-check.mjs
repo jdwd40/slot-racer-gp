@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Bounded browser validation of the real game. Procedure and results: docs/validation.md.
 //
-//   node scripts/browser-check.mjs [tracks race controlled routing practice championship touch responsive touchrace reverse service lastchance stall queue autosg autobay localslot online memory netbanner]   functional checks (default: all)
+//   node scripts/browser-check.mjs [tracks race controlled routing practice championship touch responsive touchrace reverse service lastchance stall queue autosg autobay localslot online memory netbanner racelength]   functional checks (default: all)
 //   node scripts/browser-check.mjs perf --label updated --machine "<name>"          frame-time capture
 //   node scripts/browser-check.mjs compare <baseline.json> <updated.json>           like-for-like comparison
 //
@@ -19,6 +19,7 @@ import { accelerationOf, assessGoal, comparisonGaps, summarise, CLOCK_TOLERANCE_
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const SEED = 20261107;
+/** Standard's lap count (#132): the default race length every scenario races unless it picks another */
 const LAPS = 13;
 const TRACK = 'circuit-1';   // Clubman Park
 const CAR = 'sunburst';
@@ -2906,8 +2907,191 @@ async function netbanner(run, c) {
   return s;
 }
 
-const SCENARIOS = { tracks, race, controlled, routing, practice, championship, touch, responsive, touchrace, reverse, service, lastchance, stall, queue, autosg, autobay, localslot, online, memory, netbanner };
-const USAGE = 'usage: browser-check.mjs [tracks|race|controlled|routing|practice|championship|touch|responsive|touchrace|reverse|service|lastchance|stall|queue|autosg|autobay|localslot|online|memory|netbanner ...] | perf | compare <a.json> <b.json>\n'
+/**
+ * Race-length presets (#132) on the real page, mouse and keyboard on a desktop and emulated touch on a phone: the title's
+ * selector (labels, keyboard, remembered choice), a local race to the flag at its own lap count, practice without a target,
+ * a championship that keeps its length through resume while the selector changes (and an older save that is Standard), the
+ * HUD and menus at the new widths with nothing overlapping, and the room lobby for the host (selector) and a guest (label).
+ */
+async function racelength(run, c) {
+  const titleState = (page) => read(page, () => ({
+    opts: [...document.querySelectorAll('[data-rlen]')].map((b) => ({ id: b.dataset.rlen, on: b.getAttribute('aria-checked') === 'true', text: b.textContent.replace(/\s+/g, ' ').trim(), label: b.getAttribute('aria-label') })),
+    group: document.querySelector('[data-rlen]')?.closest('[role="radiogroup"]')?.getAttribute('aria-labelledby') ?? null,
+    goal: document.getElementById('o-goal')?.textContent ?? '', raceLen: window.__game.raceLen, laps: window.__game.race.targetLaps, stored: localStorage.getItem('srgp.raceLength'),
+  }));
+  const selected = (t) => t.opts.filter((o) => o.on).map((o) => o.id).join();
+  const lapsText = (n) => STRINGS['len.laps'].replace('{n}', n);
+  const tag = (id, n) => STRINGS['len.tag'].replace('{name}', STRINGS[`len.${id}`]).replace('{n}', n);
+  /** Put the local car just short of the line that ends lap `lap` and let real frames carry it over with Throttle held. */
+  const toFlag = async (page, keys, lap) => {
+    await read(page, (n) => {
+      const gm = window.__game, T = gm.T, r = gm.race, p = r.car(gm.localId);
+      gm.advance(7);
+      r.cars.forEach((x, i) => { if (x !== p) x.u += 40 + i * 8; });
+      p.u = T.FINISH_S + n * T.L - 3; p.hiU = p.u; p.crossed = n; p.lapsDone = n - 1; p.sectors = 7; p.v = 16; p.mode = 'race';
+    }, lap);
+    await keys.set('KeyW', true);
+    await read(page, () => window.__game.advance(5));
+    await keys.release();
+  };
+  /** The three selector buttons: inside the card and the viewport, apart from each other, and (touch) at least 44 px. */
+  const selectorBox = (page, attr) => read(page, (a) => {
+    const bs = [...document.querySelectorAll(`[data-${a}]`)].map((b) => { b.scrollIntoView({ block: 'center' }); const r = b.getBoundingClientRect(); return { id: b.dataset[a], x: r.x, y: r.y, r: r.right, b: r.bottom, w: r.width, h: r.height, top: document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2)?.closest('button') === b, clipped: b.scrollWidth > b.clientWidth + 1 }; });
+    const hit = (p, q) => p.x < q.r - 0.5 && q.x < p.r - 0.5 && p.y < q.b - 0.5 && q.y < p.b - 0.5;
+    const card = document.querySelector('.overlay.show .card').getBoundingClientRect();
+    return { bs, overlap: bs.some((p, i) => bs.some((q, j) => i < j && hit(p, q))), inside: bs.every((b) => b.x >= card.x - 0.5 && b.r <= card.right + 0.5 && b.x >= 0 && b.r <= innerWidth + 0.5), oneRow: new Set(bs.map((b) => Math.round(b.y))).size === 1 };
+  }, attr);
+
+  // ---- desktop: mouse and keyboard
+  const d = await open(run, { viewport: { width: 1280, height: 800 } });
+  {
+    const { page, keys } = d;
+    const t0 = await titleState(page);
+    c.ok('Desktop title: a labelled Race length group offers Sprint 5, Standard 13 (chosen by default) and Endurance 26 laps', t0.group === 'o-rlen' && t0.opts.map((o) => o.text).join('|') === [`Sprint ${lapsText(5)}`, `Standard ${lapsText(13)}`, `Endurance ${lapsText(26)}`].join('|') && t0.opts.every((o, i) => o.label === tag(o.id, [5, 13, 26][i])) && selected(t0) === 'standard' && t0.goal.startsWith('13 laps') && t0.laps === 13 && t0.stored === null, t0);
+    await page.click('[data-rlen="sprint"]');
+    const t1 = await titleState(page);
+    c.ok('Desktop: picking Sprint updates the goal line and the grid behind the menu, and is remembered', selected(t1) === 'sprint' && t1.goal.startsWith('5 laps') && t1.laps === 5 && t1.stored === '"sprint"', t1);
+    await page.focus('[data-rlen="sprint"]');
+    await keys.tap('ArrowRight'); await keys.tap('ArrowRight');
+    const t2 = await titleState(page);
+    const focus = await read(page, () => document.activeElement?.dataset.rlen ?? null);
+    c.ok('Desktop: the arrow keys move the choice like any radio group (Sprint -> Standard -> Endurance), focus following', selected(t2) === 'endurance' && focus === 'endurance' && t2.laps === 26, { ...t2, focus });
+    await keys.tap('ArrowRight');   // wraps round to Sprint
+    await d.load();
+    const t3 = await titleState(page);
+    c.ok('Desktop: after a reload the remembered choice (Sprint) is selected again', selected(t3) === 'sprint' && t3.raceLen === 'sprint' && t3.laps === 5, t3);
+    const box = await selectorBox(page, 'rlen');
+    const menu = await read(page, measureMenu);
+    c.ok('Desktop: the selector sits on one row inside the card, its buttons apart and unclipped; the title has no sideways overflow', box.oneRow && !box.overlap && box.inside && box.bs.every((b) => b.top && !b.clipped) && menu.pageX <= 0 && menu.cardX <= 0, { box, pageX: menu.pageX, cardX: menu.cardX });
+    await page.screenshot({ path: path.join(run.out, 'racelength-title-1280x800.png') });
+
+    // a Sprint race to its flag
+    await page.click('#o-start');
+    await waitFor(page, () => window.__game.screen === 'race');
+    await frames(page, 2);
+    const hud = await read(page, () => ({ lap: document.getElementById('h-lap').textContent, laps: window.__game.race.targetLaps }));
+    c.ok('Desktop Sprint race: the HUD counts to 5 (lap 1/5)', hud.lap === '1/5' && hud.laps === 5, hud);
+    await toFlag(page, keys, 5);
+    await waitFor(page, () => window.__game.screen === 'results');
+    const res = await read(page, () => ({ head: document.querySelector('.res-len')?.textContent ?? '', me: (() => { const p = window.__game.race.car(window.__game.localId); return [p.status, p.lapsDone]; })(), final: window.__game.race.final.map((x) => [x.status, x.laps]) }));
+    c.ok('Desktop Sprint race: the flag falls at lap 5, every car is classified at 5 laps, and the results name the length', res.me.join() === 'finished,5' && res.final.every(([st, l]) => st === 'finished' && l === 5) && res.head.includes(tag('sprint', 5)), res);
+    await page.screenshot({ path: path.join(run.out, 'racelength-results-sprint.png') });
+    await page.click('#o-menu');
+    await waitFor(page, () => window.__game.screen === 'title');
+
+    // practice has no lap target, whatever is chosen
+    await page.click('[data-rlen="endurance"]');
+    await page.click('#o-practice');
+    await waitFor(page, () => window.__game.screen === 'race');
+    await read(page, () => { const gm = window.__game, T = gm.T, p = gm.race.car(gm.localId); gm.advance(3); p.u = T.FINISH_S + 30 * T.L - 2; p.hiU = p.u; p.crossed = 30; p.lapsDone = 29; p.v = 14; p.mode = 'race'; });
+    await keys.set('KeyW', true);
+    await read(page, () => window.__game.advance(2));
+    await keys.release();
+    await frames(page, 2);
+    const prac = await read(page, () => ({ lap: document.getElementById('h-lap').textContent, screen: window.__game.screen, finished: window.__game.race.car(window.__game.localId).finished, practice: window.__game.race.practice }));
+    c.ok('Desktop practice with Endurance chosen: no lap target (lap 31, no "/26") and no flag', prac.practice && prac.lap === '31' && !prac.finished && prac.screen === 'race', prac);
+    await keys.tap('Escape');
+    await page.click('#o-menu');
+    await waitFor(page, () => window.__game.screen === 'title');
+
+    // a championship keeps the length it started with
+    await page.click('#o-champ');
+    await waitFor(page, () => window.__game.screen === 'race');
+    await frames(page, 2);
+    const ch1 = await read(page, () => ({ laps: window.__game.race.targetLaps, lap: document.getElementById('h-lap').textContent, save: JSON.parse(localStorage.getItem('srgp.champ')) }));
+    c.ok('Desktop: a new championship takes the chosen length (Endurance) and stores it', ch1.laps === 26 && ch1.lap === '1/26' && ch1.save.length === 'endurance' && ch1.save.rounds.length === 0, ch1);
+    await keys.tap('Escape');
+    await page.click('#o-menu');
+    await waitFor(page, () => window.__game.screen === 'title');
+    await page.click('[data-rlen="sprint"]');
+    const cont = await page.locator('#o-champ-cont').textContent();
+    await page.click('#o-champ-cont');
+    await waitFor(page, () => window.__game.screen === 'race');
+    const ch2 = await read(page, () => window.__game.race.targetLaps);
+    c.ok('Desktop: with Sprint now chosen, Continue still races the championship\'s Endurance (and says so on the button)', ch2 === 26 && cont.includes(tag('endurance', 26)), { laps: ch2, cont });
+    await toFlag(page, keys, 26);
+    await waitFor(page, () => window.__game.screen === 'champ');
+    const ch3 = await read(page, () => ({ head: document.querySelector('.champ .res-len')?.textContent ?? '', save: JSON.parse(localStorage.getItem('srgp.champ')) }));
+    c.ok('Desktop: the round is stored against the Endurance championship and the standings name its length', ch3.save.rounds.length === 1 && ch3.save.length === 'endurance' && ch3.head === tag('endurance', 26), { head: ch3.head, rounds: ch3.save.rounds.length, length: ch3.save.length });
+    await d.load();
+    await page.click('#o-champ-cont');
+    await waitFor(page, () => window.__game.screen === 'race');
+    c.ok('Desktop: after a reload the championship resumes at Endurance (round 2)', (await read(page, () => [window.__game.race.targetLaps, window.__game.champ.rounds.length, window.__game.T.DEF.id])).join() === `26,1,${'circuit-2'}`);
+    // an older save (no length) is a Standard championship
+    await read(page, () => localStorage.setItem('srgp.champ', JSON.stringify({ v: 1, car: 'sunburst', initials: 'QA', rounds: [], startedAt: 1 })));
+    await d.load();
+    const legacyBtn = await page.locator('#o-champ-cont').textContent();
+    await page.click('#o-champ-cont');
+    await waitFor(page, () => window.__game.screen === 'race');
+    c.ok('Desktop: a championship saved before presets continues as Standard (13 laps), labelled so', (await read(page, () => window.__game.race.targetLaps)) === 13 && legacyBtn.includes(tag('standard', 13)), legacyBtn);
+    await d.context.close();
+  }
+  c.ok('Desktop part: no page or console errors', d.errors.length === 0, d.errors.slice(0, 5));
+
+  // ---- phone: emulated touch
+  const s = await open(run, { viewport: { width: 360, height: 640 }, dpr: 2, device: PHONE, fixtures: { 'srgp.track': TRACK } });
+  const { page } = s;
+  const f = new Fingers(page, await s.context.newCDPSession(page));
+  for (const [label, w, h] of LAYOUTS) {
+    await page.setViewportSize({ width: w, height: h });
+    await frames(page, 2);
+    const box = await selectorBox(page, 'rlen');
+    const m = await read(page, measureMenu);
+    c.ok(`Touch title at ${w}x${h} (${label}): the three choices on one row, 44 px or more, apart, unclipped, and the menu fits`, box.oneRow && !box.overlap && box.inside && box.bs.every((b) => b.top && !b.clipped && b.w >= 44 && b.h >= 44) && menuOk(m), { box: box.bs.map((b) => `${b.id} ${Math.round(b.w)}x${Math.round(b.h)}`), m });
+  }
+  await page.setViewportSize({ width: 360, height: 640 });
+  await frames(page, 2);
+  await page.screenshot({ path: path.join(run.out, 'racelength-title-360x640.png') });
+  await f.tap('[data-rlen="endurance"]');
+  const tt = await titleState(page);
+  c.ok('Touch: a tap picks Endurance', selected(tt) === 'endurance' && tt.laps === 26 && tt.stored === '"endurance"', tt);
+  await f.tap('#o-start');
+  await waitFor(page, () => window.__game.screen === 'race');
+  for (const [label, w, h] of LAYOUTS) {
+    await page.setViewportSize({ width: w, height: h });
+    // the widest counter an Endurance race shows
+    await read(page, () => { const p = window.__game.race.car(window.__game.localId); p.lapsDone = 25; p.crossed = 26; });
+    await crowdHud(page);
+    await frames(page, 3);
+    const m = await read(page, measureHud, CONTROLS);
+    const lap = await read(page, () => { const e = document.getElementById('h-lap'); return { text: e.textContent, clipped: e.scrollWidth > e.clientWidth + 1 }; });
+    c.ok(`Touch Endurance HUD at ${w}x${h} (${label}): "26/26" shown unclipped, nothing overlapping`, lap.text === '26/26' && !lap.clipped && m.pairs.length === 0 && m.pageX <= 0, { lap, overlaps: m.pairs });
+    if (w === 360) await page.screenshot({ path: path.join(run.out, 'racelength-hud-360x640.png') });
+  }
+  // the room lobby: the host's selector and a guest's label, on the phone
+  const part = (id, num, name, extra = {}) => ({ id, name, slot: num - 1, num, bay: num - 1, livery: ['yellow', 'orange'][num - 1], color: [0xffd23f, 0xfb923c][num - 1], liveryRequested: null, ready: false, connected: true, host: num === 1, guest: true, joinOrder: num, left: false, ...extra });
+  const room = { id: 'qa-room', code: 'S8AJ37', mode: 'multiplayer', state: 'lobby', rev: 1, hostId: 'p1', settings: { track: TRACK, aiFill: true, length: 'endurance' }, championship: null, participants: [part('p1', 1, 'Host'), part('p2', 2, 'Guest')], ai: [], raceId: null, maxHumans: 4, minHumans: 2, graceS: 20 };
+  for (const [label, w, h] of LAYOUTS.slice(0, 4)) {
+    await page.setViewportSize({ width: w, height: h });
+    await read(page, (r) => window.__game.qaNetLobby(r, 'p1', 'connected', ['sprint', 'standard', 'endurance']), room);
+    await waitFor(page, () => window.__game.screen === 'lobby');
+    await frames(page, 2);
+    const box = await selectorBox(page, 'nlen');
+    const on = await read(page, () => [...document.querySelectorAll('[data-nlen]')].filter((b) => b.getAttribute('aria-checked') === 'true').map((b) => b.dataset.nlen).join());
+    const m = await read(page, measureMenu);
+    // the lobby's own standard is 40 px for every control (its track tabs are 40 px: docs/online-client.md), not the 44 of the
+    // title; the AI-fill checkbox is measured by its whole label row there, so its 22 px box is left out (as online-check does)
+    const lobbyOk = m.pageX <= 0 && m.cardX <= 0 && m.inside && m.blocked.length === 0 && m.small.filter((x) => !x.startsWith('l-ai ')).every((x) => Number(/(\d+)x(\d+)$/.exec(x)?.[2]) >= 40 && Number(/(\d+)x(\d+)$/.exec(x)?.[1]) >= 40);
+    c.ok(`Touch lobby at ${w}x${h} (${label}), host: the length selector shows Endurance, 40 px+ like the lobby's track tabs, apart, and the lobby fits`, on === 'endurance' && !box.overlap && box.inside && box.bs.every((b) => b.top && !b.clipped && b.w >= 44 && b.h >= 40) && lobbyOk, { on, box: box.bs.map((b) => `${b.id} ${Math.round(b.w)}x${Math.round(b.h)}`), m });
+    if (w === 360) await page.screenshot({ path: path.join(run.out, 'racelength-lobby-host-360x640.png') });
+    await read(page, (r) => window.__game.qaNetLobby(r, 'p2', 'connected', ['sprint', 'standard', 'endurance']), room);
+    await frames(page, 2);
+    const guest = await read(page, () => ({ text: document.getElementById('l-len')?.textContent ?? null, radios: document.querySelectorAll('[data-nlen]').length }));
+    const gm = await read(page, measureMenu);
+    c.ok(`Touch lobby at ${w}x${h}, guest: the length is shown as "Endurance · 26 laps" before Ready, with no selector, and the lobby fits`, guest.text === tag('endurance', 26) && guest.radios === 0 && menuOk(gm), { guest, gm });
+    if (w === 360) await page.screenshot({ path: path.join(run.out, 'racelength-lobby-guest-360x640.png') });
+  }
+  // a room on a server older than presets: no length in its settings, no selector even for the host, and the label says Standard
+  await read(page, (r) => { const old = { ...r, settings: { track: r.settings.track, aiFill: true } }; window.__game.qaNetLobby(old, 'p1', 'connected'); }, room);
+  await frames(page, 2);
+  const old = await read(page, () => ({ text: document.getElementById('l-len')?.textContent ?? null, radios: document.querySelectorAll('[data-nlen]').length }));
+  c.ok('Touch lobby on a server older than presets: the host gets no selector and sees "Standard · 13 laps"', old.text === tag('standard', 13) && old.radios === 0, old);
+  c.ok('Touch part: no page or console errors', s.errors.length === 0, s.errors.slice(0, 5));
+  return s;
+}
+
+const SCENARIOS = { tracks, race, controlled, routing, practice, championship, touch, responsive, touchrace, reverse, service, lastchance, stall, queue, autosg, autobay, localslot, online, memory, netbanner, racelength };
+const USAGE = 'usage: browser-check.mjs [tracks|race|controlled|routing|practice|championship|touch|responsive|touchrace|reverse|service|lastchance|stall|queue|autosg|autobay|localslot|online|memory|netbanner|racelength ...] | perf | compare <a.json> <b.json>\n'
   + 'options: --dist <dir> --url <url> --commit <sha> --machine <name> --label <name> --viewport WxH --dpr N --preset low|balanced|high\n'
   + '         --seconds N --headed --channel <chrome|msedge> --out <dir> --max-minutes N';
 

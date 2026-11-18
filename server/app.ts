@@ -5,6 +5,7 @@ import type { Duplex } from 'node:stream';
 import session from 'express-session';
 import { WebSocketServer, type WebSocket } from 'ws';
 import type { Pool } from 'pg';
+import { LENGTH_IDS } from '../src/raceLength';
 import { LIMITS, PROTOCOL_NAME, PROTOCOL_VERSION, RULES_VERSION, checkDisplayName, parseClientMessage, type ClientMsg, type ServerMsg } from '../src/net/protocol';
 import { Accounts, Busy, checkPassword, checkUsername } from './accounts';
 import type { Config } from './config';
@@ -169,6 +170,8 @@ export function createApp({ cfg, log, manager, pool = null, sessionCheckMs = SES
       status: ok ? 200 : 503,
       body: {
         ok, service: 'slotrush-server', version: cfg.version, protocol: PROTOCOL_VERSION, rules: RULES_VERSION, schema: SCHEMA_VERSION,
+        // the race-length presets rooms accept (#132): a page offers its length selector online only when this lists them
+        lengths: [...LENGTH_IDS],
         accounts: !!accounts, profiles: !!accounts, career: !!accounts, db, scoring: scoring.version, pendingResults: pendingResults(), unsavedResults: unsavedResults(), uptimeS: Math.round((Date.now() - started) / 1000),
         rooms: st.rooms, roomCap: cfg.roomCap, racing: st.racing, humans: st.humans, connections: conns, maxConnections: cfg.maxConnections,
         // tickMaxMs keeps its historical name and meaning: the decayed recent-load signal admission uses (also tickLoadMs).
@@ -185,7 +188,7 @@ export function createApp({ cfg, log, manager, pool = null, sessionCheckMs = SES
     const url = (req.url ?? '/').split('?')[0];
     try {
       if (req.method === 'GET' && url === '/api/health') { const h = await health(); json(res, h.status, h.body); return; }
-      if (req.method === 'GET' && url === '/api/version') { json(res, 200, { service: 'slotrush-server', version: cfg.version, protocol: PROTOCOL_VERSION, rules: RULES_VERSION, schema: SCHEMA_VERSION }); return; }
+      if (req.method === 'GET' && url === '/api/version') { json(res, 200, { service: 'slotrush-server', version: cfg.version, protocol: PROTOCOL_VERSION, rules: RULES_VERSION, schema: SCHEMA_VERSION, lengths: [...LENGTH_IDS] }); return; }
       if (url.startsWith('/api/auth/')) { await auth(req, res, url.slice('/api/auth/'.length)); return; }
       if (url === '/api/profile') { await profile(req, res); return; }
       if (url === '/api/profile/stats') { await stats(req, res); return; }
@@ -529,7 +532,8 @@ export function createApp({ cfg, log, manager, pool = null, sessionCheckMs = SES
           return;
         }
         hello = true; clearTimeout(helloTimer);
-        send({ t: 'welcome', v: PROTOCOL_VERSION, server: cfg.version, rules: RULES_VERSION, now: manager.now() });
+        // `lengths` (#132) is additive: it tells a current page it may send race-length presets; an older page ignores it
+        send({ t: 'welcome', v: PROTOCOL_VERSION, server: cfg.version, rules: RULES_VERSION, now: manager.now(), lengths: [...LENGTH_IDS] });
         return;
       }
       if (m.t === 'hello') { send({ t: 'nack', ref: 'hello', code: 'bad_state' }); return; }
@@ -567,9 +571,9 @@ export function createApp({ cfg, log, manager, pool = null, sessionCheckMs = SES
     function enter(m: Extract<ClientMsg, { t: 'create' | 'join' | 'resume' }>, accountId: string | null, accountName?: string): void {
       const name = m.t === 'resume' ? '' : accountName ?? m.name;
       const r = m.t === 'create'
-        ? manager.create(peer, { name, livery: m.livery, accountId, mode: m.mode, settings: m.settings, championship: m.championship, ip })
+        ? manager.create(peer, { name, livery: m.livery, accountId, mode: m.mode, settings: m.settings, championship: m.championship, ip, lengths: m.lengths })
         : m.t === 'join'
-          ? manager.join(peer, ip, { code: m.code, name, livery: m.livery, accountId })
+          ? manager.join(peer, ip, { code: m.code, name, livery: m.livery, accountId, lengths: m.lengths })
           : manager.resume(peer, ip, m.room, m.participant, m.token, accountId);
       if (!r.ok) { send({ t: 'nack', ref: m.t, code: r.code, ...(r.detail ? { detail: r.detail } : {}) }); return; }
       bind(r, m.t === 'resume');

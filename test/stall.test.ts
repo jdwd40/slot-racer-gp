@@ -3,7 +3,8 @@
 // code the room server runs) under continuous simulation. See docs/auto-bay.md#stopped-on-track-recovery.
 import { describe, it, expect } from 'vitest';
 import { createHash } from 'node:crypto';
-import { Race, Car, LAPS, PEN, STALL, AWAY, AWAY_REJOIN, BRAKE as BRAKE_DECEL, type Controls, type Input, type RosterEntry, type WireEvent, type RaceSnapshot } from '../src/race';
+import { Race, Car, PEN, STALL, AWAY, AWAY_REJOIN, BRAKE as BRAKE_DECEL, type Controls, type Input, type RosterEntry, type WireEvent, type RaceSnapshot } from '../src/race';
+import { LAPS } from './helpers';
 import { stallLeft, stallPaused } from '../src/hud';
 import { applySnapshot, localEvent, mirrorRace } from '../src/net/mirror';
 import { SnapDecoder, SnapEncoder, type WireStateMsg } from '../src/net/snapwire';
