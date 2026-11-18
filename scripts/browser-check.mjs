@@ -1569,8 +1569,9 @@ const menuOk = (m) => m.pageX <= 0 && m.cardX <= 0 && m.inside && m.blocked.leng
 /** Viewports for the race messages against the start lights, standings, times, minimap and HUD buttons (#128): phone landscape
  *  sizes, both sides of the 700 / 701 compact boundary, the 701-1320 desktop windows where a long message reaches the
  *  standings, 840 / 841 where the start lights clear it, wide desktop, and windows only 501 px tall, where the meters, race
- *  instructions and minimap come up from the bottom. Each runs with touch and with a mouse. */
-const MSG_VIEWS = [[915, 412], [844, 390], [740, 360], [667, 375], [640, 360], [650, 900], [700, 800], [701, 800], [768, 1024], [800, 600], [840, 600], [841, 600], [960, 540], [1024, 768], [1100, 800], [1101, 800], [1180, 820], [1181, 820], [1280, 800], [1320, 800], [1321, 800], [1440, 900], [701, 501], [800, 501], [840, 501], [1100, 501], [1320, 501]];
+ *  instructions and minimap come up from the bottom. Each runs with touch and with a mouse. The very short landscape windows of
+ *  #130 item 3 (568x320, an iPhone SE on its side, and 600x340, 640x320 and 740x340), where the meters reached the lights. */
+const MSG_VIEWS = [[915, 412], [844, 390], [740, 360], [667, 375], [640, 360], [650, 900], [700, 800], [701, 800], [768, 1024], [800, 600], [840, 600], [841, 600], [960, 540], [1024, 768], [1100, 800], [1101, 800], [1180, 820], [1181, 820], [1280, 800], [1320, 800], [1321, 800], [1440, 900], [701, 501], [800, 501], [840, 501], [1100, 501], [1320, 501], [568, 320], [600, 340], [640, 320], [740, 340]];
 
 /** Geometry of the centred race messages, the start lights and what they could land on, with the lights' real countdown state. */
 function measureMessages() {
@@ -1598,14 +1599,17 @@ function measureMessages() {
 /** Viewports for the racing HUD with a status line showing (#130): the 601-1180 mouse windows where a centred status line met the
  *  meters and the minimap, both sides of 700 / 701, 840 / 841, 900 / 901 (where the times gain Last and Best), 1100 / 1101 and
  *  1180 / 1181, windows only 501 px tall, tablet portrait, and wide desktop. Touch runs the same sizes: 701-1100 is where the
- *  times sit in a row beside the standings, with the buttons at its right end. */
-const STATUS_VIEWS = [[601, 900], [650, 900], [700, 800], [701, 501], [701, 800], [750, 600], [768, 1024], [800, 501], [840, 600], [841, 600], [900, 600], [901, 600], [960, 540], [1000, 700], [1024, 768], [1100, 501], [1100, 800], [1101, 800], [1180, 820], [1181, 820], [1320, 501], [1440, 900]];
+ *  times sit in a row beside the standings, with the buttons at its right end. Then the very short landscape windows of #130
+ *  item 3 (at most 340 px tall), where the chip list is capped, and 701x560 / 701x561 either side of the touch tablet cap. */
+const SHORT_VIEWS = [[568, 320], [600, 340], [640, 320], [740, 340], [844, 340]];
+const STATUS_VIEWS = [...SHORT_VIEWS, [701, 560], [701, 561], [601, 900], [650, 900], [700, 800], [701, 501], [701, 800], [750, 600], [768, 1024], [800, 501], [840, 600], [841, 600], [900, 600], [901, 600], [960, 540], [1000, 700], [1024, 768], [1100, 501], [1100, 800], [1101, 800], [1180, 820], [1181, 820], [1320, 501], [1440, 900]];
 
 /** The longest name another player can have (LIMITS.nameMax, 16), as it would look in the standings */
 const LONG_NAME = 'Maximilian Weber';
 
-/** Geometry of the status line, meters, minimap, standings, times and HUD buttons while racing (#130). */
-function measureStatus(touch) {
+/** Geometry of the status line, meters, minimap, standings, times, message and HUD buttons while racing (#130). `short`: a very
+ *  short window (at most 340 px tall), where the message is also checked against the meters, minimap, top bar and buttons. */
+function measureStatus({ touch, short }) {
   const shown = (e) => e && e.getClientRects().length > 0 && getComputedStyle(e).visibility !== 'hidden' && getComputedStyle(e).display !== 'none';
   const rectOf = (e) => { const r = e.getBoundingClientRect(); return { x: Math.round(r.x), y: Math.round(r.y), r: Math.round(r.right), b: Math.round(r.bottom) }; };
   const hit = (a, b) => a.x < b.r - 0.5 && b.x < a.r - 0.5 && a.y < b.b - 0.5 && b.y < a.b - 0.5;
@@ -1617,10 +1621,10 @@ function measureStatus(touch) {
   const buttons = [];
   for (const e of document.querySelectorAll('.tr .btn, .tbtn')) if (shown(e)) { parts[e.id] = rectOf(e); buttons.push(e.id); }
   const keys = Object.keys(parts), pairs = [];
-  // the status line against everything; the times against the minimap and buttons, and with touch the standings (the shared row).
-  // With touch the status line stays in the dock above the meters, and is not checked against the message here: in a window only
-  // 501 px tall with every chip showing, the dock reaches the message at 701 px wide, which is the short layout of #130 item 3
-  for (const b of keys) if (b !== 'status' && !(touch && b === 'toast') && parts.status && hit(parts.status, parts[b])) pairs.push(`status/${b}`);
+  // the status line against everything, the message included; the times against the minimap and buttons, and with touch the
+  // standings (the shared row). In a very short window, the message against the meters, minimap, top bar, times and buttons too
+  for (const b of keys) if (b !== 'status' && parts.status && hit(parts.status, parts[b])) pairs.push(`status/${b}`);
+  if (short) for (const b of keys) if (!['toast', 'status'].includes(b) && parts.toast && hit(parts.toast, parts[b])) pairs.push(`toast/${b}`);
   for (const b of [...buttons, 'mini', ...(touch ? ['top'] : [])]) if (parts.timer && parts[b] && hit(parts.timer, parts[b])) pairs.push(`timer/${b}`);
   for (const b of [...buttons, 'mini']) if (parts.top && parts[b] && hit(parts.top, parts[b])) pairs.push(`top/${b}`);
   const off = ['status', 'timer', 'top', ...buttons].filter((k) => !parts[k] || parts[k].x < 0 || parts[k].y < 0 || parts[k].r > innerWidth + 0.5 || parts[k].b > innerHeight + 0.5);
@@ -1628,7 +1632,11 @@ function measureStatus(touch) {
   const standOn = shown(document.getElementById('h-stand'));
   const flags = [...document.querySelectorAll('#h-stand > div')].map((d) => { const r = d.getBoundingClientRect(); return [...d.querySelectorAll('.flag')].every((f) => { const q = f.getBoundingClientRect(); return q.width > 0 && q.right <= r.right + 0.5; }); });
   const times = [...document.querySelectorAll('.tc .mono')].filter(shown).every((e) => e.scrollWidth <= e.clientWidth + 0.5 && e.getBoundingClientRect().width > 20);
-  return { pairs, off, status: parts.status, statusOn, statusLen: st.textContent.length, statusPx: parseFloat(getComputedStyle(st).fontSize), timer: parts.timer, top: parts.top, flags: !standOn || (flags.length === 4 && flags.every(Boolean)), standOn, times, phase: window.__game.race.phase, touch: document.body.classList.contains('touch') };
+  // the chips that show, their smallest text, and the "+N MORE" count; the touch controls' smallest side
+  const chipEls = [...document.querySelectorAll('#h-chips .chip')].filter(shown);
+  const chips = { shown: chipEls.length, hidden: document.querySelectorAll('#h-chips .chip[hidden]').length, px: Math.min(...chipEls.map((e) => parseFloat(getComputedStyle(e).fontSize))), extra: document.querySelector('#h-chips .chip.extra')?.textContent ?? null };
+  const pad = Math.min(...[...document.querySelectorAll('.tbtn, .tr .btn')].filter(shown).map((e) => { const r = e.getBoundingClientRect(); return Math.min(r.width, r.height); }));
+  return { pairs, off, chips, pad, status: parts.status, statusOn, statusLen: st.textContent.length, statusPx: parseFloat(getComputedStyle(st).fontSize), timer: parts.timer, top: parts.top, flags: !standOn || (flags.length === 4 && flags.every(Boolean)), standOn, times, phase: window.__game.race.phase, touch: document.body.classList.contains('touch') };
 }
 
 /** Race messages and start lights with the HUD crowded, touch and mouse, at every MSG_VIEWS size (#128). A championship round
@@ -1654,7 +1662,7 @@ async function hudMessages(run, c, champ) {
       const m = await read(page, measureMessages);
       c.evidence[`messages-${mode}`].push({ size: `${w}x${h}`, pairs: m.pairs, toast: m.toast, lights: m.lights, top: m.top });
       c.ok(`Race messages at ${w}x${h} (${mode}): the lit start lights and a long message are on screen and clear of each other, the standings, times, meters, race instructions, minimap and buttons`, m.touch === touch && !!m.round && m.phase === 'countdown' && m.lightsOn && m.toastOn && m.toastPx >= 13 && m.off.length === 0 && m.pairs.length === 0, { overlaps: m.pairs, off: m.off, round: m.round, toast: m.toast, lights: m.lights, top: m.top, lightsOn: m.lightsOn, toastPx: m.toastPx });
-      if ([915, 1100, 1180].includes(w)) await page.screenshot({ path: path.join(run.out, `messages-${mode}-${w}x${h}.png`) });
+      if ([568, 915, 1100, 1180].includes(w)) await page.screenshot({ path: path.join(run.out, `messages-${mode}-${w}x${h}.png`) });
     }
 
     // ---- racing, with the status line showing (#130). It only shows in a race: a penalty, the pits, fuel or a missed deadline.
@@ -1679,12 +1687,17 @@ async function hudMessages(run, c, champ) {
           if (state === 'service') Object.assign(p, { mode: 'service', serviceT: 0, penalty: 3, sgOwed: 0 });
         }, { state, name: LONG_NAME });
         await frames(page, 3);
-        const m = await read(page, measureStatus, touch);
+        const m = await read(page, measureStatus, { touch, short: h <= 340 });
         seen.push({ state, ...m });
         c.evidence[`status-${mode}`].push({ size: `${w}x${h}`, state, pairs: m.pairs, off: m.off, status: m.status, timer: m.timer, top: m.top });
-        if (state === 'service' && [701, 901, 1100].includes(w)) await page.screenshot({ path: path.join(run.out, `status-${mode}-${w}x${h}.png`) });
+        if (state === 'service' && [568, 701, 901, 1100].includes(w)) await page.screenshot({ path: path.join(run.out, `status-${mode}-${w}x${h}.png`) });
       }
-      c.ok(`Racing HUD at ${w}x${h} (${mode}): the status line (stop-and-go owed with the box busy; a fuel stop with a penalty) is on screen, readable (13 px, or the 12 px of the touch phone dock) and clear of the meters, minimap, standings, times, message and buttons; the times are clear of the buttons and minimap, with every flag shown beside long names`, seen.every((m) => m.touch === touch && m.phase === 'racing' && m.statusOn && m.statusPx >= (touch && w <= 700 ? 12 : 13) && m.off.length === 0 && m.pairs.length === 0 && m.flags && m.times) && seen[1].statusLen > 90, seen.map((m) => ({ state: m.state, overlaps: m.pairs, off: m.off, status: m.status, len: m.statusLen, px: m.statusPx, timer: m.timer, top: m.top, flags: m.flags, times: m.times })));
+      c.ok(`Racing HUD at ${w}x${h} (${mode}): the status line (stop-and-go owed with the box busy; a fuel stop with a penalty) is on screen, readable (13 px, or the 12 px of the touch phone dock) and clear of the meters, minimap, standings, times, message and buttons; the times are clear of the buttons and minimap, with every flag shown beside long names`, seen.every((m) => m.touch === touch && m.phase === 'racing' && m.statusOn && m.statusPx >= (touch && (w <= 700 || h <= 500) ? 12 : 13) && m.off.length === 0 && m.pairs.length === 0 && m.flags && m.times) && seen[1].statusLen > 90, seen.map((m) => ({ state: m.state, overlaps: m.pairs, off: m.off, status: m.status, len: m.statusLen, px: m.statusPx, timer: m.timer, top: m.top, flags: m.flags, times: m.times })));
+      // the chip cap (#130 item 3): at most 3 chips in a window 340 px tall or less, and 5 with touch at 701-1100 x 501-560, the
+      // last counting the rest (the stop-and-go state has more than that, so the count must show there; the fuel stop may fit
+      // without one); elsewhere every chip shows. Chips stay at 11 px or more where capped, and the touch controls 48 px
+      const cap = h <= 340 ? 3 : touch && w >= 701 && w <= 1100 && h >= 501 && h <= 560 ? 5 : 0;
+      c.ok(`Chips at ${w}x${h} (${mode}): ${cap ? `at most ${cap} show with the crowded HUD, and when some are hidden the last is a "+N MORE" that counts them, at 11 px or more${touch ? ', and the touch controls stay 48 px or more' : ''}` : 'every chip shows, with no "+N MORE"'}`, seen.every((m) => cap ? m.chips.shown <= cap && (m.chips.extra === null ? m.chips.hidden === 0 : /^\+\d+ MORE$/.test(m.chips.extra) && +m.chips.extra.match(/\d+/)[0] === m.chips.hidden && m.chips.hidden >= 2) && m.chips.px >= 11 && (!touch || m.pad >= 48) : m.chips.hidden === 0 && m.chips.extra === null) && (!cap || seen[0].chips.extra !== null), seen.map((m) => ({ state: m.state, chips: m.chips, pad: m.pad })));
     }
     c.ok(`Race messages (${mode}): no page or console errors`, s.errors.length === 0, s.errors.slice(0, 5));
     await s.context.close();

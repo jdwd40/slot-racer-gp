@@ -53,6 +53,8 @@ button:focus-visible { outline: 2px solid #fff; outline-offset: 2px; }
 .chip.org { background: #fb923c; color: #2a1305; }
 .chip.red { background: #dc2626; color: #fff; }
 .chip.rev { background: #f4f4f5; color: #111; }
+/* "+N MORE": the chips a very short window has no room for (#130) */
+.chip.extra { background: rgba(255,255,255,0.16); color: #f4f4f5; }
 .blink { animation: blink 0.5s infinite alternate; }
 @keyframes blink { from { opacity: 1; } to { opacity: 0.45; } }
 /* the last-chance chip (#65) never fades below 0.8: its dim phase must stay readable on a small, bright phone screen */
@@ -224,6 +226,11 @@ small { color: #9ca3af; font-weight: 500; }
      No lower: in a window only 501 px tall the race instructions above the meters start about 240 px down (#128) */
   .touch .toast { top: calc(var(--eT) + 170px); }
 }
+/* ...and in a window under about 560 px tall, a crowded dock (race instructions above every chip) still reached up to that
+   message, so the chip list shows at most five chips, the last one counting the rest (#130) */
+@media (min-width: 701px) and (max-width: 1100px) and (min-height: 501px) and (max-height: 560px) {
+  .touch .chips { --chip-cap: 5; }
+}
 /* desktop windows up to 1320 px wide: a long message (about 770 px on one line) is wider than the space the standings column,
    with penalty flags on its rows, leaves either side of the window's centre, so it drops below the standings (and the round
    label in a championship) and the start lights, and wraps (#128) */
@@ -318,6 +325,23 @@ small { color: #9ca3af; font-weight: 500; }
 /* compact layouts have the minimap at the top right, so the slot runs to the right edge */
 @media (min-width: 601px) and (max-width: 700px), (min-width: 601px) and (max-height: 500px) {
   body:not(.touch) .status { right: var(--eR); }
+}
+
+/* very short landscape, at most 340 px tall: an iPhone SE on its side (568x320) and windows like it (#130 item 3). The centre
+   column between the controls cannot stack the start lights, a message, the race instructions and a crowded meter panel, so:
+   the start lights move into the top bar, right of the times, with 18 px lamps (they only show before the start, when the bar
+   holds no more than position, lap and a zero time); the message sits under the top bar across the width left of the minimap,
+   so it takes two lines instead of three; and the chip list shows at most three chips, the last one counting the rest (Hud reads
+   --chip-cap; the chips come in priority order). Chips go up to 11 px. Without touch the race instructions take the slot right
+   of the meter panel at any width, as they do from 601 px wide */
+@media (max-height: 340px) and (orientation: landscape) {
+  .lights { top: var(--eT); left: auto; right: calc(var(--eR) + var(--tools-w) + 8px); transform: none; gap: 4px; padding: 6px 8px; }
+  .lights i { width: 18px; height: 18px; }
+  .toast, .touch .toast { top: calc(var(--eT) + 48px); left: var(--eL); right: calc(var(--eR) + var(--mini-w) + 8px); width: max-content; max-width: calc(100% - var(--eL) - var(--eR) - var(--mini-w) - 8px); margin: 0 auto; transform: translateY(-10px); }
+  .toast.show { transform: none; }
+  .chips { --chip-cap: 3; }
+  .chip { font-size: 11px; }
+  body:not(.touch) .status { left: calc(var(--eL) + var(--bl-w) + 12px); right: var(--eR); bottom: var(--eB); transform: none; width: fit-content; max-width: none; margin: 0 auto; padding: 7px 12px; white-space: normal; text-align: center; }
 }
 
 /* ---- online: menu, lobby, results and the connection banner (docs/online-client.md) */
