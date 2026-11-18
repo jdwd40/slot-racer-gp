@@ -2,7 +2,8 @@
 // See docs/penalties.md for the rules these encode.
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import * as T from '../src/track';
-import { Car, Input, LAPS, PEN, Race, SERVICE_READY } from '../src/race';
+import { Car, Input, PEN, Race, SERVICE_READY } from '../src/race';
+import { LAPS } from './helpers';
 import * as R from '../src/records';
 import { DT, NONE, UP, crossLine, fresh, memStorage, msgs, place, seedRandom, stepEvents, all, me } from './helpers';
 

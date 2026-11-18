@@ -103,7 +103,9 @@ results stored before it are not scored retroactively):
 
 Account screen (signed in): driver name, total career points, wins/seconds/thirds, races, verified personal bests by
 circuit and mode (with lap number and date, older layouts marked), and the ten most recent results (date, mode,
-championship round, circuit, position/field or DQ/DNF, points). Read from `GET /api/profile/stats` for the session's
+championship round, race length (#132: read from the stored result's envelope, `settings.length`; results stored before
+race-length presets read as Standard, which they were), circuit, position/field or DQ/DNF, points). Points per finish
+are the same at every race length. Read from `GET /api/profile/stats` for the session's
 account only; an answer for a different account than the tab shows (another tab switched the cookie) is dropped.
 A rename changes only `profiles.display_name`: the ledger keys on the account id, so history and attribution stay.
 

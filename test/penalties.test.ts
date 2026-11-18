@@ -2,7 +2,8 @@
 // Ported from the scripted checks used to verify the penalty system when it was built.
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import * as T from '../src/track';
-import { Race, Car, PEN, LAPS } from '../src/race';
+import { Race, Car, PEN } from '../src/race';
+import { LAPS } from './helpers';
 import { fresh, place, park, stepEvents, offences, msgs, seedRandom, crossLine, UP, DT, all, me } from './helpers';
 
 beforeEach(() => seedRandom(7));

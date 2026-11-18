@@ -3,7 +3,8 @@
 // (SLOTRUSH_TIME_SCALE, refused in production) so whole 13-lap races take seconds.
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import WebSocket from 'ws';
-import { LAPS, PEN, type RaceSnapshot } from '../../src/race';
+import { PEN, type RaceSnapshot } from '../../src/race';
+import { LAPS } from '../helpers';
 import { OnlineClient, type SocketCtor } from '../../src/net/client';
 import { PROTOCOL_VERSION, type ServerMsg } from '../../src/net/protocol';
 import { createApp, type App } from '../../server/app';

@@ -6,11 +6,18 @@ import { Race, type Car, type CarSnapshot, type DriverId, type RaceEvent, type R
 import { trackFor } from '../track';
 import { STEP, blendPose, type Pose } from '../timing';
 import { CAR_DYNAMIC } from './snapwire';
+import { DEFAULT_LENGTH, lengthForLaps } from '../raceLength';
 
-/** A mirror race for a snapshot's roster and circuit. AI personas only matter to the server, so none are given. */
+/**
+ * A mirror race for a snapshot's roster, circuit and lap target. AI personas only matter to the server, so none are given.
+ * The target is the server's: every snapshot carries its race's `laps` (an older server always sent 13), mapped back onto
+ * the preset that races it (#132), so the HUD, warnings and standings count to the same flag as the server. A server only
+ * ever runs a preset this page sent it knows (`lengths`), so an unknown count is not expected; it would read as Standard.
+ */
 export function mirrorRace(snap: RaceSnapshot): Race {
   const roster = snap.cars.map((c) => ({ id: c.id, control: c.control, slot: c.slot, name: c.name, color: c.color }));
-  const r = new Race({ roster, track: trackFor(snap.track), practice: snap.practice, runOn: 'live' });
+  const length = lengthForLaps(snap.laps)?.id ?? DEFAULT_LENGTH;
+  const r = new Race({ roster, track: trackFor(snap.track), practice: snap.practice, runOn: 'live', length });
   applySnapshot(r, snap);
   return r;
 }

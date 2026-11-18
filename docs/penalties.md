@@ -90,11 +90,11 @@ If another car is in the stop-and-go box or holds its reservation (see [pit queu
 
 ### Late awards
 
-A stop-and-go awarded after the final lap's last reachable entrance (`sgDue > LAPS`) is still owed. The player is told at once (`msg.sgLate`), and the chip reads `NO ENTRY LEFT · DQ AT FLAG`. Reversing back to the entrance before the line and serving it is allowed under the normal reverse rules, and then the car finishes normally.
+A stop-and-go awarded after the final lap's last reachable entrance (`sgDue > race.targetLaps`, the race's own lap target: 5, 13 or 26, [race-length.md](race-length.md)) is still owed. The player is told at once (`msg.sgLate`), and the chip reads `NO ENTRY LEFT · DQ AT FLAG`. Reversing back to the entrance before the line and serving it is allowed under the normal reverse rules, and then the car finishes normally.
 
 ## The finish
 
-At each car's final forward timing-line crossing (`lapsDone` reaches `LAPS`), in this order:
+At each car's final forward timing-line crossing (`lapsDone` reaches the race's `targetLaps`), in this order:
 
 1. Service earlier in the same simulation step is already applied: the box is counted in the pit-lane step before lap counting, and bays come before the line.
 2. Deadlines for the lap just ended are judged as above.

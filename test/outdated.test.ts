@@ -126,7 +126,7 @@ describe('an older game server (#80: a server rollback after a protocol bump)', 
     const f = (() => Promise.resolve(new Response(JSON.stringify({ ok: true, protocol: proto, version: 'v' }), { status: 200 }))) as unknown as typeof fetch;
     expect(afterRetry(await probeOnline(true, f, 'https://x'))).toEqual({ state: 'behind', server: PROTOCOL_VERSION - 1 });
     proto = PROTOCOL_VERSION;   // the server is rolled forward again
-    expect(afterRetry(await probeOnline(true, f, 'https://x'))).toEqual({ state: 'available', version: 'v', wsUrl: 'wss://x/ws', accounts: false });
+    expect(afterRetry(await probeOnline(true, f, 'https://x'))).toEqual({ state: 'available', version: 'v', wsUrl: 'wss://x/ws', accounts: false, lengths: [] });
     // a server restarting while it is rolled back keeps the Retry notice rather than dropping the button
     expect(afterRetry({ state: 'unavailable', reason: 'unreachable' })).toEqual({ state: 'behind', server: null });
     // a Retry that finds a newer server (rolled forward past this page) is the Reload notice
@@ -172,7 +172,7 @@ describe('an older game server (#80: a server rollback after a protocol bump)', 
     it('re-probes every RECHECK_MS, recovers by itself once the server matches, then stops', async () => {
       vi.useFakeTimers();
       try {
-        const answers: OnlineStatus[] = [{ state: 'behind', server: 1 }, { state: 'behind', server: 1 }, { state: 'available', version: 'v', wsUrl: 'ws://x/ws', accounts: false }];
+        const answers: OnlineStatus[] = [{ state: 'behind', server: 1 }, { state: 'behind', server: 1 }, { state: 'available', version: 'v', wsUrl: 'ws://x/ws', accounts: false, lengths: [] }];
         const probe = vi.fn((): Promise<OnlineStatus> => Promise.resolve(answers.shift() ?? { state: 'behind', server: 1 }));
         let online: OnlineStatus = { state: 'behind', server: 1 };
         let done = 0;

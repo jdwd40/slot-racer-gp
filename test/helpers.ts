@@ -2,7 +2,11 @@
 // localStorage double, and scripted race setups that bypass the countdown.
 import { vi } from 'vitest';
 import * as T from '../src/track';
-import { Race, Car, RaceEvent, Input, Controls } from '../src/race';
+import { Race, Car, RaceEvent, Input, Controls, type RaceOpts } from '../src/race';
+import { raceLength } from '../src/raceLength';
+
+/** Standard's lap target (#132: no race-core constant any more; each Race has its own `targetLaps`). Default races are Standard. */
+export const LAPS = raceLength('standard').laps;
 
 export const NONE: Input = { up: false, down: false };
 export const UP: Input = { up: true, down: false };
@@ -43,7 +47,7 @@ export function memStorage(initial: Record<string, string> = {}): Storage {
 }
 
 /** A race already under way on the given circuit, every car AI-driven and out of its start grace. */
-export function fresh(track = 'circuit-1', opts: { practice?: boolean } = {}): Race {
+export function fresh(track = 'circuit-1', opts: Pick<RaceOpts, 'practice' | 'length'> = {}): Race {
   T.setTrack(track);
   const r = new Race(opts);
   r.phase = 'racing'; r.t = 10; r.raceTime = 5;

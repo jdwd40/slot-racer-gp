@@ -2,7 +2,8 @@ import * as THREE from 'three';
 import { ONLINE_ENABLED, afterProtocolRefusal, afterRetry, behindHtml, outdatedHtml, probeOnline, startRecheck, type OnlineStatus } from './online';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 import * as T from './track';
-import { Race, Car, LAPS, RaceEvent, DRIVERS, PEN, SOLO_ID, DriverId, RosterEntry } from './race';
+import { Race, Car, RaceEvent, DRIVERS, PEN, SOLO_ID, DriverId, RosterEntry } from './race';
+import { LENGTH_IDS, lengthOr, raceLength, type RaceLengthId } from './raceLength';
 import { buildWorld, disposeWorld, arrowGeometry, bayPaints, BayPaint, World } from './world';
 import { Y0, disposeObject } from './gfx';
 import { makeCar, makePlayerMarker, dimCar, CarVisual } from './carModel';
@@ -89,6 +90,11 @@ let localId: DriverId = SOLO_ID;
  * from that slot moves to slot 0 with its name, colour and persona.
  */
 let localSlot = 0;
+/**
+ * The race length chosen for new local races and new online rooms (#132): remembered on this device (srgp.raceLength). A
+ * championship races the length it was started with (champ.length), never this; practice has no lap target at all.
+ */
+let raceLen: RaceLengthId = R.savedLength();
 function newRace(): Race {
   const practice = mode === 'practice';
   const slot = mode === 'champ' ? 0 : localSlot;
@@ -98,7 +104,8 @@ function newRace(): Race {
     const D = DRIVERS[k];
     roster.push({ id: `ai${k}`, control: 'ai', slot: k === slot ? 0 : k, name: D.name, color: D.color, persona: D.persona });
   }
-  return new Race({ roster, track: T.DEF.id });
+  // the lap target is fixed for this race when it is built: a later change of the setting only affects the next race
+  return new Race({ roster, track: T.DEF.id, length: mode === 'champ' && champ ? champ.length : raceLen });
 }
 let race = newRace();
 const me = (): Car => race.car(localId) ?? race.cars[0];
@@ -300,6 +307,26 @@ function bindRadios(name: string, choose: (id: string) => void): void {
   });
 }
 
+/** A race-length preset's name, and its name with its lap count ("Endurance · 26 laps"), from the one preset table. */
+const lengthName = (id: RaceLengthId): string => t(`len.${id}`);
+const lengthTag = (id: RaceLengthId): string => t('len.tag', { name: lengthName(id), n: raceLength(id).laps });
+/**
+ * The race-length selector (#132): a radio group like the settings ones (bindRadios wires it), each choice showing its name
+ * over its lap count so the three stay short enough to sit side by side on a phone. `name` is the data attribute.
+ */
+function lengthRadiosHtml(name: string, current: RaceLengthId, ids: readonly RaceLengthId[] = LENGTH_IDS, note = ''): string {
+  const btns = ids.map((id) => {
+    const on = id === current;
+    return `<button class="tab len ${on ? 'sel' : ''}" role="radio" aria-checked="${on}" tabindex="${on ? 0 : -1}" data-${name}="${id}" aria-label="${lengthTag(id)}"><b>${lengthName(id)}</b> <small>${t('len.laps', { n: raceLength(id).laps })}</small></button>`;
+  }).join('');
+  return `<div class="gfx rlen"><div class="lbl2" id="o-${name}">${t('len.label')}</div><div class="tabs" role="radiogroup" aria-labelledby="o-${name}">${btns}</div>${note ? `<small class="len-note">${note}</small>` : ''}</div>`;
+}
+/** Remember a race length picked anywhere (title, online menu, a room the driver hosts) for the next setup. */
+function chooseLength(id: string): void {
+  raceLen = lengthOr(id);
+  R.saveLength(raceLen);
+}
+
 const TOUCH_OPTS = TOUCH_MODES.map((id) => ({ id, label: `touch.${id}` }));
 /** Under the graphics selector while the automatic switch to Low is in force: says why, and offers the way back. */
 function autoNoteHtml(): string {
@@ -344,13 +371,15 @@ function showTitle(): void {
     </button>`).join('');
   const nRounds = R.CHAMP_TRACKS.length;
   let champBtns = `<button class="cta alt" id="o-champ">${t('title.champ')}</button>`;
-  if (champ && !R.champDone(champ)) champBtns = `<button class="cta alt" id="o-champ-cont">${t('title.champContinue', { n: champ.rounds.length + 1, m: nRounds })}</button><button class="cta alt small" id="o-champ">${t('title.champNew')}</button>`;
+  // a championship in progress keeps its own length (#132), so the button says which one it is
+  if (champ && !R.champDone(champ)) champBtns = `<button class="cta alt" id="o-champ-cont">${t('title.champContinue', { n: champ.rounds.length + 1, m: nRounds })} <small>${lengthTag(champ.length)}</small></button><button class="cta alt small" id="o-champ">${t('title.champNew')}</button>`;
   else if (champ) champBtns = `<button class="cta alt" id="o-champ-view">${t('title.champView')}</button><button class="cta alt small" id="o-champ">${t('title.champNew')}</button>`;
   overlay.innerHTML = `<div class="card title">
     <div class="logo">${t('title.name')}</div>
     <div class="tag">${t('title.tag')}</div>
-    <p>${t('title.goal', { n: LAPS })}</p>
+    <p id="o-goal">${t('title.goal', { n: raceLength(raceLen).laps })}</p>
     <div class="setup">
+      ${lengthRadiosHtml('rlen', raceLen, LENGTH_IDS, t('len.note'))}
       <label class="ini"><span class="lbl2">${t('title.initials')}</span><input id="o-ini" maxlength="${R.MAX_INITIALS}" placeholder="${R.ANON}" value="${R.savedInitialsRaw().replace(/"/g, '')}" autocomplete="off" autocapitalize="characters" enterkeyhint="done" spellcheck="false"></label>
       <div><span class="lbl2">${t('title.car')}</span>${carPickerHtml()}</div>
       ${settingsHtml()}
@@ -390,12 +419,18 @@ function showTitle(): void {
     setRace(newRace());
   }));
   bindSettings();
+  bindRadios('rlen', (id) => {
+    chooseLength(id);
+    overlay.querySelector('#o-goal')!.textContent = t('title.goal', { n: raceLength(raceLen).laps });
+    setRace(newRace());
+  });
   const ini = overlay.querySelector<HTMLInputElement>('#o-ini')!;
   ini.addEventListener('input', () => R.saveInitialsRaw(ini.value));
   ini.addEventListener('keydown', (e) => { if (e.key === 'Enter') ini.blur(); e.stopPropagation(); });
   overlay.querySelector('#o-start')!.addEventListener('click', () => { sfx.init(); startSession('race'); });
   overlay.querySelector('#o-practice')!.addEventListener('click', () => { sfx.init(); startSession('practice'); });
-  overlay.querySelector('#o-champ')!.addEventListener('click', () => { sfx.init(); champ = R.newChamp(carId, R.currentInitials()); startChampRound(); });
+  // a new championship takes the length chosen now and keeps it for every round (#132)
+  overlay.querySelector('#o-champ')!.addEventListener('click', () => { sfx.init(); champ = R.newChamp(carId, R.currentInitials(), raceLen); startChampRound(); });
   overlay.querySelector('#o-champ-cont')?.addEventListener('click', () => { sfx.init(); startChampRound(); });
   overlay.querySelector('#o-champ-view')?.addEventListener('click', () => { sfx.init(); showChamp(null); });
   overlay.querySelector('#o-boards')!.addEventListener('click', () => { sfx.init(); showBoards(); });
@@ -445,6 +480,7 @@ function showResults(): void {
   const place = mine.status === 'dq' ? `${t('res.youDq')} · ${t(`res.dqReason.${mine.dqReason}`)}` : mine.status === 'finished' ? t('res.youPlace', { n: pos }) : t('res.youDnf');
   overlay.className = 'overlay show';
   overlay.innerHTML = `<div class="card results">
+    <div class="lbl2 res-len">${t(`track.${T.DEF.id}.name`)} · ${lengthTag(race.length.id)}</div>
     <h2>${pos === 1 && mine.status === 'finished' ? '🏆 ' + t('res.win') : t('res.title')}</h2>
     <div class="place">${place}</div>
     <div class="tscroll"><table><thead><tr><th>#</th><th>${t('res.driver')}</th><th>${t('res.time')}</th><th>${t('res.best')}</th><th>${t('res.pits')}</th><th>${t('res.pen')}</th></tr></thead><tbody>${rows}</tbody></table></div>
@@ -498,6 +534,7 @@ function showChamp(finished: Race | null): void {
   const head = done ? `<h2>🏆 ${t('champ.final')}</h2><div class="place">${champion.idx === 0 ? t('champ.youChampion') : t('champ.champion', { name: driverName(champion.idx) })}</div>` : `<h2>${t('champ.title')}</h2><div class="place">${t('champ.round', { n: c.rounds.length, m: nR })}</div>`;
   overlay.className = 'overlay show';
   overlay.innerHTML = `<div class="card results champ">
+    <div class="lbl2 res-len">${lengthTag(c.length)}</div>
     ${head}
     <div class="rounds">${roundsLine}</div>
     ${roundHtml}
@@ -796,9 +833,9 @@ function handle(e: RaceEvent): void {
       if (e.n === 1) { hud.toast(t('pen.warn1', { reason }), 'warn'); sfx.beep(); }
       else if (e.n === 2) { hud.toast(t('pen.warn2', { reason }), 'bad'); hud.goFlash(t('pen.flashFinal')); sfx.bad(); }
       else if (e.n === 3 || e.car.sgOwed <= PEN.stopSeconds) {
-        const late = e.car.sgDue > LAPS;
+        const late = e.car.sgDue > race.targetLaps;
         // a late award's consequence arrives as its own race message
-        if (!late) hud.toast(t('pen.stop', { reason, due: t(e.car.sgDue >= LAPS ? 'pen.due.final' : e.car.sgDue > race.apprLap(e.car) ? 'pen.due.next' : 'pen.due.due') }), 'bad');
+        if (!late) hud.toast(t('pen.stop', { reason, due: t(e.car.sgDue >= race.targetLaps ? 'pen.due.final' : e.car.sgDue > race.apprLap(e.car) ? 'pen.due.next' : 'pen.due.due') }), 'bad');
         hud.goFlash(t('pen.flashStop')); sfx.bad();
       }
       else { hud.toast(t('pen.stopAdd', { n: PEN.stopSeconds, reason }), 'bad'); sfx.bad(); }
@@ -1019,6 +1056,7 @@ function showOnline(): void {
       <div><span class="lbl2">${t('net.livery')}</span><div class="cars">${livs}</div></div>
     </div>
     <p><small>${t('net.trackNote', { track: t(`track.${T.DEF.id}.name`) })}</small></p>
+    ${netLengths().length > 1 ? lengthRadiosHtml('nrlen', netLength(), netLengths(), t('net.lengthNote', { len: lengthTag(netLength()) })) : `<p class="len-old"><small>${t('net.lengthOld')}</small></p>`}
     <div class="modes-grid">
       <div class="mode-box"><b>${t('net.modeMulti')}</b><small>${t('net.multiDesc')}</small>
         <label class="chk"><input type="checkbox" id="n-ai"> ${t('net.aiFill')}</label>
@@ -1026,7 +1064,7 @@ function showOnline(): void {
         <div class="join"><input id="n-code" maxlength="${LIMITS.codeLength}" placeholder="${t('net.codePh')}" autocomplete="off" autocapitalize="characters" spellcheck="false" enterkeyhint="go"><button class="cta alt" id="n-join">${t('net.join')}</button></div>
       </div>
       <div class="mode-box"><b>${t('net.modeSolo')}</b><small>${t('net.soloDesc')}</small><button class="cta alt" id="n-solo">${t('net.startSolo')}</button></div>
-      ${accounts.account ? (() => { const c = connectedChamp(); return `<div class="mode-box"><b>${t('net.modeChamp')}</b><small>${t('net.champDesc', { n: c.round, m: R.CHAMP_TRACKS.length, track: t(`track.${R.CHAMP_TRACKS[c.round - 1]}.name`) })}</small><button class="cta alt" id="n-champ">${t('net.startChamp', { n: c.round })}</button></div>`; })() : ''}
+      ${accounts.account ? (() => { const c = connectedChamp(); return `<div class="mode-box"><b>${t('net.modeChamp')}</b><small>${t('net.champDesc', { n: c.round, m: R.CHAMP_TRACKS.length, track: t(`track.${R.CHAMP_TRACKS[c.round - 1]}.name`) })}</small><small class="champ-len" id="n-champ-len">${lengthTag(connectedChampLength() ?? netLength())}${connectedChampLength() ? '' : ` · ${t('len.champNote')}`}</small><button class="cta alt" id="n-champ">${t('net.startChamp', { n: c.round })}</button></div>`; })() : ''}
     </div>
     <p><small>${t(accounts.account ? 'career.onlineNote' : accountsOn() ? 'career.guestNote' : 'career.noAccounts')}</small></p>
     <p id="n-msg" class="net-msg" role="status" aria-live="polite"></p>
@@ -1072,13 +1110,23 @@ function showOnline(): void {
     if (c.length !== LIMITS.codeLength) { say(t('net.err.code')); code.focus(); return; }
     void netBegin((s) => s.join(c, w.n, netLivery(), w.expect));
   };
-  overlay.querySelector('#n-create')!.addEventListener('click', () => { const w = who(); if (w) void netBegin((s) => s.create(w.n, 'multiplayer', { track: T.DEF.id, aiFill: overlay.querySelector<HTMLInputElement>('#n-ai')!.checked }, netLivery(), w.expect)); });
+  // the length goes only to a server that runs presets (NetSession drops it otherwise): such a room is Standard
+  bindRadios('nrlen', (id) => {
+    chooseLength(id);
+    const note = overlay.querySelector('.rlen .len-note');
+    if (note) note.textContent = t('net.lengthNote', { len: lengthTag(netLength()) });
+    const cl = overlay.querySelector('#n-champ-len');
+    if (cl && !connectedChampLength()) cl.textContent = `${lengthTag(netLength())} · ${t('len.champNote')}`;
+  });
+  overlay.querySelector('#n-create')!.addEventListener('click', () => { const w = who(); if (w) void netBegin((s) => s.create(w.n, 'multiplayer', { track: T.DEF.id, aiFill: overlay.querySelector<HTMLInputElement>('#n-ai')!.checked, length: netLength() }, netLivery(), w.expect)); });
   overlay.querySelector('#n-join')!.addEventListener('click', join);
-  overlay.querySelector('#n-solo')!.addEventListener('click', () => { const w = who(); if (w) void netBegin((s) => s.create(w.n, 'solo', { track: T.DEF.id }, netLivery(), w.expect)); });
+  overlay.querySelector('#n-solo')!.addEventListener('click', () => { const w = who(); if (w) void netBegin((s) => s.create(w.n, 'solo', { track: T.DEF.id, length: netLength() }, netLivery(), w.expect)); });
   overlay.querySelector('#n-champ')?.addEventListener('click', () => {
     const w = who(); if (!w) return;
     const c = connectedChamp();
-    void netBegin((s) => s.create(w.n, 'championship', { track: R.CHAMP_TRACKS[c.round - 1] }, netLivery(), w.expect, c));
+    // the championship's length is chosen when its first round is started, and every later round keeps it (#132)
+    const length = connectedChampLength() ?? keepConnectedChampLength(c, netLength());
+    void netBegin((s) => s.create(w.n, 'championship', { track: R.CHAMP_TRACKS[c.round - 1], length }, netLivery(), w.expect, c));
   });
   overlay.querySelector('#n-back')!.addEventListener('click', () => { netNotice = ''; showTitle(); });
 }
@@ -1385,30 +1433,55 @@ function localCareerNote(): string {
   return `<p class="career-note"><small>${t(accounts.account ? 'career.localNote' : 'career.localNoteGuest')}</small></p>`;
 }
 
-/** This account's connected championship (round 1-4), kept per account in account-scoped storage. */
-function connectedChamp(): ChampionshipTag {
+/** The race lengths the connected server runs (#132): none from a server older than presets, which races Standard only. */
+const netLengths = (): readonly RaceLengthId[] => (online.state === 'available' ? online.lengths : []);
+/** The length a new online room asks for: the remembered choice when this server runs it, else Standard. */
+const netLength = (): RaceLengthId => (netLengths().includes(raceLen) ? raceLen : 'standard');
+
+/** This account's stored connected championship: its tag (round 1-4) and, once its first round started, its length (#132). */
+function readConnectedChamp(): { tag: ChampionshipTag; length: RaceLengthId | null } | null {
   const id = accounts.account?.id;
-  const fresh = (): ChampionshipTag => ({ id: `cc-${Date.now().toString(36)}`, round: 1 });
-  if (!id) return fresh();
+  if (!id) return null;
   try {
-    const v = JSON.parse(localStorage.getItem(accountKey(id, 'cchamp')) ?? 'null') as ChampionshipTag | null;
-    if (v && typeof v.id === 'string' && v.id.length <= 64 && Number.isInteger(v.round) && v.round >= 1 && v.round <= R.CHAMP_TRACKS.length) return v;
+    const v = JSON.parse(localStorage.getItem(accountKey(id, 'cchamp')) ?? 'null') as (ChampionshipTag & { length?: unknown }) | null;
+    if (v && typeof v.id === 'string' && v.id.length <= 64 && Number.isInteger(v.round) && v.round >= 1 && v.round <= R.CHAMP_TRACKS.length) {
+      // a championship stored before presets has no length: it was raced at Standard, so it continues at Standard
+      return { tag: { id: v.id, round: v.round }, length: v.length === undefined ? (v.round > 1 ? 'standard' : null) : lengthOr(v.length) };
+    }
   } catch { /* ignore */ }
-  const c = fresh();
-  try { localStorage.setItem(accountKey(id, 'cchamp'), JSON.stringify(c)); } catch { /* ignore */ }
+  return null;
+}
+function writeConnectedChamp(tag: ChampionshipTag, length: RaceLengthId | null): void {
+  const id = accounts.account?.id;
+  if (!id) return;
+  try { localStorage.setItem(accountKey(id, 'cchamp'), JSON.stringify(length ? { ...tag, length } : tag)); } catch { /* ignore */ }
+}
+/** This account's connected championship (round 1-4), kept per account in account-scoped storage. Only `id` and `round` go to the server. */
+function connectedChamp(): ChampionshipTag {
+  const had = readConnectedChamp();
+  if (had) return had.tag;
+  const c: ChampionshipTag = { id: `cc-${Date.now().toString(36)}`, round: 1 };
+  writeConnectedChamp(c, null);
   return c;
+}
+/** The length this account's connected championship is racing, or null before its first round has been started. */
+const connectedChampLength = (): RaceLengthId | null => readConnectedChamp()?.length ?? null;
+/** Fix the championship's length as its first round is started; later rounds and resumes keep it. */
+function keepConnectedChampLength(c: ChampionshipTag, length: RaceLengthId): RaceLengthId {
+  writeConnectedChamp(c, length);
+  return length;
 }
 /** A connected championship round the server classified: the next one is offered (after round 4, a new championship). */
 function advanceConnectedChamp(r: ResultView): void {
   const id = accounts.account?.id;
   const c = r.championship;
   if (!id || !c || r.outcome !== 'completed') return;
-  const cur = connectedChamp();
-  if (cur.id !== c.id || cur.round !== c.round) return;
-  try {
-    if (c.round >= R.CHAMP_TRACKS.length) localStorage.removeItem(accountKey(id, 'cchamp'));
-    else localStorage.setItem(accountKey(id, 'cchamp'), JSON.stringify({ id: c.id, round: c.round + 1 }));
-  } catch { /* ignore */ }
+  const cur = readConnectedChamp();
+  if (!cur || cur.tag.id !== c.id || cur.tag.round !== c.round) return;
+  // the next round keeps the length this one was raced at (the server's own record of it, else the stored choice)
+  const length = r.settings?.length ? lengthOr(r.settings.length) : cur.length ?? 'standard';
+  if (c.round >= R.CHAMP_TRACKS.length) { try { localStorage.removeItem(accountKey(id, 'cchamp')); } catch { /* ignore */ } }
+  else writeConnectedChamp({ id: c.id, round: c.round + 1 }, length);
 }
 
 function onNetAwards(a: AwardsView): void {
@@ -1457,7 +1530,7 @@ function careerHtml(s: CareerStats): string {
   const c = s.career;
   const tile = (v: number | string, label: string, id: string): string => `<div class="tile" data-k="${id}"><b class="mono">${v}</b><small>${label}</small></div>`;
   const bests = s.bests.length ? `<div class="tscroll"><table><thead><tr><th>${t('career.circuit')}</th><th>${t('career.mode')}</th><th>${t('res.best')}</th></tr></thead><tbody>${s.bests.map((b) => `<tr data-mode="${b.mode}"><td>${t(`track.${b.track}.name`)}${b.current ? '' : ` <small>(${t('career.oldLayout')})</small>`}</td><td>${careerMode(b.mode)}</td><td class="mono">${R.fmtMs(b.lapMs)} <small>${t('career.lapN', { n: b.lap })} · ${fmtDate(b.setAt)}</small></td></tr>`).join('')}</tbody></table></div>` : `<p><small>${t('career.noBests')}</small></p>`;
-  const recent = s.recent.length ? `<div class="tscroll"><table><thead><tr><th>${t('career.date')}</th><th>${t('career.mode')}</th><th>${t('career.circuit')}</th><th>#</th><th>${t('champ.points')}</th></tr></thead><tbody>${s.recent.map((x) => `<tr data-race="${esc(x.raceId)}"><td>${fmtDate(x.finishedAt)}</td><td>${careerMode(x.mode)}${x.championship ? ` <small>R${x.championship.round}</small>` : ''}</td><td>${t(`track.${x.track}.name`)}</td><td>${x.status === 'dq' ? t('res.dq') : x.status === 'dnf' ? t('res.dnf') : `P${x.pos}/${x.field}`}</td><td class="mono">${x.points}</td></tr>`).join('')}</tbody></table></div>` : `<p><small>${t('career.noRaces')}</small></p>`;
+  const recent = s.recent.length ? `<div class="tscroll"><table><thead><tr><th>${t('career.date')}</th><th>${t('career.mode')}</th><th>${t('career.circuit')}</th><th>#</th><th>${t('champ.points')}</th></tr></thead><tbody>${s.recent.map((x) => `<tr data-race="${esc(x.raceId)}"><td>${fmtDate(x.finishedAt)}</td><td>${careerMode(x.mode)}${x.championship ? ` <small>R${x.championship.round}</small>` : ''} <small class="len">${lengthName(lengthOr(x.length))}</small></td><td>${t(`track.${x.track}.name`)}</td><td>${x.status === 'dq' ? t('res.dq') : x.status === 'dnf' ? t('res.dnf') : `P${x.pos}/${x.field}`}</td><td class="mono">${x.points}</td></tr>`).join('')}</tbody></table></div>` : `<p><small>${t('career.noRaces')}</small></p>`;
   return `<h3>${t('career.title')} · <span class="nm">${esc(s.displayName)}</span></h3>
     <div class="tiles">${tile(c.points, t('career.points'), 'points')}${tile(c.wins, '🥇', 'wins')}${tile(c.seconds, '🥈', 'seconds')}${tile(c.thirds, '🥉', 'thirds')}${tile(c.races, t('career.races'), 'races')}</div>
     <p><small>${t('career.policy', { a: s.scoring.podium[0] ?? 0, b: s.scoring.podium[1] ?? 0, c: s.scoring.podium[2] ?? 0 })}</small></p>
@@ -1466,6 +1539,9 @@ function careerHtml(s: CareerStats): string {
 }
 
 function onNetNack(m: Extract<ServerMsg, { t: 'nack' }>): void {
+  // a refused settings change (say, a length a seated older page cannot show, #132) leaves the room as it was: redraw the
+  // lobby so its selectors show the room's real settings again, then say why
+  if (m.ref === 'settings' && screen === 'lobby') showLobby();
   if (['start', 'settings', 'rematch', 'ready', 'livery'].includes(m.ref)) {
     const el = overlay.querySelector('#l-msg');
     if (el) el.textContent = t(m.code === 'not_ready' ? 'net.err.notReady' : refusalText(m.code)) + (m.detail ? ` (${m.detail})` : '');
@@ -1517,6 +1593,12 @@ function showLobby(): void {
   const others = r.participants.filter((p) => p.id !== r.hostId && !p.left);
   const waitingFor = r.participants.length < r.minHumans ? t('net.needMore', { n: r.minHumans }) : r.participants.some((p) => !p.connected) ? t('net.waitConn') : others.some((p) => !p.ready) ? t('net.waitReady') : '';
   const trackTabs = host && r.mode !== 'championship' ? `<div class="tabs" role="radiogroup">${T.TRACKS.map((d) => `<button class="tab ${d.id === r.settings.track ? 'sel' : ''}" data-ntrack="${d.id}">${t(`track.${d.id}.name`)}</button>`).join('')}</div>` : `<div class="lobby-track">${t(`track.${r.settings.track}.name`)}</div>`;
+  // the race length (#132): every driver sees it before Ready/Start; only the host changes it, and only on a server that runs
+  // presets (its rooms carry `length`). A championship round keeps its championship's length
+  const len = lengthOr(r.settings.length);
+  const lenRow = host && r.settings.length !== undefined && r.mode !== 'championship' && r.mode !== 'practice' && net.lengths.length > 1
+    ? lengthRadiosHtml('nlen', len, net.lengths)
+    : `<div class="lbl2">${t('len.label')}</div><div class="lobby-track lobby-len" id="l-len">${lengthTag(len)}</div>`;
   const aiRow = r.mode === 'multiplayer' ? (host ? `<label class="chk"><input type="checkbox" id="l-ai" ${r.settings.aiFill ? 'checked' : ''}> ${t('net.aiFill')}</label>` : `<small>${t(r.settings.aiFill ? 'net.aiOn' : 'net.aiOff')}</small>`) : '';
   const aiRows = r.ai.map((a) => `<tr class="ai"><td class="mono">#${a.num}</td><td>${colorDot(a.color)}<span class="nm">${esc(a.name)}</span></td><td><span class="chip dim">${t('net.aiSlot')}</span></td></tr>`).join('');
   const free = r.maxHumans - r.participants.filter((p) => !p.left).length;
@@ -1527,6 +1609,7 @@ function showLobby(): void {
     <div class="row"><button class="cta alt small" id="l-copy">${t('net.copy')}</button>${typeof navigator.share === 'function' ? `<button class="cta alt small" id="l-share">${t('net.share')}</button>` : ''}</div>` : `<h2>${r.mode === 'championship' && r.championship ? t('net.champRound', { n: r.championship.round, m: R.CHAMP_TRACKS.length }) : t('net.modeSolo')}</h2>`}
     <div class="lbl2">${t('title.track')}</div>
     ${trackTabs}
+    ${lenRow}
     ${aiRow}
     <div class="tscroll"><table><thead><tr><th>${t('net.num')}</th><th>${t('res.driver')}</th><th>${t('net.state')}</th></tr></thead><tbody>${r.participants.map((p) => seatRow(p, r.hostId)).join('')}${aiRows}</tbody></table></div>
     ${r.mode === 'multiplayer' ? `<p><small>${t('net.seats', { n: Math.max(0, free), m: r.maxHumans })}</small></p>` : ''}
@@ -1546,6 +1629,7 @@ function showLobby(): void {
   });
   overlay.querySelector('#l-share')?.addEventListener('click', () => { void navigator.share({ title: t('title.name'), text: shareText(), url: `${location.origin}${location.pathname}#room=${r.code}` }).catch(() => undefined); });
   overlay.querySelectorAll<HTMLElement>('[data-ntrack]').forEach((b) => b.addEventListener('click', () => net?.settings({ track: b.dataset.ntrack! })));
+  bindRadios('nlen', (id) => { chooseLength(id); net?.settings({ length: lengthOr(id) }); });
   overlay.querySelector<HTMLInputElement>('#l-ai')?.addEventListener('change', (e) => net?.settings({ aiFill: (e.target as HTMLInputElement).checked }));
   overlay.querySelectorAll<HTMLElement>('[data-mylivery]').forEach((b) => b.addEventListener('click', () => { try { localStorage.setItem(NLIV_KEY, b.dataset.mylivery!); } catch { /* ignore */ } net?.livery(b.dataset.mylivery as LiveryId); }));
   overlay.querySelector('#l-start')?.addEventListener('click', () => net?.start());
@@ -1630,7 +1714,7 @@ function renderNetWait(): void {
   const p = me();
   const rows = race.order().map((c) => ({
     id: c.id, name: c.name, color: c.color, num: c.num, pos: null, status: c.status, time: c.status === 'finished' ? c.finishTime + c.timePen : null,
-    best: c.bestLap, pits: c.pitStops, reason: c.status === 'dq' ? t(`res.dqReason.${c.dqReason}`) : c.status === 'dnf' ? t(`net.dnf.${c.dnfReason}`) : flags(c), lap: `${Math.min(LAPS, c.lapsDone + 1)}/${LAPS}`,
+    best: c.bestLap, pits: c.pitStops, reason: c.status === 'dq' ? t(`res.dqReason.${c.dqReason}`) : c.status === 'dnf' ? t(`net.dnf.${c.dnfReason}`) : flags(c), lap: `${Math.min(race.targetLaps, c.lapsDone + 1)}/${race.targetLaps}`,
   }));
   const head = p.status === 'dq' ? `${t('res.youDq')} · ${t(`res.dqReason.${p.dqReason}`)}` : p.status === 'dnf' ? t('res.youDnf') : t('net.youFinished');
   const body = standingRows(rows);
@@ -1661,7 +1745,7 @@ function showNetResults(r: ResultView): void {
   }
   const canRematch = room?.state === 'results' && room.raceId === r.raceId;
   overlay.innerHTML = `<div class="card results netres" data-race="${esc(r.raceId)}">
-    <div class="lbl2">${modeLabel(r.mode)} · ${t(`track.${r.track.id}.name`)}</div>
+    <div class="lbl2">${modeLabel(r.mode)} · ${t(`track.${r.track.id}.name`)} · ${lengthTag(lengthOr(r.settings?.length))}</div>
     <h2>${t('net.finalTitle')}</h2>
     <div class="place">${head}</div>
     ${body}
@@ -1786,15 +1870,17 @@ if (ONLINE_ENABLED) {
  * without a server, so the banner layout can be checked in the default build, where online play is off. The session has no
  * socket and never opens one (its constructor throws); calling again with another state re-renders the same room.
  */
-function qaNetLobby(room: PublicRoom, meId: string, conn: Conn): void {
+function qaNetLobby(room: PublicRoom, meId: string, conn: Conn, lengths?: RaceLengthId[]): void {
   if (!net) {
     const NoSocket = function () { throw new Error('qa lobby: no socket'); } as unknown as SocketCtor;
     net = new NetSession('', NoSocket, {}, null);
     mode = 'online';
   }
+  // `lengths`: the race-length presets the pretend server's welcome lists (#132); omitted, a server older than presets
+  net.client.welcome = lengths ? { t: 'welcome', v: 0, server: 'qa', rules: 'qa', now: 0, lengths } : null;
   net.room = room; net.me = meId; net.conn = conn;
   showLobby();
   syncBanner();
 }
 
-(window as unknown as { __game: unknown }).__game = { get online() { return online; }, get auth() { return { state: accounts.auth.state, busy: accounts.busy, displayName: accounts.account?.displayName ?? null }; }, get net() { return net && { conn: net.conn, me: net.me, room: net.room, result: net.result, reconnects: net.reconnects, tick: netTick, lagMs: netLag, buf: netBuf.stats, raceId: netRaceId, held: net.client.held, ctlSeq: net.client.ctlSeq, actSeq: net.client.actSeq }; }, netDrop: () => net?.client.ws?.close(4000, 'qa drop'), qaNetLobby, get race() { return race; }, T, R, applyTrack, startSession, showTitle, get mode() { return mode; }, get preset() { return preset; }, get touchMode() { return touchMode; }, setTouchMode, input, get audio() { return sfx.ctx?.state ?? null; }, get muted() { return sfx.muted; }, suspendAudio: () => sfx.ctx?.suspend(), get champ() { return champ; }, get bays() { return bayPaint; }, get ghost() { return ghost; }, get pbMs() { return pbMs; }, get screen() { return screen; }, get view() { return camMode; }, get aspect() { return camera.aspect; }, get mini() { return { w: hud.mW, h: hud.mH }; }, stepper, advance: (sec: number) => { for (let t = 0; t < sec && simulating(); t += STEP) tick(STEP); }, setView: (m: 'follow' | 'full') => { camMode = m; }, zoom: (span: number) => { camMode = 'follow'; followSpan = span; curSpan = span; }, snapCam: () => { const p = me(); camLead.set(0, 0); camTarget.set(p.x, 0, -p.y); }, get marker() { return playerMarker; }, get localId() { return localId; }, setLocalSlot: (n: number) => { localSlot = Math.max(0, Math.min(DRIVERS.length - 1, Math.floor(n))); }, get camTarget() { return { x: camTarget.x, z: camTarget.z }; }, get motorMix() { return motorMix; }, arrows: { lane: laneArrow, pit: pitArrow }, info: () => ({ calls: renderer.info.render.calls, tris: renderer.info.render.triangles, objects: world.root.children.length, frames: renderer.info.render.frame, geometries: renderer.info.memory.geometries, textures: renderer.info.memory.textures }) };
+(window as unknown as { __game: unknown }).__game = { get online() { return online; }, get auth() { return { state: accounts.auth.state, busy: accounts.busy, displayName: accounts.account?.displayName ?? null }; }, get net() { return net && { conn: net.conn, me: net.me, room: net.room, result: net.result, reconnects: net.reconnects, tick: netTick, lagMs: netLag, buf: netBuf.stats, raceId: netRaceId, held: net.client.held, ctlSeq: net.client.ctlSeq, actSeq: net.client.actSeq }; }, netDrop: () => net?.client.ws?.close(4000, 'qa drop'), qaNetLobby, get race() { return race; }, T, R, applyTrack, startSession, showTitle, get mode() { return mode; }, get preset() { return preset; }, get touchMode() { return touchMode; }, setTouchMode, input, get audio() { return sfx.ctx?.state ?? null; }, get muted() { return sfx.muted; }, suspendAudio: () => sfx.ctx?.suspend(), get champ() { return champ; }, get raceLen() { return raceLen; }, get bays() { return bayPaint; }, get ghost() { return ghost; }, get pbMs() { return pbMs; }, get screen() { return screen; }, get view() { return camMode; }, get aspect() { return camera.aspect; }, get mini() { return { w: hud.mW, h: hud.mH }; }, stepper, advance: (sec: number) => { for (let t = 0; t < sec && simulating(); t += STEP) tick(STEP); }, setView: (m: 'follow' | 'full') => { camMode = m; }, zoom: (span: number) => { camMode = 'follow'; followSpan = span; curSpan = span; }, snapCam: () => { const p = me(); camLead.set(0, 0); camTarget.set(p.x, 0, -p.y); }, get marker() { return playerMarker; }, get localId() { return localId; }, setLocalSlot: (n: number) => { localSlot = Math.max(0, Math.min(DRIVERS.length - 1, Math.floor(n))); }, get camTarget() { return { x: camTarget.x, z: camTarget.z }; }, get motorMix() { return motorMix; }, arrows: { lane: laneArrow, pit: pitArrow }, info: () => ({ calls: renderer.info.render.calls, tris: renderer.info.render.triangles, objects: world.root.children.length, frames: renderer.info.render.frame, geometries: renderer.info.memory.geometries, textures: renderer.info.memory.textures }) };

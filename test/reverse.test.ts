@@ -2,7 +2,8 @@
 // collisions, timing and penalty integrity, fuel, and the shared keyboard/touch input. See docs/reverse.md.
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import * as T from '../src/track';
-import { Car, Input, LAPS, PEN, Race, REV, REV_CAP, REV_PIT_MIN, VMAX } from '../src/race';
+import { Car, Input, PEN, Race, REV, REV_CAP, REV_PIT_MIN, VMAX } from '../src/race';
+import { LAPS } from './helpers';
 import { DrivingInput, PadButton, TouchPad } from '../src/input';
 import { reversing } from '../src/hud';
 import { DT, NONE, UP, crossLine, fresh, msgs, place, seedRandom, stepEvents, all, me } from './helpers';

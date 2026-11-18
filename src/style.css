@@ -135,6 +135,13 @@ small { color: #9ca3af; font-weight: 500; }
 .tab { font: inherit; font-size: 12px; font-weight: 700; padding: 6px 10px; border-radius: 8px; border: 1px solid rgba(255,255,255,0.14); background: rgba(255,255,255,0.05); color: #d1d5db; cursor: pointer; }
 .tab.sel { background: #ffd23f; color: #1a1205; border-color: #ffd23f; }
 .tab.kind.sel { background: #22d3ee; border-color: #22d3ee; color: #062a33; }
+/* race-length presets (#132): the name over its lap count, so three choices fit side by side on a phone */
+.tab.len { display: inline-flex; flex-direction: column; align-items: center; justify-content: center; gap: 1px; min-width: 78px; line-height: 1.15; }
+.tab.len b { font-weight: 800; }
+.tab.len small { font-size: 10.5px; font-weight: 600; opacity: 0.85; }
+.len-note { display: block; max-width: 300px; margin: 0 auto; color: #9ca3af; text-align: center; }
+.lobby-len { color: #ffe066; }
+.champ-len { color: #ffe066; }
 .boards table, .champ table { min-width: 460px; }
 .results tr.fresh td { color: #ffe066; font-weight: 800; }
 .results td.empty { text-align: center; color: #9ca3af; padding: 18px; }

@@ -12,6 +12,7 @@ import {
 } from '../src/net/protocol';
 import { SnapEncoder } from '../src/net/snapwire';
 import { CHAMP_TRACKS } from '../src/records';
+import { DEFAULT_LENGTH, LENGTH_SET, isRaceLengthId, knowsLength, raceLength, type RaceLengthId } from '../src/raceLength';
 import { computeAwards, makeScoring, type Scoring } from './career';
 import type { Config } from './config';
 import type { Logger } from './log';
@@ -50,6 +51,11 @@ interface Participant {
   left: boolean;
   /** drives a car in the current race (roster locked at the start) */
   inRace: boolean;
+  /**
+   * the race-length preset list this seat's page can show (#132: `lengths` on create/join; 0 for a page older than presets,
+   * which knows Standard only). Kept for the seat, so a resume never has to repeat it.
+   */
+  lengths: number;
 }
 
 export interface ModeRules { maxHumans: number; minHumans: number; joinable: boolean; aiFill: 'setting' | 'always' | 'never'; practice: boolean; }
@@ -64,9 +70,8 @@ export const MODE_RULES: Record<Mode, ModeRules> = {
 const AI_NAMES = ['Gold Flash', 'Red Comet', 'Blue Arrow', 'Green Viper'];
 /** Run-on speed once every human is terminal: nobody is waiting on wall time, so the AI field is finished faster. */
 const RUNON_STEPS = 8;
-/** Seconds after the first finisher that a solo race (one human) waits before classifying the rest. */
-const SOLO_FINISH_WINDOW = 120;
-const RACE_TIME_LIMIT = 1200;
+// The finish window (multiplayer and one-human) and the race time limit come from the race's length preset
+// (src/raceLength.ts): Standard's are the 90 s / 120 s / 1200 s every race used before presets (#132).
 /**
  * An in-race seat is "away" (#74) when its connection is gone (in the reconnect hold) or when no `ctl` has arrived for longer
  * than this. The second case is the common mobile drop: the socket dies silently and the server only notices on its next ws
@@ -138,31 +143,41 @@ export class Room {
     this.rules = MODE_RULES[mode];
     this.championship = mode === 'championship' ? championship : null;
     this.createdAt = now; this.lastActivity = now; this.clock = now;
-    this.settings = { track: TRACK_IDS[0], aiFill: this.rules.aiFill === 'always' };
-    const bad = this.applySettings(settings);
-    if (bad) throw new Error(bad);
+    this.settings = { track: TRACK_IDS[0], aiFill: this.rules.aiFill === 'always', length: DEFAULT_LENGTH };
+    const next = this.nextSettings(settings, true);
+    if (typeof next === 'string') throw new Error(next);
+    this.settings = next;
     this.snapMs = 1000 / deps.cfg.snapshotHz;
   }
 
   private get log(): Logger { return this.deps.log; }
   private get cfg(): Config { return this.deps.cfg; }
 
-  /** Validate and apply settings; returns an error detail or null. */
-  private applySettings(s: Partial<RoomSettings>): string | null {
+  /**
+   * The settings a request would give the room, or an error detail. Nothing is applied here. `length` (#132) must be an
+   * allowlisted preset id; a championship round's length is chosen when its room is created and fixed from then on.
+   */
+  private nextSettings(s: Partial<RoomSettings>, creating = false): RoomSettings | string {
     if (s.track !== undefined && !isTrackId(s.track)) return 'unknown track';
     if (s.aiFill !== undefined && this.rules.aiFill !== 'setting' && s.aiFill !== (this.rules.aiFill === 'always')) return `aiFill is fixed for ${this.mode}`;
+    if (s.length !== undefined && !isRaceLengthId(s.length)) return 'unknown race length';
+    const length: RaceLengthId = s.length ?? this.settings.length ?? DEFAULT_LENGTH;
+    // practice never ends on a lap count, so it has no length to choose: it stays the Standard default
+    if (this.rules.practice && length !== DEFAULT_LENGTH) return 'practice has no race length';
     if (this.mode === 'championship') {
       // a connected championship round runs on that round's circuit (the local championship calendar)
       const c = this.championship;
       if (!c || c.round > CHAMP_TRACKS.length) return `championship round 1-${CHAMP_TRACKS.length} required`;
       const want = CHAMP_TRACKS[c.round - 1];
       if (s.track !== undefined && s.track !== want) return `round ${c.round} runs on ${want}`;
-      this.settings = { track: want, aiFill: true };
-      return null;
+      if (!creating && length !== this.settings.length) return 'a championship round keeps the length it was created with';
+      return { track: want, aiFill: true, length };
     }
-    this.settings = { track: s.track ?? this.settings.track, aiFill: s.aiFill ?? this.settings.aiFill };
-    return null;
+    return { track: s.track ?? this.settings.track, aiFill: s.aiFill ?? this.settings.aiFill, length };
   }
+
+  /** The race length this room's next race will have (always set on a current server; Standard if somehow absent). */
+  get length(): RaceLengthId { return this.settings.length ?? DEFAULT_LENGTH; }
 
   // ------------------------------------------------------------------------------------------------ seats
   private active(): Participant[] { return this.parts.filter((p) => !p.left); }
@@ -178,10 +193,14 @@ export class Room {
   }
   private takenLiveries(except?: Participant): Set<LiveryId> { return new Set(this.parts.filter((p) => p !== except && !p.left).map((p) => p.livery)); }
 
-  join(peer: Peer, o: { name: string; livery?: LiveryId; accountId: string | null }, now: number, creator = false): JoinOk | Fail {
+  join(peer: Peer, o: { name: string; livery?: LiveryId; accountId: string | null; lengths?: number }, now: number, creator = false): JoinOk | Fail {
     if (this.state === 'closed') return { ok: false, code: 'not_found' };
     if (!creator && !this.rules.joinable) return { ok: false, code: 'not_found' };
     if (this.state !== 'lobby') return { ok: false, code: 'started', detail: 'the starting roster is locked' };
+    // a page that cannot show this room's race length (one older than presets, #132) would count laps to the wrong flag:
+    // it is refused (and told to reload) rather than seated. A creator's own page always knows what it asked for
+    const lengths = Math.min(LENGTH_SET, o.lengths ?? 0);
+    if (!knowsLength(lengths, this.length)) return { ok: false, code: 'bad_settings', detail: `this room races ${raceLength(this.length).laps} laps (${this.length}): reload the page to join` };
     if (o.accountId && this.parts.some((p) => p.accountId === o.accountId && !p.left)) return { ok: false, code: 'already_joined', detail: 'resume your existing seat' };
     const used = new Set(this.parts.map((p) => p.slot));
     if (this.humans >= this.rules.maxHumans || used.size >= DRIVERS.length) return { ok: false, code: 'full' };
@@ -194,7 +213,7 @@ export class Room {
       id: `p_${randomBytes(9).toString('base64url')}`, name, accountId: o.accountId, slot, livery,
       liveryRequested: o.livery && o.livery !== livery ? o.livery : null,
       ready: false, joinOrder: this.joins++, tokenHash: hashToken(token), peer, lostAt: null,
-      held: neutral(), ctlSeq: 0, ctlAt: now, actSeq: 0, left: false, inRace: false,
+      held: neutral(), ctlSeq: 0, ctlAt: now, actSeq: 0, left: false, inRace: false, lengths,
     };
     this.parts.push(p);
     this.ensureHost();
@@ -315,9 +334,13 @@ export class Room {
       }
       case 'settings': {
         if (!host) return nack('forbidden', 'only the room host changes settings');
+        // settings are the lobby's (and the results screen's, before a rematch): a race's length and circuit are frozen at its start
         if (this.state !== 'lobby' && this.state !== 'results') return nack('bad_state');
-        const bad = this.applySettings(m.settings);
-        if (bad) return nack('bad_settings', bad);
+        const next = this.nextSettings(m.settings);
+        if (typeof next === 'string') return nack('bad_settings', next);
+        // every seated page must be able to show the race length (#132): one older than presets keeps the room on Standard
+        if (this.active().some((x) => !knowsLength(x.lengths, next.length!))) return nack('bad_settings', 'a driver\'s page is out of date for that race length: they must reload first');
+        this.settings = next;
         for (const x of this.parts) if (x !== p) x.ready = false;   // the race changed: everyone confirms again
         this.touch(now); this.broadcastRoom();
         return null;
@@ -362,11 +385,13 @@ export class Room {
     }
     const humans = act.length;
     const seed = this.deps.seed ? this.deps.seed() : randomInt(1, 2 ** 31);
+    // the lap target is the race's own, frozen here (#132): settings cannot change until the race has its result
+    const len = raceLength(this.length);
     this.race = new Race({
       track: trackById(this.settings.track),
       roster: this.roster.map(({ id, control, slot, name, color }) => ({ id, control, slot, name, color })),
-      seed, practice: this.rules.practice, runOn: 'live',
-      finishWindow: humans > 1 ? 90 : SOLO_FINISH_WINDOW, timeLimit: RACE_TIME_LIMIT,
+      seed, practice: this.rules.practice, runOn: 'live', length: len.id,
+      finishWindow: humans > 1 ? len.finishWindowS : len.soloFinishWindowS, timeLimit: len.timeLimitS,
     });
     this.raceId = randomUUID();
     this.enc = new SnapEncoder(this.raceId);
@@ -375,7 +400,7 @@ export class Room {
     this.state = 'race';
     this.baseWall = now; this.stepsDone = 0; this.lagSteps = 0; this.startedAt = now; this.greenAt = null;
     this.laps = []; this.evBuf = []; this.result = null; this.snapSlot = 0; this.snapTick = -1;
-    this.log.info('race.start', { room: this.id, race: this.raceId, track: this.settings.track, mode: this.mode, humans, ai: this.roster.length - humans });
+    this.log.info('race.start', { room: this.id, race: this.raceId, track: this.settings.track, length: len.id, mode: this.mode, humans, ai: this.roster.length - humans });
     this.touch(now);
     this.broadcastRoom();
     this.broadcastState(now);
@@ -532,7 +557,8 @@ export class Room {
     });
     const env = buildEnvelope({
       raceId: this.raceId!, roomId: this.id, mode: this.mode, championship: this.championship, outcome, abortReason: reason,
-      trackId: this.settings.track, settings: this.settings, participants,
+      // the length recorded is the race's own (fixed at its start), never a setting read afterwards
+      trackId: this.settings.track, settings: { ...this.settings, length: race.length.id }, participants,
       classification: outcome === 'completed' && race.final ? [...race.final] : null,
       laps: this.laps,
       times: {

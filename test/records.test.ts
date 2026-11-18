@@ -104,7 +104,8 @@ describe('championship', () => {
     localStorage.setItem('srgp.champ', JSON.stringify(old));
     localStorage.setItem('srgp.lb.race.circuit-1', JSON.stringify([{ id: 'a', initials: 'JD', car: 'frost', ms: 19000, at: 1 }]));
     const c = R.loadChamp()!;
-    expect(c).toEqual(old);
+    // #132: a save from before race-length presets loads as a Standard championship (the length it was raced at)
+    expect(c).toEqual({ ...old, length: 'standard' });
     expect(R.standings(c, 4).map((x) => [x.idx, x.points])).toEqual([[1, 10], [0, 6], [2, 4], [3, 0]]);
     expect(R.roundPoints(c.rounds[0], 1)).toBe(6);
     // a new round with a DQ is added beside it, and the old round is untouched
@@ -146,5 +147,37 @@ describe('championship', () => {
     d.rounds.push({ track: 'circuit-4', order: [{ idx: 2, dnf: false, time: 1 }, { idx: 0, dnf: false, time: 2 }, { idx: 1, dnf: false, time: 3 }, { idx: 3, dnf: false, time: 4 }] });
     // 0: 10+4+6=20 (1 win, 1 second); 1: 6+10+4=20 (1 win, 1 second); 2: 4+6+10=20 (1 win, 1 second) -> last round decides: 2, 0, 1
     expect(R.standings(d, 4).map((s) => s.idx)).toEqual([2, 0, 1, 3]);
+  });
+});
+
+describe('race length (#132)', () => {
+  it('the chosen length is remembered; nothing stored, an unknown value or broken storage reads as Standard', () => {
+    expect(R.savedLength()).toBe('standard');
+    R.saveLength('endurance');
+    expect(R.savedLength()).toBe('endurance');
+    expect(localStorage.getItem('srgp.raceLength')).toBe('"endurance"');
+    R.saveLength('marathon' as never);
+    expect(R.savedLength()).toBe('endurance');
+    localStorage.setItem('srgp.raceLength', '"marathon"');
+    expect(R.savedLength()).toBe('standard');
+    localStorage.setItem('srgp.raceLength', '{not json');
+    expect(R.savedLength()).toBe('standard');
+    const broken = { getItem: () => { throw new Error('denied'); }, setItem: () => { throw new Error('denied'); }, removeItem: () => { throw new Error('denied'); } };
+    vi.stubGlobal('localStorage', broken);
+    expect(() => R.saveLength('sprint')).not.toThrow();
+    expect(R.savedLength()).toBe('standard');
+  });
+
+  it('a championship keeps the length it was started with through save and resume; an old save is Standard', () => {
+    const c = R.newChamp('blaze', 'JD', 'sprint');
+    expect(c.length).toBe('sprint');
+    c.rounds.push(R.roundRecord('circuit-1', [{ car: { idx: 0 }, status: 'finished', time: 80 }]));
+    R.saveChamp(c);
+    R.saveLength('endurance');   // a later change of the setting never reaches a championship under way
+    expect(R.loadChamp()).toMatchObject({ length: 'sprint', rounds: [{ track: 'circuit-1' }] });
+    expect(R.newChamp('blaze', 'JD').length).toBe('standard');
+    expect(R.newChamp('blaze', 'JD', 'x' as never).length).toBe('standard');
+    localStorage.setItem('srgp.champ', JSON.stringify({ v: 1, car: 'frost', initials: 'JD', startedAt: 1, rounds: [], length: 'marathon' }));
+    expect(R.loadChamp()!.length).toBe('standard');
   });
 });

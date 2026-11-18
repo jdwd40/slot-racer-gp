@@ -1,7 +1,8 @@
 // Every circuit builds a closed loop with sane geometry, and an all-AI race on each stays numerically sound.
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import * as T from '../src/track';
-import { Race, LAPS, VMAX, AI_GRIP, AUTO } from '../src/race';
+import { Race, VMAX, AI_GRIP, AUTO } from '../src/race';
+import { LAPS } from './helpers';
 import { PIT_Q } from '../src/pitConst';
 import { seedRandom, NONE, DT, all, me } from './helpers';
 

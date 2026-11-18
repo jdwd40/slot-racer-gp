@@ -5,7 +5,8 @@
 // warning until the stop is served or the breach is latched. Rules are untouched; see docs/penalties.md.
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import * as T from '../src/track';
-import { Car, LAPS, Race, type RaceEvent, type WireEvent } from '../src/race';
+import { Car, Race, type RaceEvent, type WireEvent } from '../src/race';
+import { LAPS } from './helpers';
 import { mirrorRace, localEvent } from '../src/net/mirror';
 import { DT, all, fresh, me, place, seedRandom } from './helpers';
 

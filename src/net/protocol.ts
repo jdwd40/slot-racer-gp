@@ -2,6 +2,7 @@
 // secrets, no Node or DOM APIs, so the browser bundle can import it. See docs/online-server.md for the message reference.
 import type { ActionType, Input } from '../race';
 import type { StateFrame } from './snapwire';
+import type { RaceLengthId } from '../raceLength';
 
 /**
  * Wire protocol version. Bump on any incompatible message change; a client and server must agree exactly. History: 1 first
@@ -48,6 +49,12 @@ export interface RoomSettings {
   track: string;
   /** fill the seats no human takes with AI cars (always on for solo and championship, never for practice) */
   aiFill: boolean;
+  /**
+   * Race-length preset (#132, src/raceLength.ts). Optional on the wire both ways: a client that omits it gets Standard, and
+   * a server older than presets never sends it (its races are all Standard). A current server always includes it in rooms
+   * and result envelopes. Only an allowlisted id is accepted; there is no lap-count setting.
+   */
+  length?: RaceLengthId;
 }
 
 export interface ChampionshipTag { id: string; round: number; }
@@ -58,10 +65,15 @@ export interface ChampionshipTag { id: string; round: number; }
  * identity (that only ever comes from the socket's session); a socket whose sign-in differs is refused, `expired`/`session`,
  * instead of entering under an identity the page does not show (a session that expired before the socket opened).
  */
+/**
+ * `lengths` on create/join (#132): the race-length preset list this client can show (src/raceLength.ts LENGTH_SET). Sent only
+ * to a server whose `welcome` lists presets (an older server refuses unknown fields). Omitted means a client older than
+ * presets: the server keeps it out of any race of a preset it cannot show (refused with `bad_settings`).
+ */
 export type ClientMsg =
   | { t: 'hello'; v: number; proto: string }
-  | { t: 'create'; name: string; livery?: LiveryId; mode: Mode; settings: Partial<RoomSettings>; championship?: ChampionshipTag; expectAccount?: string }
-  | { t: 'join'; code: string; name: string; livery?: LiveryId; expectAccount?: string }
+  | { t: 'create'; name: string; livery?: LiveryId; mode: Mode; settings: Partial<RoomSettings>; championship?: ChampionshipTag; expectAccount?: string; lengths?: number }
+  | { t: 'join'; code: string; name: string; livery?: LiveryId; expectAccount?: string; lengths?: number }
   | { t: 'resume'; room: string; participant: string; token: string }
   | { t: 'ready'; ready: boolean }
   | { t: 'settings'; settings: Partial<RoomSettings> }
@@ -104,8 +116,9 @@ export type ErrorCode =
   | 'already_in_room' | 'forbidden' | 'stale' | 'duplicate' | 'out_of_order' | 'bad_state' | 'bad_settings' | 'not_ready'
   | 'unavailable' | 'superseded' | 'expired' | 'overloaded' | 'origin' | 'already_joined';
 
+/** `lengths` in `welcome` (#132): the race-length presets this server runs (absent: a server older than presets, Standard only). */
 export type ServerMsg =
-  | { t: 'welcome'; v: number; server: string; rules: string; now: number }
+  | { t: 'welcome'; v: number; server: string; rules: string; now: number; lengths?: RaceLengthId[] }
   | { t: 'joined'; room: PublicRoom; you: string; token: string; ctlSeq: number; actSeq: number; resumed: boolean }
   | { t: 'room'; room: PublicRoom }
   /**
@@ -147,16 +160,17 @@ export interface CareerStats {
   scoring: { version: string; podium: number[] };
   career: { points: number; races: number; wins: number; seconds: number; thirds: number; dq: number; dnf: number };
   bests: { track: string; trackVersion: string; current: boolean; mode: Mode; rules: string; lapMs: number; lap: number; livery: string; raceId: string; setAt: string }[];
-  recent: { raceId: string; mode: Mode; championship: ChampionshipTag | null; track: string; pos: number | null; status: 'finished' | 'dq' | 'dnf'; points: number; field: number; humans: number; scoring: string; rules: string; finishedAt: string }[];
+  /** `length`: the race's length preset (#132), Standard for every result stored before presets */
+  recent: { raceId: string; mode: Mode; championship: ChampionshipTag | null; track: string; length: RaceLengthId; pos: number | null; status: 'finished' | 'dq' | 'dnf'; points: number; field: number; humans: number; scoring: string; rules: string; finishedAt: string }[];
 }
 
 // ------------------------------------------------------------------------------------------------ validation
 export type Parsed = { ok: true; msg: ClientMsg } | { ok: false; code: 'malformed' | 'too_large'; ref: ClientMsgType | 'unknown' };
 
-const SHAPES: Record<ClientMsgType, Record<string, 'string' | 'number' | 'boolean' | 'object' | '?string' | '?object'>> = {
+const SHAPES: Record<ClientMsgType, Record<string, 'string' | 'number' | 'boolean' | 'object' | '?string' | '?object' | '?number'>> = {
   hello: { v: 'number', proto: 'string' },
-  create: { name: 'string', livery: '?string', mode: 'string', settings: 'object', championship: '?object', expectAccount: '?string' },
-  join: { code: 'string', name: 'string', livery: '?string', expectAccount: '?string' },
+  create: { name: 'string', livery: '?string', mode: 'string', settings: 'object', championship: '?object', expectAccount: '?string', lengths: '?number' },
+  join: { code: 'string', name: 'string', livery: '?string', expectAccount: '?string', lengths: '?number' },
   resume: { room: 'string', participant: 'string', token: 'string' },
   ready: { ready: 'boolean' },
   settings: { settings: 'object' },
@@ -166,6 +180,9 @@ const SHAPES: Record<ClientMsgType, Record<string, 'string' | 'number' | 'boolea
   act: { seq: 'number', type: 'string', driver: '?string' },
   ping: { id: 'number' },
 };
+
+/** the room settings a client may send (`length`, #132, is additive: older servers refuse it, so it is only sent to servers that list presets) */
+const SETTING_KEYS: readonly string[] = ['track', 'aiFill', 'length'];
 
 const utf8Len = (s: string): number => (typeof TextEncoder !== 'undefined' ? new TextEncoder().encode(s).length : s.length * 3);
 const isObj = (v: unknown): v is Record<string, unknown> => !!v && typeof v === 'object' && !Array.isArray(v);
@@ -197,22 +214,21 @@ export function parseClientMessage(raw: unknown): Parsed {
   if ((t === 'ctl' || t === 'act') && (!Number.isSafeInteger(v.seq) || (v.seq as number) < 1)) return bad;
   if (t === 'act' && v.type !== 'lane' && v.type !== 'pit' && v.type !== 'defer') return bad;
   if (t === 'ping' && !Number.isSafeInteger(v.id)) return bad;
-  if (t === 'create') {
-    if (!MODES.includes(v.mode as Mode)) return bad;
+  if ((t === 'create' || t === 'join') && v.lengths !== undefined && (!Number.isSafeInteger(v.lengths) || (v.lengths as number) < 0 || (v.lengths as number) > 99)) return bad;
+  if (t === 'create' || t === 'settings') {
+    // settings shape only: whether the track or length preset is one this server runs is the room's check (bad_settings)
     const s = v.settings as Record<string, unknown>;
-    for (const k of Object.keys(s)) if (k !== 'track' && k !== 'aiFill') return bad;
+    for (const k of Object.keys(s)) if (!SETTING_KEYS.includes(k)) return bad;
     if (s.track !== undefined && typeof s.track !== 'string') return bad;
     if (s.aiFill !== undefined && typeof s.aiFill !== 'boolean') return bad;
+    if (s.length !== undefined && (typeof s.length !== 'string' || s.length.length > 64)) return bad;
+  }
+  if (t === 'create') {
+    if (!MODES.includes(v.mode as Mode)) return bad;
     if (v.championship !== undefined) {
       const c = v.championship as Record<string, unknown>;
       if (Object.keys(c).some((k) => k !== 'id' && k !== 'round') || typeof c.id !== 'string' || c.id.length > 64 || !Number.isSafeInteger(c.round) || (c.round as number) < 1 || (c.round as number) > 99) return bad;
     }
-  }
-  if (t === 'settings') {
-    const s = v.settings as Record<string, unknown>;
-    for (const k of Object.keys(s)) if (k !== 'track' && k !== 'aiFill') return bad;
-    if (s.track !== undefined && typeof s.track !== 'string') return bad;
-    if (s.aiFill !== undefined && typeof s.aiFill !== 'boolean') return bad;
   }
   if ((t === 'create' || t === 'join' || t === 'livery') && v.livery !== undefined && !isLivery(v.livery)) return bad;
   return { ok: true, msg: v as ClientMsg };

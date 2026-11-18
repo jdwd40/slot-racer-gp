@@ -2,7 +2,8 @@
 // reservation lifecycles, the player's override and Brake held through automatic holds. See docs/pit-queue.md.
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import * as T from '../src/track';
-import { Car, Input, LAPS, PEN, Race, SERVICE_READY } from '../src/race';
+import { Car, Input, PEN, Race, SERVICE_READY } from '../src/race';
+import { LAPS } from './helpers';
 import { PIT_Q } from '../src/pitConst';
 import type { RaceEvent } from '../src/race';
 import { DT, NONE, UP, fresh, msgs, place, seedRandom, all, me, addSwitch } from './helpers';

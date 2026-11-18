@@ -2,6 +2,7 @@
 // ghosts and championship progress. Everything lives in localStorage under the
 // `srgp.` prefix and degrades silently when storage is unavailable.
 import * as T from './track';
+import { DEFAULT_LENGTH, isRaceLengthId, lengthOr, type RaceLengthId } from './raceLength';
 
 export const ANON = 'Annon';
 export const MAX_INITIALS = 3;
@@ -85,16 +86,20 @@ export const CHAMP_POINTS = [10, 6, 4, 2];
  * `dq` was added later: saves from before it simply have no disqualifications, so they load and score exactly as they did.
  */
 export interface RoundResult { track: string; order: { idx: number; dnf: boolean; dq?: boolean; time: number }[]; }
-export interface Championship { v: number; car: string; initials: string; rounds: RoundResult[]; startedAt: number; }
+/**
+ * `length` (#132): the race-length preset every round of this championship runs, chosen when it starts and kept through
+ * resume. Saves from before presets have none and load as Standard, the length they were raced at (loadChamp fills it in).
+ */
+export interface Championship { v: number; car: string; initials: string; rounds: RoundResult[]; startedAt: number; length: RaceLengthId; }
 const CHAMP_KEY = 'srgp.champ';
 
 export function loadChamp(): Championship | null {
   const c = get<Championship | null>(CHAMP_KEY, null);
   if (!c || c.v !== 1 || !Array.isArray(c.rounds)) return null;
-  return c;
+  return { ...c, length: lengthOr(c.length) };
 }
-export function newChamp(car: string, initials: string): Championship {
-  const c: Championship = { v: 1, car, initials, rounds: [], startedAt: Date.now() };
+export function newChamp(car: string, initials: string, length: RaceLengthId = DEFAULT_LENGTH): Championship {
+  const c: Championship = { v: 1, car, initials, rounds: [], startedAt: Date.now(), length: isRaceLengthId(length) ? length : DEFAULT_LENGTH };
   set(CHAMP_KEY, c);
   return c;
 }
@@ -138,3 +143,9 @@ export function standings(c: Championship, drivers: number): Standing[] {
   });
   return st.sort((a, b) => b.points - a.points || b.wins - a.wins || b.seconds - a.seconds || a.lastPos - b.lastPos);
 }
+
+// ---------------------------------------------------------------- race length (#132)
+const LENGTH_KEY = 'srgp.raceLength';
+/** The race length last chosen on this device (local and online setup share it); Standard when none or unreadable. */
+export function savedLength(): RaceLengthId { return lengthOr(get<unknown>(LENGTH_KEY, DEFAULT_LENGTH)); }
+export function saveLength(id: RaceLengthId): void { if (isRaceLengthId(id)) set(LENGTH_KEY, id); }

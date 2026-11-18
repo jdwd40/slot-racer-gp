@@ -1,7 +1,8 @@
 // Laps of fuel left on the HUD (#87): the pure estimator in src/fuelLaps.ts. docs/fuel-laps.md.
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import * as T from '../src/track';
-import { LAPS, fuelRate, type Car } from '../src/race';
+import { fuelRate, type Car } from '../src/race';
+import { LAPS } from './helpers';
 import {
   FuelLapsEstimator, SteadyFigure, fuelLapsVisible, fuelWarning, lapsToFlag,
   FALLBACK_BURN, SNAP_EPS, MIN_SAMPLE_LAPS, SHOW_EVERY, type FuelLapsReading,

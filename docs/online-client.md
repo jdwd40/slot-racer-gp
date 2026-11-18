@@ -18,10 +18,10 @@ The title screen names them separately:
 
 ## Lobby
 
-- **Online menu.** Driver name (1–16 characters, cleaned as on the server: a name that cleans to nothing, such as `(AI)` alone, is asked for again), colour (the server's eight liveries), **Create room** (track = the circuit chosen on the title, optional AI fill), **Join room** by 6-character code, and **Start connected solo**. A link ending `#room=CODE` fills in the code.
+- **Online menu.** Driver name (1–16 characters, cleaned as on the server: a name that cleans to nothing, such as `(AI)` alone, is asked for again), colour (the server's eight liveries), **Create room** (track = the circuit chosen on the title, optional AI fill), **Join room** by 6-character code, and **Start connected solo**. When the server lists race-length presets in `/api/health`, a **Race length** selector (Sprint 5, Standard 13, Endurance 26 laps; the device's remembered choice, shared with the title) sets the length of a new room, a connected solo race or a connected championship's first round; a connected championship keeps that length for its later rounds. Against a server older than presets the selector is replaced by a note that it races Standard only, and no length is sent ([race-length.md](race-length.md)). A link ending `#room=CODE` fills in the code.
 - **Room screen.**
   - The code is shown as text, with **Copy code** and, where the browser has it, **Share**.
-  - It shows the track (the host can change it), the AI setting, and every driver's race number, colour, name and state: You, Host, Ready / Not ready, Reconnecting, Left. A colour that was asked for but already taken is shown as such.
+  - It shows the track (the host can change it), the race length as "name · n laps" (the host of a multiplayer or solo room changes it with the same selector; a change clears the others' Ready), the AI setting, and every driver's race number, colour, name and state: You, Host, Ready / Not ready, Reconnecting, Left. A colour that was asked for but already taken is shown as such.
   - Configured AI cars are listed as AI, with their numbers.
 - **Permissions come from the server.** Only the host sees **Start** (and settings). Guests get **Ready** / **Not ready**. A refused start says why. When the creator leaves, the server passes hosting on and the new host gets Start.
 - **Refusals are explained, and never leave the app stuck.** The online menu stays usable after each:
