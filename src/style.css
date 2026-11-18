@@ -429,6 +429,25 @@ small { color: #9ca3af; font-weight: 500; }
 .awards .sync[data-sync="unsaved"] { color: #fdba74; }
 .awards .sync[data-sync="failed"] { color: #fca5a5; }
 @media (max-width: 420px) { .career .tiles { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+/* post-race debrief (docs/race-debrief.md): a summary line with the takeaway, the breakdown folded under it on a phone */
+.debrief { text-align: left; margin: 4px 0 12px; padding: 8px 12px; border-radius: 12px; background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.08); font-size: 14px; line-height: 1.4; }
+.debrief > summary { cursor: pointer; list-style-position: outside; margin-left: 16px; padding: 4px 0; min-height: 28px; }
+.debrief .deb-title { color: #e5e7eb; margin-right: 8px; }
+.debrief .deb-tk { color: #ffe066; font-weight: 700; }
+.debrief .deb-res { color: #d1d5db; }
+.debrief .deb-list { margin: 6px 0 4px; display: grid; gap: 4px; }
+.debrief .deb-row { display: grid; grid-template-columns: 9.5em minmax(0, 1fr); gap: 8px; }
+.debrief dt { color: #9ca3af; font-size: 12px; letter-spacing: 0.5px; text-transform: uppercase; padding-top: 2px; }
+.debrief dd { margin: 0; color: #e5e7eb; overflow-wrap: anywhere; }
+.debrief small { color: #9ca3af; }
+.debrief .deb-new { color: #86efac; font-weight: 700; }
+.debrief p { margin: 4px 0; max-width: none; }
+.card p.deb-pending { margin-top: 0; }
+@media (max-width: 700px), (max-height: 500px) {
+  .debrief { padding: 6px 10px; font-size: 13px; margin: 2px 0 8px; }
+  .debrief .deb-row { grid-template-columns: minmax(0, 1fr); gap: 0; }
+  .debrief > summary { min-height: 40px; display: list-item; }
+}
 .account .net-msg[data-kind="ok"] { color: #86efac; }
 .account .acct-who b { color: #ffe066; overflow-wrap: anywhere; }
 .acct-form[aria-busy="true"] { cursor: progress; }

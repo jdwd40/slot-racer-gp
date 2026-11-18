@@ -464,7 +464,8 @@ describe('the room server streams v2 states', () => {
     // (3fc80036…68629 for 11.8). Re-pinned for #132 (race-length presets; rules unchanged): the envelope's settings gained
     // `length: 'standard'`, and with that key removed the 11.8 digest still results, so the key is the only change. Re-pinned for
     // #133 (car setups; rules unchanged): each participant gained `setup: 'balanced', tuning: 0`, and with those keys and
-    // `length` removed the same 11.8 digest results
+    // `length` removed the same 11.8 digest results. Re-pinned for #134 (post-race debrief; rules unchanged): the envelope gained
+    // `debrief` (each human's summary), and with it removed as well the same 11.8 digest results (fa2c3efc…efce55 before it)
     const run = () => {
       const h = harness({}, 4242);
       const peers = [new FakePeer(), new FakePeer()];
@@ -487,15 +488,21 @@ describe('the room server streams v2 states', () => {
       // those two keys as well, the envelope is again byte for byte the one before presets: the race itself is unchanged
       expect(env.participants.map((p) => [p.setup, p.tuning])).toEqual(env.participants.map(() => ['balanced', 0]));
       const participants = env.participants.map(({ setup: _s, tuning: _t, ...p }) => p);
+      // #134: the debrief is the only new key: each human's summary, nothing else of the envelope changes
+      const { debrief, ...rest } = env;
+      expect(debrief?.v).toBe(1);
+      expect(debrief?.drivers.map((d) => d.driver)).toEqual(ids);
       return {
         digest: createHash('sha256').update(norm(env)).digest('hex'), outcome: env.outcome, ticks: env.times.ticks,
-        withoutLength: createHash('sha256').update(norm({ ...env, settings: before, participants })).digest('hex'),
+        withoutDebrief: createHash('sha256').update(norm(rest)).digest('hex'),
+        withoutLength: createHash('sha256').update(norm({ ...rest, settings: before, participants })).digest('hex'),
       };
     };
     const a = run(), b = run();
     expect(b).toEqual(a);
     expect(a).toEqual({
-      digest: 'fa2c3efc136b23dfa92190b42be59f150f29db02eb294674daccb89668efce55', outcome: 'completed', ticks: 18031,
+      digest: '7ae0d802fad4c5c12aea426e22de1bbbbd7f4a6bfe70e77cb80ff41e1a99de2b', outcome: 'completed', ticks: 18031,
+      withoutDebrief: 'fa2c3efc136b23dfa92190b42be59f150f29db02eb294674daccb89668efce55',
       withoutLength: '3fc80036feb8faedd8c8c6faca71d2fa7e622ad6ccf168dcab02bf4f95f68629',
     });
   });

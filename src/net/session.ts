@@ -20,12 +20,16 @@ export interface Seat { room: string; participant: string; token: string; code: 
 /** The parts of the server's result envelope (server/envelope.ts) the client shows. */
 export interface ResultView {
   raceId: string; roomId: string; mode: Mode; championship?: ChampionshipTag | null; outcome: 'completed' | 'aborted' | 'ended'; abortReason: string | null;
-  track: { id: string };
+  /** `version` and `rules`: the circuit layout and race rules the race ran under (a personal-best comparison needs both to match) */
+  track: { id: string; version?: string };
+  rules?: { version: string };
   /** the room settings the race ran with; `length` (#132) is absent from a server older than presets (Standard) */
   settings?: { length?: RaceLengthId };
   /** `setup` / `tuning` (#133): each car's setup as the race ran it; absent from a server older than setups (Balanced) */
   participants: { id: string; control: 'human' | 'ai'; slot: number; num: number; name: string; livery: string; setup?: SetupId; tuning?: number }[];
   classification: Standing[] | null; digest: string;
+  /** #134: each human's debrief (src/debrief.ts readDebrief); absent from a server older than debriefs, shown as unavailable */
+  debrief?: unknown;
 }
 
 export interface NetHooks {

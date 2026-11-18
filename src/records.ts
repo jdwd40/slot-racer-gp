@@ -75,6 +75,14 @@ export function submitLap(kind: BoardKind, track: string, initials: string, car:
   set(boardKey(kind, track, tag), rows);
   return rows.includes(rec) ? rec : null;
 }
+/**
+ * This driver's own best on a board (#134): the fastest row with these initials on that setup's board (current tuning), or
+ * null when it has none (never raced it, or its laps fell off the top ten). Read before a race, it is the debrief's baseline.
+ */
+export function personalBest(kind: BoardKind, track: string, setup: SetupId, initials: string): number | null {
+  const mine = board(kind, track, setup).filter((r) => r.initials === initials);
+  return mine.length ? Math.min(...mine.map((r) => r.ms)) : null;
+}
 export function fmtMs(ms: number): string {
   if (!isFinite(ms) || ms <= 0) return '–:––.–––';
   const m = Math.floor(ms / 60000), s = (ms - m * 60000) / 1000;

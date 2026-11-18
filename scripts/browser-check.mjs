@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Bounded browser validation of the real game. Procedure and results: docs/validation.md.
 //
-//   node scripts/browser-check.mjs [tracks race controlled routing practice championship touch responsive touchrace reverse service lastchance stall queue autosg autobay localslot online memory netbanner racelength carsetup]   functional checks (default: all)
+//   node scripts/browser-check.mjs [tracks race controlled routing practice championship touch responsive touchrace reverse service lastchance stall queue autosg autobay localslot online memory netbanner racelength carsetup debrief]   functional checks (default: all)
 //   node scripts/browser-check.mjs perf --label updated --machine "<name>"          frame-time capture
 //   node scripts/browser-check.mjs compare <baseline.json> <updated.json>           like-for-like comparison
 //
@@ -3279,8 +3279,176 @@ async function racelength(run, c) {
   return s;
 }
 
-const SCENARIOS = { tracks, race, controlled, routing, practice, championship, touch, responsive, touchrace, reverse, service, lastchance, stall, queue, autosg, autobay, localslot, online, memory, netbanner, racelength, carsetup };
-const USAGE = 'usage: browser-check.mjs [tracks|race|controlled|routing|practice|championship|touch|responsive|touchrace|reverse|service|lastchance|stall|queue|autosg|autobay|localslot|online|memory|netbanner|racelength|carsetup ...] | perf | compare <a.json> <b.json>\n'
+/**
+ * Post-race debrief (#134): the local results card (desktop: expanded under the standings; phone: folded under its takeaway,
+ * one tap away), its figures equal to the race core's frozen summary, the personal best compared with the value read before
+ * the race (and a rematch starting from zero against the new one), a championship round's debrief, and the online results
+ * card for a server result with a debrief, with a personal-best baseline, and from an older server (unavailable, no zeros).
+ */
+async function debrief(run, c) {
+  const S = (id, vars = {}) => Object.entries(vars).reduce((x, [k, v]) => x.split(`{${k}}`).join(String(v)), STRINGS[id]);
+  /** the local car to the line ending lap `lap` (a scripted fast-forward), optionally de-slotting it once on the way */
+  const toFlag = async (page, keys, lap, { deslot = false } = {}) => {
+    await read(page, ([n, ds]) => {
+      const gm = window.__game, T = gm.T, r = gm.race, p = r.car(gm.localId);
+      gm.advance(7);
+      if (ds) { p.mode = 'race'; p.v = 20; r.deslot(p); gm.advance(4); }
+      r.cars.forEach((x, i) => { if (x !== p) x.u += 40 + i * 8; });
+      p.u = T.FINISH_S + n * T.L - 3; p.hiU = p.u; p.crossed = n; p.lapsDone = n - 1; p.sectors = 7; p.v = 16; p.mode = 'race'; p.lapValid = true;
+    }, [lap, deslot]);
+    await keys.set('KeyW', true);
+    await read(page, () => window.__game.advance(5));
+    await keys.release();
+  };
+  const card = (page, sel = '.overlay.show .card') => read(page, (q) => {
+    const el = document.querySelector(`${q} .debrief`);
+    const box = (e) => { if (!e) return null; e.scrollIntoView({ block: 'nearest' }); const r = e.getBoundingClientRect(); const top = document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2); return { y: Math.round(r.y), b: Math.round(r.bottom), w: Math.round(r.width), h: Math.round(r.height), inView: r.y >= 0 && r.bottom <= innerHeight + 0.5, onTop: !!top && (top === e || e.contains(top)) }; };
+    const cardEl = document.querySelector(q);
+    cardEl.scrollTop = 0;
+    const btns = [...cardEl.querySelectorAll(':scope > .row button')].map((b) => ({ id: b.id, ...box(b) }));
+    const table = cardEl.querySelector('.tscroll');
+    return {
+      kind: el?.dataset.debrief ?? null, open: el?.hasAttribute('open') ?? null, tk: el?.querySelector('.deb-tk')?.dataset.tk ?? null, tkText: el?.querySelector('.deb-tk')?.textContent ?? '',
+      rows: Object.fromEntries([...(el?.querySelectorAll('.deb-row') ?? [])].map((r) => [r.dataset.k, r.querySelector('dd').textContent.replace(/\s+/g, ' ').trim()])),
+      text: el?.textContent.replace(/\s+/g, ' ').trim() ?? '', afterTable: !!table && !!el && !!(table.compareDocumentPosition(el) & Node.DOCUMENT_POSITION_FOLLOWING),
+      btns, pageX: document.documentElement.scrollWidth - document.documentElement.clientWidth, cardX: cardEl.scrollWidth - cardEl.clientWidth,
+      summary: box(el?.querySelector('summary') ?? null),
+    };
+  }, sel);
+  const btnsOk = (k) => k.btns.length > 0 && k.btns.every((b) => b.inView && b.onTop);
+
+  // ---- desktop
+  const lb = JSON.stringify([{ id: 'old1', initials: 'Annon', car: 'sunburst', ms: 99999, at: 1 }]);
+  const d = await open(run, { viewport: { width: 1280, height: 800 }, fixtures: { 'srgp.track': TRACK, 'srgp.lb.race.circuit-1': lb } });
+  {
+    const { page, keys } = d;
+    await page.click('[data-rlen="sprint"]');
+    await page.click('#o-start');
+    await waitFor(page, () => window.__game.screen === 'race');
+    await toFlag(page, keys, 5, { deslot: true });
+    await waitFor(page, () => window.__game.screen === 'results');
+    await frames(page, 2);
+    const k = await card(page);
+    const sum = await read(page, () => ({ d: window.__game.race.debrief(window.__game.localId), best: window.__game.race.car(window.__game.localId).bestLap, board: window.__game.R.board('race', 'circuit-1').map((r) => r.ms) }));
+    c.ok('Desktop results: the debrief is expanded under the standings with result, pace, consistency, personal best, incidents, pits and penalties',
+      k.kind === 'ok' && k.open === true && k.afterTable && ['result', 'pace', 'cons', 'pb', 'inc', 'pit', 'pen'].every((x) => x in k.rows), k);
+    const dd = sum.d;
+    c.ok('Desktop: the figures are the race core\'s frozen summary (1 de-slot with its time off the slot, laps, valid flying laps)',
+      !!dd && dd.deslots === 1 && dd.offS >= 1.7 && k.rows.inc.startsWith(S('deb.incDeslots', { n: 1 })) && k.rows.inc.includes(S('deb.incOff', { s: dd.offS.toFixed(1) }))
+      && (dd.best === null ? k.rows.pace.startsWith('—') : k.rows.pace.includes(dd.best.toFixed(3))) && k.rows.result.startsWith('P'), { dd, rows: k.rows });
+    const quicker = ((99999 - Math.round(sum.best * 1000)) / 1000).toFixed(3);
+    c.ok('Desktop: the best lap is compared with the personal best read before the race (99.999 s), not the one it just set; the takeaway names it',
+      sum.best > 0 && k.rows.pb.includes(S('deb.pbNew', { d: quicker })) && k.rows.pb.includes('99.999') && k.tk === 'deb.tk.pb' && k.tkText === S('deb.tk.pb', { d: quicker }) && Math.min(...sum.board) === Math.round(sum.best * 1000),
+      { pb: k.rows.pb, tk: k.tkText, board: sum.board, best: sum.best });
+    c.ok('Desktop: Race Again and Menu stay visible and clickable with the breakdown open; no sideways overflow', btnsOk(k) && k.pageX <= 0 && k.cardX <= 0, { btns: k.btns, pageX: k.pageX, cardX: k.cardX });
+    await page.screenshot({ path: path.join(run.out, 'debrief-results-1280x800.png') });
+    // a rematch starts from zero, compared with the best the last race set
+    await page.click('#o-again');
+    await waitFor(page, () => window.__game.screen === 'race');
+    await toFlag(page, keys, 5);
+    await waitFor(page, () => window.__game.screen === 'results');
+    const k2 = await card(page);
+    const d2 = await read(page, () => window.__game.race.debrief(window.__game.localId));
+    const was = (Math.round(sum.best * 1000) / 1000).toFixed(3);
+    c.ok('Desktop rematch: its debrief starts from zero (no de-slot) and its personal-best baseline is the previous race\'s best',
+      d2.deslots === 0 && k2.rows.inc.startsWith(S('deb.incDeslots', { n: 0 })) && k2.rows.pb.includes(was), { inc: k2.rows.inc, pb: k2.rows.pb, was });
+    await page.click('#o-menu');
+    await waitFor(page, () => window.__game.screen === 'title');
+
+    // a championship round: the debrief under the round's results, the next round one click away
+    await page.click('#o-champ');
+    await waitFor(page, () => window.__game.screen === 'race');
+    await toFlag(page, keys, 5);
+    await waitFor(page, () => window.__game.screen === 'champ');
+    const kc = await card(page);
+    c.ok('Desktop championship round: the debrief follows the round results, its result line says the place, and Continue stays visible',
+      kc.kind === 'ok' && kc.afterTable && /^P\d/.test(kc.rows.result) && kc.btns.some((b) => b.id === 'o-next') && btnsOk(kc), { rows: kc.rows, btns: kc.btns });
+    await page.screenshot({ path: path.join(run.out, 'debrief-champ-1280x800.png') });
+
+    // the online results card, from server results (no server: the diagnostics hook shows a given result)
+    const base = { roomId: 'r', mode: 'solo', championship: null, outcome: 'completed', abortReason: null, track: { id: 'circuit-1', version: 'v1' }, rules: { version: 'rules-x' }, settings: { length: 'standard' },
+      participants: [{ id: 'h1', control: 'human', slot: 0, num: 7, name: 'Me', livery: 'yellow', setup: 'grip', tuning: 1 }, { id: 'ai_1', control: 'ai', slot: 1, num: 11, name: 'Red (AI)', livery: 'red', setup: 'balanced', tuning: 0 }],
+      classification: [{ id: 'h1', slot: 0, control: 'human', pos: 1, status: 'finished', time: 190.2, laps: 13, bestLap: 14.1, pitStops: 2, timePen: 0, dqReason: null, dnfReason: null }, { id: 'ai_1', slot: 1, control: 'ai', pos: 2, status: 'finished', time: 192, laps: 13, bestLap: 14.3, pitStops: 2, timePen: 0, dqReason: null, dnfReason: null }], digest: 'x' };
+    const dbf = { driver: 'h1', laps: 13, valid: 9, best: 14.1, bestLap: 6, mean: 14.352, sd: 0.187, deslots: 0, offS: 0, offences: 1, stopGos: 0, hitBy: 2, served: 0, tows: 1, recoveries: 0, pit: { visits: 2, fuel: 1, s: 21.4, queueS: 1.2, serveS: 0, bayS: 6.3 }, forced: { towS: 19.8, recS: 0, penS: 14.8 }, open: null };
+    await read(page, ([b, x]) => window.__game.qaNetResult({ ...b, raceId: 'qa-1', debrief: { v: 1, drivers: [x] } }, 'h1'), [base, dbf]);
+    await waitFor(page, () => window.__game.screen === 'netres');
+    const n1 = await card(page);
+    c.ok('Online result with a debrief: the server\'s figures (pits 21.4 s including bay and queue time, tow with its penalty, hit by others 2), a takeaway backed by them, no PB row for a guest',
+      n1.kind === 'ok' && n1.tk === 'deb.tk.tow' && n1.rows.pit.includes(S('deb.pitTime', { s: '21.4' })) && n1.rows.pit.includes(S('deb.pitBay', { s: '6.3' })) && n1.rows.pit.includes(S('deb.pitQueue', { s: '1.2' }))
+      && n1.rows.forced.includes(S('deb.towPen', { s: '14.8' })) && n1.rows.inc.includes(S('deb.incHitBy', { n: 2 })) && !('pb' in n1.rows) && n1.rows.result.includes(S('setup.tag', { name: STRINGS['setup.grip'] })), n1.rows);
+    // a signed-in driver's bests read at the start: only the one with the same circuit version, mode, rules, setup and tuning counts
+    const bests = [
+      { track: 'circuit-1', trackVersion: 'v1', current: true, mode: 'solo', rules: 'rules-x', setup: 'grip', tuning: 1, tuningCurrent: true, lapMs: 14350, lap: 4, livery: 'yellow', raceId: 'old', setAt: '2026-11-01T00:00:00Z' },
+      { track: 'circuit-1', trackVersion: 'v1', current: true, mode: 'solo', rules: 'rules-x', setup: 'balanced', tuning: 0, tuningCurrent: true, lapMs: 13000, lap: 4, livery: 'yellow', raceId: 'old2', setAt: '2026-11-01T00:00:00Z' },
+      { track: 'circuit-1', trackVersion: 'v0', current: false, mode: 'solo', rules: 'rules-x', setup: 'grip', tuning: 1, tuningCurrent: true, lapMs: 12000, lap: 4, livery: 'yellow', raceId: 'old3', setAt: '2026-11-01T00:00:00Z' },
+      { track: 'circuit-1', trackVersion: 'v1', current: true, mode: 'multiplayer', rules: 'rules-x', setup: 'grip', tuning: 1, tuningCurrent: true, lapMs: 12500, lap: 4, livery: 'yellow', raceId: 'old4', setAt: '2026-11-01T00:00:00Z' },
+    ];
+    await read(page, ([b, x, pb]) => window.__game.qaNetResult({ ...b, raceId: 'qa-2', debrief: { v: 1, drivers: [x] } }, 'h1', pb), [base, { ...dbf, tows: 0, forced: { towS: 0, recS: 0, penS: 0 } }, bests]);
+    const n2 = await card(page);
+    c.ok('Online, signed in: compared only with the compatible best (14.350 s; not another setup, layout or mode), a new PB of 0.250 s',
+      n2.rows.pb?.includes(S('deb.pbNew', { d: '0.250' })) && n2.rows.pb.includes('14.350') && n2.tk === 'deb.tk.pb', n2.rows.pb);
+    // a result from a server older than debriefs: unavailable, no figures, no takeaway, no clean-race claim
+    await read(page, (b) => window.__game.qaNetResult({ ...b, raceId: 'qa-3' }, 'h1'), base);
+    const n3 = await card(page);
+    c.ok('Online result from an older server (no debrief): marked unavailable with the result line only, no zeros and no takeaway',
+      n3.kind === 'none' && n3.tk === null && n3.text.includes(STRINGS['deb.unavailable']) && !/\b0\b/.test(n3.text.replace(STRINGS['deb.unavailable'], '')) && !n3.text.includes(STRINGS['deb.tk.clean']), n3.text);
+    await page.screenshot({ path: path.join(run.out, 'debrief-online-old-1280x800.png') });
+    await d.context.close();
+  }
+  c.ok('Desktop part: no page or console errors', d.errors.length === 0, d.errors.slice(0, 5));
+
+  // ---- phone: emulated touch
+  const s = await open(run, { viewport: { width: 360, height: 640 }, dpr: 2, device: PHONE, fixtures: { 'srgp.track': TRACK } });
+  const { page, keys } = s;
+  // taps through Playwright's touch emulation (scrolled into view first, as a finger would find the control)
+  const f = { tap: (sel) => page.locator(sel).first().tap() };
+  await f.tap('[data-rlen="sprint"]');
+  await f.tap('#o-start');
+  await waitFor(page, () => window.__game.screen === 'race');
+  await toFlag(page, keys, 5, { deslot: true });
+  await waitFor(page, () => window.__game.screen === 'results');
+  await frames(page, 2);
+  const p1 = await card(page);
+  c.ok('Touch 360x640: the debrief starts folded, showing its title and the takeaway (1 de-slot); Race Again and Menu visible and on top',
+    p1.kind === 'ok' && p1.open === false && p1.tk === 'deb.tk.deslot1' && p1.summary?.h >= 40 && btnsOk(p1) && p1.pageX <= 0 && p1.cardX <= 0, { open: p1.open, tk: p1.tk, summary: p1.summary, btns: p1.btns });
+  await page.screenshot({ path: path.join(run.out, 'debrief-results-360x640-folded.png') });
+  await f.tap('.debrief summary');
+  await frames(page, 2);
+  const p2 = await card(page);
+  c.ok('Touch: a tap expands the breakdown (one column); the actions stay pinned, visible and on top; no sideways overflow',
+    p2.open === true && Object.keys(p2.rows).length >= 6 && btnsOk(p2) && p2.pageX <= 0 && p2.cardX <= 0, { rows: Object.keys(p2.rows), btns: p2.btns, pageX: p2.pageX, cardX: p2.cardX });
+  await page.screenshot({ path: path.join(run.out, 'debrief-results-360x640-open.png') });
+  for (const [w, h] of [[640, 360], [390, 844]]) {
+    await page.setViewportSize({ width: w, height: h });
+    await frames(page, 2);
+    const p3 = await card(page);
+    c.ok(`Touch ${w}x${h}: the expanded debrief fits the width and the actions stay visible and on top`, btnsOk(p3) && p3.pageX <= 0 && p3.cardX <= 0, { btns: p3.btns, pageX: p3.pageX, cardX: p3.cardX });
+  }
+  await page.setViewportSize({ width: 360, height: 640 });
+  await f.tap('#o-again');
+  await waitFor(page, () => window.__game.screen === 'race');
+  const z = await read(page, () => window.__game.race.debrief(window.__game.localId));
+  c.ok('Touch: Race Again (a tap) starts a new race whose debrief starts from zero', z === null || (z.deslots === 0 && z.laps === 0), z);
+  await keys.tap('Escape');
+  await f.tap('#o-menu');
+  await waitFor(page, () => window.__game.screen === 'title');
+  const base = { raceId: 'qa-p', roomId: 'r', mode: 'multiplayer', championship: null, outcome: 'completed', abortReason: null, track: { id: 'circuit-1', version: 'v1' }, rules: { version: 'x' }, settings: { length: 'sprint' },
+    participants: [{ id: 'h1', control: 'human', slot: 0, num: 7, name: 'Me', livery: 'yellow' }], classification: [{ id: 'h1', slot: 0, control: 'human', pos: null, status: 'dq', time: null, laps: 5, bestLap: 14.1, pitStops: 0, timePen: 0, dqReason: 'stopGo', dnfReason: null }], digest: 'x' };
+  const dbf = { driver: 'h1', laps: 5, valid: 1, best: 14.1, bestLap: 3, mean: 14.1, sd: null, deslots: 0, offS: 0, offences: 3, stopGos: 1, hitBy: 0, served: 0, tows: 0, recoveries: 0, pit: { visits: 0, fuel: 0, s: 0, queueS: 0, serveS: 0, bayS: 0 }, forced: { towS: 0, recS: 0, penS: 0 }, open: null };
+  await read(page, ([b, x]) => window.__game.qaNetResult({ ...b, debrief: { v: 1, drivers: [x] } }, 'h1'), [base, dbf]);
+  await waitFor(page, () => window.__game.screen === 'netres');
+  await f.tap('.debrief summary');
+  await frames(page, 2);
+  const p4 = await card(page);
+  c.ok('Touch online result (a DQ): the takeaway gives the DQ\'s reason, consistency shows an em dash with one valid lap, Leave stays visible',
+    p4.tk === 'deb.tk.dq.stopGo' && p4.rows.cons.startsWith('—') && p4.rows.result.includes(STRINGS['res.dqReason.stopGo']) && btnsOk(p4), { tk: p4.tk, cons: p4.rows.cons, result: p4.rows.result, btns: p4.btns });
+  await page.screenshot({ path: path.join(run.out, 'debrief-online-360x640.png') });
+  c.ok('Touch part: no page or console errors', s.errors.length === 0, s.errors.slice(0, 5));
+  return s;
+}
+
+const SCENARIOS = { tracks, race, controlled, routing, practice, championship, touch, responsive, touchrace, reverse, service, lastchance, stall, queue, autosg, autobay, localslot, online, memory, netbanner, racelength, carsetup, debrief };
+const USAGE = 'usage: browser-check.mjs [tracks|race|controlled|routing|practice|championship|touch|responsive|touchrace|reverse|service|lastchance|stall|queue|autosg|autobay|localslot|online|memory|netbanner|racelength|carsetup|debrief ...] | perf | compare <a.json> <b.json>\n'
   + 'options: --dist <dir> --url <url> --commit <sha> --machine <name> --label <name> --viewport WxH --dpr N --preset low|balanced|high\n'
   + '         --seconds N --headed --channel <chrome|msedge> --out <dir> --max-minutes N';
 

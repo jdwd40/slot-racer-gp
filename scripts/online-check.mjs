@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Bounded browser checks of online play: independent browser contexts against the real room server. Results: docs/online-client-evidence.md.
 //
-//   node scripts/online-check.mjs [gate lobby service connection layout accounts career lengths setups]   (default: all)
+//   node scripts/online-check.mjs [gate lobby service connection layout accounts career lengths setups debrief]   (default: all)
 //   accounts and career need SLOTRUSH_TEST_DATABASE_URL (e.g. $(node scripts/local-pg.mjs env) after `node scripts/local-pg.mjs start`)
 //   node scripts/online-check.mjs race2 --url https://slotrush.jdwd40.com [--origin https://slotrush.jdwd40.com]
 //     the 2-browser race alone against a deployed site (no local build or servers): one multiplayer room with AI fill, two
@@ -1129,7 +1129,69 @@ async function setups(run, c) {
   return [host, phone];
 }
 
-const SCENARIOS = { gate, lobby, service, connection, layout, accounts, career, race2, lengths, setups };
+/**
+ * Post-race debrief (#134) with two browsers on the local time-scaled server: a Sprint race, then each page's results card
+ * shows its own driver's debrief from the server's envelope (never from the events the page received): the card's figures
+ * are the envelope's, the phone's is folded under its takeaway and expands on a tap, and Rematch / Leave stay reachable.
+ */
+async function debrief(run, c) {
+  const url = run.fastUrl;
+  const host = await openPage(run, url, 'small', { name: 'host', fpsCap: CAP });
+  const phone = await openPage(run, url, 'phoneLo', { touch: true, name: 'phone', fpsCap: CAP });
+  await goOnline(host, 'Deb Host');
+  await host.page.click('[data-nrlen="sprint"]');
+  await host.page.click('#n-create');
+  await waitFor(host.page, () => window.__game.screen === 'lobby');
+  const code = await read(host.page, () => window.__game.net.room.code);
+  await joinRoom(phone, 'Deb Phone', code);
+  await waitFor(phone.page, () => window.__game.screen === 'lobby');
+  await phone.page.locator('#l-ready').tap();
+  await waitFor(host.page, () => window.__game.net.room.participants.filter((p) => p.ready).length === 1);
+  await host.page.click('#l-start');
+  for (const s of [host, phone]) await waitFor(s.page, () => window.__game.screen === 'race' && window.__game.net.raceId, undefined, 30000);
+  phone.keys = new Keys(phone.page);
+  const fin = await driveAll([host, phone], done, 6 * 60000, { laps: 5 });
+  // a driver done before the race is: the pending card says the debrief comes with the final classification
+  const pend = await Promise.all([host, phone].map(async (s) => {
+    let seen = null;
+    for (const end = Date.now() + 180000; Date.now() < end; await sleep(50)) {
+      const v = await read(s.page, () => ({ scr: window.__game.screen, t: document.querySelector('.netwait .deb-pending')?.textContent ?? null }));
+      if (v.scr === 'netwait' && v.t !== null) seen = v.t;
+      if (v.scr === 'netres') break;
+    }
+    return seen;
+  }));
+  for (const s of [host, phone]) await waitFor(s.page, () => window.__game.screen === 'netres', undefined, 180000);
+  await sleep(800);
+  const view = (s) => read(s.page, () => {
+    const el = document.querySelector('.netres .debrief');
+    const me = window.__game.net.me, env = window.__game.net.result;
+    const rows = Object.fromEntries([...(el?.querySelectorAll('.deb-row') ?? [])].map((r) => [r.dataset.k, r.querySelector('dd').textContent.replace(/\s+/g, ' ').trim()]));
+    const btns = [...document.querySelectorAll('.netres > .row button')].map((b) => { b.scrollIntoView({ block: 'nearest' }); const r = b.getBoundingClientRect(); const top = document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2); return { id: b.id, ok: r.y >= 0 && r.bottom <= innerHeight + 0.5 && !!top && (top === b || b.contains(top)) }; });
+    const compact = matchMedia('(max-width: 700px), (max-height: 500px)').matches;
+    return { me, compact, d: env.debrief?.drivers.find((x) => x.driver === me) ?? null, v: env.debrief?.v, n: env.debrief?.drivers.length, digest: env.digest, kind: el?.dataset.debrief ?? null, open: el?.hasAttribute('open') ?? null, tk: el?.querySelector('.deb-tk')?.dataset.tk ?? null, rows, btns, cls: env.classification.find((x) => x.id === me) };
+  });
+  const [vh, vp] = await Promise.all([host, phone].map(view));
+  c.ok('Result: identical envelopes carry one debrief per human (model 1), each page showing its own driver\'s', fin.every((x) => !x.error) && vh.digest === vp.digest && vh.v === 1 && vh.n === 2 && vh.d && vp.d && vh.d.driver !== vp.d.driver && vh.kind === 'ok' && vp.kind === 'ok', { fin, vh: { me: vh.me, kind: vh.kind }, vp: { me: vp.me, kind: vp.kind } });
+  const matches = (v) => !!v.d && v.d.laps === v.cls.laps && v.rows.inc?.startsWith(STRINGS['deb.incDeslots'].replace('{n}', v.d.deslots)) && (v.d.best === null ? v.rows.pace?.startsWith('—') : v.rows.pace?.includes(v.d.best.toFixed(3))) && (v.d.sd === null ? v.rows.cons?.startsWith('—') : v.rows.cons?.includes(v.d.sd.toFixed(3)));
+  c.ok('Each card\'s figures are the server\'s (laps as classified, pace, consistency, de-slots); the takeaway is shown', matches(vh) && matches(vp) && !!vh.tk && !!vp.tk, { host: { d: vh.d, rows: vh.rows, tk: vh.tk }, phone: { d: vp.d, rows: vp.rows, tk: vp.tk } });
+  c.ok('Each card expanded on a wide window and folded under its takeaway on a compact one (phone); Rematch (host) and Leave visible and on top', vh.open === !vh.compact && vp.compact && vp.open === false && vh.btns.some((b) => b.id === 'r-rematch') && vh.btns.every((b) => b.ok) && vp.btns.every((b) => b.ok), { host: vh.btns, phone: vp.btns, open: [vh.open, vp.open], compact: [vh.compact, vp.compact] });
+  await snapshotOf(phone.page, 'debrief-netres-phone-folded.png');
+  await phone.page.locator('.netres .debrief summary').tap();
+  await sleep(800);
+  const vp2 = await view(phone);
+  c.ok('Phone: a tap expands the breakdown; Leave stays visible and on top', vp2.open === true && Object.keys(vp2.rows).length >= 6 && vp2.btns.every((b) => b.ok), { open: vp2.open, rows: Object.keys(vp2.rows), btns: vp2.btns });
+  if (pend.some((x) => x !== null)) c.ok('A driver finished first saw the pending card say its debrief comes with the final classification', pend.filter((x) => x !== null).every((x) => x === STRINGS['deb.pending']), pend);
+  else c.unavailable('Pending card note', 'both drivers reached the results card together this run');
+  await snapshotOf(phone.page, 'debrief-netres-phone-open.png');
+  await host.page.click('#r-rematch');
+  for (const s of [host, phone]) await waitFor(s.page, () => window.__game.screen === 'lobby');
+  c.ok('Rematch: back in the lobby', true);
+  for (const s of [host, phone]) { const l = s.page.locator('#l-leave'); if (await l.count()) await l.click(); }
+  return [host, phone];
+}
+
+const SCENARIOS = { gate, lobby, service, connection, layout, accounts, career, race2, lengths, setups, debrief };
 
 /** `race2` alone against a deployed site: no build, no local servers, one room (see the header). */
 async function remote(url, origin, names) {

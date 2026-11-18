@@ -94,6 +94,8 @@ The title screen names them separately:
   - Result envelopes are recognised by `raceId`. A repeat, for example the resend after a resume into results, is marked not fresh, so it plays no fanfare and changes nothing. Reopening the results screen only redraws it.
   - Account points are not implemented, and when they are they must be awarded by the server per `raceId`, never by the client.
 
+- **Post-race debrief (#134).** The final standings card shows this driver's debrief from the server's result envelope (never from the events this page received): pace, consistency, personal-best progress for a signed-in driver (bests read from the career when the race starts), incidents, pit and recovery time, penalties and a takeaway; folded under the takeaway on a phone. A result from a server older than debriefs shows it as unavailable. The pending card says the debrief comes with the final classification ([race-debrief.md](race-debrief.md)).
+
 ## Files
 
 | File | Role |
@@ -105,6 +107,7 @@ The title screen names them separately:
 | `test/outdated.test.ts` | Outdated page: newer health protocol, refused hello, refused reconnect, notice and Reload button; older server (#80): Retry notice, Retry recovers, refused hello/reconnect re-probes health, bounded title re-check |
 | `src/net/client.ts` | Protocol client. It ignores a replaced socket's late close or messages, which could otherwise reject a reconnect's request, and runs the keepalive ping and receive watchdog |
 | `src/main.ts` | Online menu, lobby, race wiring, race menu, pending and final standings, banner |
+| `src/debrief.ts`, `src/debriefView.ts` | The debrief model (collector, reader, takeaway, personal-best comparison) and its card (#134) |
 | `src/input.ts` | `DrivingInput.onChange`, so online pedals are sent without waiting for a frame |
 | `test/server/netsession.test.ts` | Mirror equivalence, interpolation, a 4-browser-module race over real WebSockets, fifth refused, reconnect, reload, expiry, duplicate result, rematch, connected solo, release |
 | `src/net/banner.ts` | The banner's per-screen wording and whether the card makes room for it (no DOM) |
