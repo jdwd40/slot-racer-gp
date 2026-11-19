@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Bounded browser checks of online play: independent browser contexts against the real room server. Results: docs/online-client-evidence.md.
 //
-//   node scripts/online-check.mjs [gate lobby service connection layout accounts career lengths setups debrief]   (default: all)
+//   node scripts/online-check.mjs [gate lobby service connection layout accounts career lengths setups debrief spectate]   (default: all)
 //   accounts and career need SLOTRUSH_TEST_DATABASE_URL (e.g. $(node scripts/local-pg.mjs env) after `node scripts/local-pg.mjs start`)
 //   node scripts/online-check.mjs race2 --url https://slotrush.jdwd40.com [--origin https://slotrush.jdwd40.com]
 //     the 2-browser race alone against a deployed site (no local build or servers): one multiplayer room with AI fill, two
@@ -419,6 +419,9 @@ async function service(run, c) {
   for (let k = 0; k < 3; k++) room.race.offence(B, A, 'rear');
   B.svcBreach = 'stopGo';
   room.race.retire(idb);
+  // #135: a driver whose race is over spectates (no card over the race); its Standings button opens the pending card
+  await waitFor(b.page, () => window.__game.spec?.active && window.__game.screen === 'race', undefined, 15000).catch(() => null);
+  await b.page.locator('#s-stand').tap().catch(() => null);
   const dqSeen = await waitFor(b.page, () => window.__game.screen === 'netwait' && document.querySelector('.netwait .place')?.textContent, undefined, 15000).then((h) => h.jsonValue()).catch(() => '');
   // the pending card is updated by every snapshot: its buttons must stay the same elements, and keep the keyboard focus
   const kept = await read(b.page, async () => {
@@ -1154,6 +1157,8 @@ async function debrief(run, c) {
   // says the debrief comes with the final classification
   const both = await Promise.all([host, phone].map(async (s) => {
     const st = await driveUntil(s, done, { budgetMs: 6 * 60000, opts: { pace: PACE, laps: 5 } }).catch((e) => ({ error: String(e.message ?? e) }));
+    // #135: a driver done before the race is spectates; Standings (T) opens the pending card, whose note is read
+    if (await read(s.page, () => window.__game.spec?.active && window.__game.screen === 'race').catch(() => false)) { await s.page.keyboard.press('KeyT').catch(() => null); await sleep(300); }
     const v = await read(s.page, () => ({ scr: window.__game.screen, t: document.querySelector('.netwait .deb-pending')?.textContent ?? null }));
     return { st, scr: v.scr, t: v.t };
   }));
@@ -1190,7 +1195,127 @@ async function debrief(run, c) {
   return [host, phone];
 }
 
-const SCENARIOS = { gate, lobby, service, connection, layout, accounts, career, race2, lengths, setups, debrief };
+/**
+ * Post-finish spectating online (#135, docs/spectating.md), two browsers on the time-scaled local server (x2): a Sprint room
+ * with AI fill. The keyboard driver is put on the line ending lap 5 with Throttle held across it: it spectates (nothing held on
+ * the server), follows the leader, switches to the touch driver still racing, who keeps racing at normal speed; it opens and
+ * closes the standings, and reconnects while watching. Then the touch driver finishes too, both humans ahead of the AI: the AI
+ * field races on at normal speed (not the accelerated run-on) while they are connected. The touch driver leaves after its
+ * flag (its finish stays a finish), and the result arrives while the keyboard driver has the race menu open.
+ */
+async function spectate(run, c) {
+  const url = run.fastUrl;
+  const a = await openPage(run, url, 'small', { name: 'keys', fpsCap: CAP });
+  const b = await openPage(run, url, 'phoneLo', { touch: true, name: 'touch', fpsCap: CAP });
+  await goOnline(a, 'Spec Keys');
+  await a.page.check('#n-ai');
+  await a.page.click('[data-nrlen="sprint"]');
+  await a.page.click('#n-create');
+  await waitFor(a.page, () => window.__game.screen === 'lobby');
+  const code = await read(a.page, () => window.__game.net.room.code);
+  await joinRoom(b, 'Spec Touch', code);
+  await waitFor(b.page, () => window.__game.screen === 'lobby');
+  await b.page.locator('#l-ready').tap();
+  await waitFor(a.page, () => window.__game.net.room.participants.filter((p) => p.ready).length === 1);
+  await a.page.click('#l-start');
+  for (const s of [a, b]) await waitFor(s.page, () => window.__game.screen === 'race' && window.__game.race.phase === 'racing', undefined, 30000);
+  const room = run.fast.room(code);
+  const race = room.race;
+  const [ida, idb] = await Promise.all([a, b].map((s) => read(s.page, () => window.__game.localId)));
+  const A = race.car(ida), B = race.car(idb), T = race.T;
+  const laps = race.targetLaps;
+  // seeded for the check's length (the steps below take minutes of race time on SwiftShader pages): a long finish window, so the
+  // window does not classify the field before the checks are done; the AI field is brought to the flag by hand at the end
+  race.finishWindow = 900;
+  // Sprint laps take this AI field about 15 s of race time: the AI cars are put back a couple of laps now and then, so they
+  // are still racing when both humans have flagged (every checked phase needs cars left to watch)
+  const holdBack = () => { for (const x of race.cars) if (!x.human && x.status === 'running' && x.lapsDone >= 2) { x.u -= 2 * T.L; x.hiU = x.u; x.crossed -= 2; x.lapsDone -= 2; } };
+  const toLine = (car) => { car.u = T.FINISH_S + laps * T.L - 3; car.hiU = car.u; car.crossed = laps; car.lapsDone = laps - 1; car.sectors = 7; car.v = 16; car.mode = 'race'; car.lapValid = true; };
+  // a little racing first, both drivers on their own controls
+  await driveAll([a, b], (st) => st.raceTime > 8 || st.finished, 60000, { laps });
+  // the keyboard driver to its flag with Throttle held across the line
+  await a.keys.set('KeyW', true);
+  toLine(A);
+  await waitFor(a.page, () => window.__game.spec?.active, undefined, 20000);
+  await sleep(600);
+  let va = await read(a.page, () => { const g = window.__game, r = g.race; return { screen: g.screen, spec: g.spec, me: g.net.me, localId: g.localId, held: g.net.held, lead: r.order().find((x) => x.status === 'running')?.id, running: r.order().filter((x) => x.status === 'running').map((x) => x.id), panel: !document.getElementById('h-spec').hidden, leave: !document.getElementById('s-leave').hidden, skip: !document.getElementById('s-skip').hidden, card: document.querySelector('.overlay.show .card')?.className ?? null }; });
+  const heldA = room.participant(ida).held;
+  c.ok('Online: the first finisher spectates with no card over the race; it follows a running car (the leader when it came up; kept stable since); Leave offered, no Skip',
+    va.screen === 'race' && va.spec.active && va.panel && va.card === null && !!va.lead && va.running.includes(va.spec.target) && va.spec.target !== ida && va.leave && !va.skip && va.me === ida && va.localId === ida && A.status === 'finished', va);
+  c.ok('Online: Throttle still held across the flag sends nothing: the server holds neutral pedals for that seat', !heldA.up && !heldA.down && !va.held.up, { server: heldA, page: va.held });
+  // switch to the touch driver (still racing) with Next
+  for (let k = 0; k < 4; k++) {
+    if ((await read(a.page, () => window.__game.spec.target)) === idb) break;
+    await a.keys.tap('ArrowRight'); await sleep(150);
+  }
+  va = await read(a.page, () => ({ spec: window.__game.spec, who: document.getElementById('h-spec-who').textContent, lap: document.getElementById('h-spec-lap').textContent, me: window.__game.net.me }));
+  c.ok('Online: Next reaches the other human, labelled with their name and lap of the actual 5; the viewer is still its own seat', va.spec.target === idb && va.who.includes('Spec Touch') && /\/5$/.test(va.lap) && va.me === ida, va);
+  // the touch driver keeps racing at normal speed while being watched
+  holdBack();
+  const t0 = { race: race.raceTime, wall: Date.now(), u: B.u };
+  await driveUntil(b, (st) => st.raceTime > t0.race + 10 || st.finished, { budgetMs: 60000, opts: { pace: PACE, laps } });
+  const rate = (race.raceTime - t0.race) / ((Date.now() - t0.wall) / 1000);
+  const heldB = room.participant(idb).held;
+  c.ok('Online: the second driver keeps racing at normal speed (race time x2 on this time-scaled server) while watched, on its own controls', room.pace === 'live' && rate > 1.6 && rate < 2.4 && B.status === 'running', { pace: room.pace, rate: +rate.toFixed(2), du: B.u - t0.u, heldB });
+  // the watcher's stream stays at the configured rate
+  await resetFrames(a.page);
+  await sleep(3000);
+  const fa = await frameStats(a.page);
+  const hz = 20 * run.fast.cfg.timeScale;
+  c.ok(`Online: the spectator's stream is the ordinary ~${hz} states/s`, fa.perS > hz * 0.75 && fa.perS < hz * 1.25, fa);
+  // standings and back
+  await a.keys.tap('KeyT');
+  await waitFor(a.page, () => window.__game.screen === 'netwait');
+  const card = await read(a.page, () => ({ picks: [...document.querySelectorAll('#w-rows [data-watch]')].map((x) => x.dataset.watch), btns: [...document.querySelectorAll('.netwait > .row button')].map((x) => x.id) }));
+  await a.keys.tap('Escape');
+  await waitFor(a.page, () => window.__game.screen === 'race');
+  c.ok('Online: T opens the pending standings (Watch per running car, Watch the race, Leave); Escape returns to spectating', card.picks.includes(idb) && !card.picks.includes(ida) && card.btns.join() === 'w-watch,w-leave' && (await read(a.page, () => window.__game.spec.active)), card);
+  // reconnect while watching
+  holdBack();
+  const rec0 = await read(a.page, () => window.__game.net.reconnects);
+  await read(a.page, () => window.__game.netDrop());
+  await waitFor(a.page, (n) => window.__game.net.reconnects > n && window.__game.net.conn === 'connected', rec0, 30000);
+  await sleep(800);
+  va = await read(a.page, () => ({ conn: window.__game.net.conn, spec: window.__game.spec, me: window.__game.net.me, screen: window.__game.screen, lost: document.getElementById('h-spec-lost').textContent }));
+  c.ok('Online: a dropped link while watching resumes the same seat and the spectator view carries on (no frozen scene, no lost-contact line once back)', va.conn === 'connected' && va.spec.active && va.me === ida && va.screen === 'race' && va.lost === '' && A.status === 'finished', va);
+  // the touch driver finishes too (a finger on Throttle across the line): both humans are done, the AI field is still racing
+  const finger = await b.fingers.put('#t-throttle');
+  holdBack();
+  toLine(B);
+  await waitFor(b.page, () => window.__game.spec?.active, undefined, 20000);
+  const padHidden = await read(b.page, () => document.getElementById('t-pad').hidden && !window.__game.input.held('throttle'));
+  await b.fingers.lift(finger);
+  await sleep(1000);
+  const t1 = { race: race.raceTime, wall: Date.now() };
+  await sleep(4000);
+  const rate2 = (race.raceTime - t1.race) / ((Date.now() - t1.wall) / 1000);
+  c.ok('Online: both humans done ahead of the AI and still connected: the AI field races on at normal speed (not the accelerated run-on); the touch page spectates with its pad gone and nothing held',
+    race.humansDoneT >= 0 && race.cars.some((x) => !x.human && x.status === 'running') && room.pace === 'live' && rate2 > 1.6 && rate2 < 2.4 && padHidden, { pace: room.pace, rate: +rate2.toFixed(2), padHidden, state: room.state, raceT: race.raceTime, flagT: race.firstFlagT, win: race.finishWindow, cars: race.cars.map((x) => `${x.id}:${x.status}:${x.dnfReason ?? x.dqReason ?? ''}:${x.lapsDone}`), outcome: room.result?.outcome ?? null, abort: room.result?.abortReason ?? null });
+  // the touch driver leaves after its flag: its finish stays a finish, the other still watches at normal speed
+  await b.page.locator('#s-leave').tap();
+  await waitFor(b.page, () => window.__game.screen === 'title' || window.__game.screen === 'online', undefined, 20000);
+  await sleep(500);
+  c.ok('Online: leaving after the flag keeps the finish (never retired); the seat is given up; the watcher keeps normal pace', B.status === 'finished' && B.dnfReason === null && room.participant(idb)?.left === true && room.pace === 'live', { status: B.status, dnf: B.dnfReason, left: room.participant(idb)?.left, pace: room.pace });
+  // the result arrives while the keyboard driver has the race menu open: the AI field is brought to its last stretch
+  await a.keys.release();
+  await a.keys.tap('Escape');
+  await waitFor(a.page, () => window.__game.screen === 'pause');
+  for (const x of race.cars) if (!x.human && x.status === 'running') { x.u = T.FINISH_S + laps * T.L - 12 - x.idx * 3; x.hiU = x.u; x.crossed = laps; x.lapsDone = laps - 1; x.sectors = 7; x.v = 14; x.mode = 'race'; x.lapValid = true; }
+  await waitFor(a.page, () => window.__game.screen === 'netres', undefined, 60000);
+  const res = await read(a.page, () => ({ r: window.__game.net.result, spec: window.__game.spec.active, mine: document.querySelector('.netres tr.me')?.textContent ?? '', place: document.querySelector('.netres .place')?.textContent ?? '' }));
+  const rowA = res.r.classification.find((x) => x.id === ida), rowB = res.r.classification.find((x) => x.id === idb);
+  c.ok('Online: the final result replaces the race menu; spectating ends; both humans classified as finishers (the leaver too); the viewer\'s own row and place',
+    res.r.outcome === 'completed' && !res.spec && rowA.status === 'finished' && rowB.status === 'finished' && res.mine.includes(STRINGS['hud.you']) && res.place.startsWith(STRINGS['res.youPlace'].split('{')[0]), { cls: res.r.classification.map((x) => `${x.pos}:${x.status}`), place: res.place });
+  await snapshotOf(a.page, 'spectate-online-result.png');
+  // rematch: back in the lobby in driving mode
+  await a.page.click('#r-rematch').catch(() => null);
+  await waitFor(a.page, () => window.__game.screen === 'lobby', undefined, 20000).catch(() => null);
+  c.ok('Online: rematch from the result goes back to the lobby with no spectator state left', (await read(a.page, () => window.__game.screen === 'lobby' && !window.__game.spec.active)));
+  const l = a.page.locator('#l-leave'); if (await l.count()) await l.click();
+  return [a, b];
+}
+
+const SCENARIOS = { gate, lobby, service, connection, layout, accounts, career, race2, lengths, setups, debrief, spectate };
 
 /** `race2` alone against a deployed site: no build, no local servers, one room (see the header). */
 async function remote(url, origin, names) {

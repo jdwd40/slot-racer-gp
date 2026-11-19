@@ -262,7 +262,7 @@ async function carsetup(run, c) {
     const live = await read(page, () => window.__game.race.cars.map((x) => `${x.human ? 'me' : x.id}:${x.setup.id}`).join());
     c.ok('Desktop Grip race: the local car races Grip, the AI rivals carry their explicit Balanced setup', live === 'me:grip,ai1:balanced,ai2:balanced,ai3:balanced', live);
     await toFlag(page, keys, 5);
-    await waitFor(page, () => window.__game.screen === 'results');
+    await toResults(page, 'results');
     const res = await read(page, () => ({ head: document.querySelector('.res-setup')?.textContent ?? '', chips: [...document.querySelectorAll('.results tbody .setup-chip')].map((x) => x.dataset.setup) }));
     c.ok('Desktop results: the setup is named in the heading and every row carries its car\'s setup as text', res.head === stag('grip') && res.chips.length === 4 && res.chips.filter((x) => x === 'grip').length === 1 && res.chips.filter((x) => x === 'balanced').length === 3, res);
     await page.screenshot({ path: path.join(run.out, 'carsetup-results-1280x800.png') });
@@ -308,7 +308,7 @@ async function carsetup(run, c) {
     const c1 = await read(page, () => ({ car: window.__game.race.car(window.__game.localId).setup.id, save: JSON.parse(localStorage.getItem('srgp.champ')).setup }));
     c.ok('Desktop championship: the first round races the chosen setup (Grip), stored with the save', c1.car === 'grip' && c1.save === 'grip', c1);
     await toFlag(page, keys, 5);
-    await waitFor(page, () => window.__game.screen === 'champ');
+    await toResults(page, 'champ');
     const sel = await read(page, () => [...document.querySelectorAll('[data-csetup]')].map((b) => `${b.dataset.csetup}:${b.getAttribute('aria-checked')}`).join());
     await page.click('[data-csetup="speed"]');
     const c2 = await read(page, () => JSON.parse(localStorage.getItem('srgp.champ')));
@@ -414,6 +414,17 @@ const waitFor = (page, fn, arg, timeout = 30000) => page.waitForFunction(fn, arg
 const frames = async (page, n = 3) => { const c = await read(page, () => window.__qa.rows.length); await waitFor(page, (m) => window.__qa.rows.length >= m, c + n); };
 const pixels = async (page) => { await read(page, () => { window.__qa.pixels = null; window.__qa.wantPixels = true; }); await waitFor(page, () => window.__qa.pixels); return read(page, () => window.__qa.pixels); };
 const toast = (page) => page.locator('#h-toast').textContent();
+
+/**
+ * #135: a local race whose player is done while other cars still run stays open for spectating; Skip to results ends it through
+ * the same synchronous run-on as before (the same classification), so checks that want the results (or championship) screen
+ * press it, through the spectator panel, whenever the race is being watched. A race with nobody left closes on its own.
+ */
+async function toResults(page, want = 'results', timeout = 30000) {
+  await waitFor(page, (w) => window.__game.screen === w || (window.__game.spec.active && window.__game.screen === 'race'), want, timeout);
+  if (await read(page, (w) => window.__game.screen !== w, want)) await page.locator('#s-skip').click();
+  await waitFor(page, (w) => window.__game.screen === w, want, timeout);
+}
 
 /** Drive with real keys until `until(state)`. `onTick` runs once per poll, so checks never stop the car from being driven. */
 async function driveUntil(s, until, { budgetMs, opts = {}, onTick }) {
@@ -560,7 +571,7 @@ async function race(run, c) {
   c.ok('Player reached the chequered flag', end.lap === LAPS, end);
   c.ok('No unplanned pause during the race', !s.unexpectedPauses, s.unexpectedPauses ?? 0);
 
-  await waitFor(page, () => window.__game.screen === 'results');
+  await toResults(page, 'results');
   const res = await read(page, () => {
     const r = window.__game.race, p = r.car(window.__game.localId), rows = [...document.querySelectorAll('.card.results tbody tr')];
     return { phase: r.phase, lapsDone: p.lapsDone, finished: p.finished, finishTime: p.finishTime, bestLap: p.bestLap, pitStops: p.pitStops, offences: p.offences, timePen: p.timePen, heading: document.querySelector('.card.results h2').textContent, place: document.querySelector('.card.results .place').textContent, rows: rows.map((x) => [...x.children].map((td) => td.textContent.trim()).join(' | ')), mine: document.querySelector('.card.results tr.me')?.textContent ?? '', board: window.__game.R.board('race', 'circuit-1').length, playerResult: r.results().find((x) => x.car.id === window.__game.localId).time, again: !!document.getElementById('o-again') };
@@ -775,7 +786,7 @@ async function controlled(run, c) {
   await keys.set('KeyW', true);
   await read(page, () => window.__game.advance(5));
   await keys.release();
-  await waitFor(page, () => window.__game.screen === 'results');
+  await toResults(page, 'results');
   const res = await read(page, () => { const r = window.__game.race, p = r.car(window.__game.localId); const mine = r.results().find((x) => x.car.id === window.__game.localId); return { timePen: p.timePen, status: mine.status, reason: p.dqReason, est: r.results().some((x) => x.est), row: document.querySelector('.card.results tr.me').textContent, place: document.querySelector('.card.results .place').textContent, title: document.querySelector('.card.results h2').textContent }; });
   c.ok('Unserved stop disqualifies at the flag: DQ row and reason on the results screen, no time penalty, no estimate', finish.owed === 3 && res.status === 'dq' && res.reason === 'stopGo' && res.timePen === 0 && !res.est && res.row.includes(STRINGS['res.dq']) && res.place.startsWith(STRINGS['res.youDq']) && !res.title.includes('🏆'), res);
 
@@ -928,7 +939,7 @@ async function championship(run, c) {
   await keys.set('KeyW', true);
   await read(page, () => window.__game.advance(5));
   await keys.release();
-  await waitFor(page, () => window.__game.screen === 'champ');
+  await toResults(page, 'champ');
   await frames(page, 2);
   const saved = await read(page, () => JSON.parse(localStorage.getItem('srgp.champ')));
   c.ok('Finished round is stored once, against the right circuit', saved.rounds.length === 3 && saved.rounds[2].track === 'circuit-4', saved.rounds.map((r) => r.track));
@@ -1309,7 +1320,7 @@ async function touch(run, c) {
   await waitFor(page, () => window.__game.screen === 'race' && window.__game.mode === 'practice');
   const prac = await f.put('#t-throttle');
   await read(page, () => { window.__game.race.phase = 'done'; });
-  await waitFor(page, () => window.__game.screen === 'results');
+  await toResults(page, 'results');
   const h12 = await held(page);
   await f.lift(prac);
   await page.locator('#o-again').tap();
@@ -1419,7 +1430,7 @@ async function service(run, c) {
   await keys.set('KeyW', true);
   await waitFor(page, () => window.__game.race.car(window.__game.localId).finished, undefined, 30000);
   await keys.set('KeyW', false);
-  await waitFor(page, () => window.__game.screen === 'results', undefined, 30000);
+  await toResults(page, 'results');
   const res = await read(page, () => { const r = window.__game.race; return { rows: r.results().map((x) => ({ s: x.status, est: x.est })), me: document.querySelector('.card.results tr.me').textContent, place: document.querySelector('.card.results .place').textContent, title: document.querySelector('.card.results h2').textContent, reason: r.car(window.__game.localId).dqReason }; });
   c.ok('Flag: DQ (missed deadline) on the real results screen, below the classified finishers, no trophy, no estimates', res.reason === 'deadline' && res.me.includes(STRINGS['res.dq']) && res.place.startsWith(STRINGS['res.youDq']) && !res.title.includes('🏆') && res.rows[res.rows.length - 1].s === 'dq' && res.rows.every((x) => !x.est && x.s !== 'running'), res);
   await page.screenshot({ path: path.join(run.out, 'service-dq-results.png') });
@@ -1441,7 +1452,7 @@ async function service(run, c) {
     await setup(page, { lap: LAPS, into: -3, v: 12, field: true });
     await read(page, () => { window.__game.race.car(window.__game.localId).svcBreach = 'stopGo'; });
     await keys.set('KeyW', true);
-    await waitFor(page, () => window.__game.screen === 'champ', undefined, 30000);
+    await toResults(page, 'champ');
     await keys.release();
     await frames(page, 2);
     const saved = await read(page, () => JSON.parse(localStorage.getItem('srgp.champ')));
@@ -2063,7 +2074,7 @@ async function responsive(run, c) {
 
   // results and championship
   await read(page, () => { window.__game.race.phase = 'done'; });
-  await waitFor(page, () => window.__game.screen === 'results');
+  await toResults(page, 'results');
   await menus('results');
   await size(page, 360, 640);
   await page.locator('#o-menu').tap();
@@ -2073,7 +2084,7 @@ async function responsive(run, c) {
   // end the round for real: every car terminally classified, then the race closes and freezes its final standings (a
   // championship only records race.final, never a live order)
   await read(page, () => { const r = window.__game.race; r.classifyRunning('timeout'); r.humansDoneT = r.t - 4; });
-  await waitFor(page, () => window.__game.screen === 'champ');
+  await toResults(page, 'champ');
   await menus('championship');
   await size(page, 360, 640);
   const rounds = await read(page, () => window.__game.champ.rounds.length);
@@ -2211,7 +2222,7 @@ async function touchrace(run, c) {
   await s.keys.release();
   c.ok('Touch race: the player reached the flag on the pad alone', end.lap === LAPS, end);
   c.ok('Touch race: no unplanned pause', !s.unexpectedPauses, s.unexpectedPauses ?? 0);
-  await waitFor(page, () => window.__game.screen === 'results');
+  await toResults(page, 'results');
   await frames(page, 2);
   const m = await read(page, measureMenu);
   await page.screenshot({ path: path.join(run.out, 'touchrace-results.png') });
@@ -3161,7 +3172,7 @@ async function racelength(run, c) {
     const hud = await read(page, () => ({ lap: document.getElementById('h-lap').textContent, laps: window.__game.race.targetLaps }));
     c.ok('Desktop Sprint race: the HUD counts to 5 (lap 1/5)', hud.lap === '1/5' && hud.laps === 5, hud);
     await toFlag(page, keys, 5);
-    await waitFor(page, () => window.__game.screen === 'results');
+    await toResults(page, 'results');
     const res = await read(page, () => ({ head: document.querySelector('.res-len')?.textContent ?? '', me: (() => { const p = window.__game.race.car(window.__game.localId); return [p.status, p.lapsDone]; })(), final: window.__game.race.final.map((x) => [x.status, x.laps]) }));
     c.ok('Desktop Sprint race: the flag falls at lap 5, every car is classified at 5 laps, and the results name the length', res.me.join() === 'finished,5' && res.final.every(([st, l]) => st === 'finished' && l === 5) && res.head.includes(tag('sprint', 5)), res);
     await page.screenshot({ path: path.join(run.out, 'racelength-results-sprint.png') });
@@ -3199,7 +3210,7 @@ async function racelength(run, c) {
     const ch2 = await read(page, () => window.__game.race.targetLaps);
     c.ok('Desktop: with Sprint now chosen, Continue still races the championship\'s Endurance (and says so on the button)', ch2 === 26 && cont.includes(tag('endurance', 26)), { laps: ch2, cont });
     await toFlag(page, keys, 26);
-    await waitFor(page, () => window.__game.screen === 'champ');
+    await toResults(page, 'champ');
     const ch3 = await read(page, () => ({ head: document.querySelector('.champ .res-len')?.textContent ?? '', save: JSON.parse(localStorage.getItem('srgp.champ')) }));
     c.ok('Desktop: the round is stored against the Endurance championship and the standings name its length', ch3.save.rounds.length === 1 && ch3.save.length === 'endurance' && ch3.head === tag('endurance', 26), { head: ch3.head, rounds: ch3.save.rounds.length, length: ch3.save.length });
     await d.load();
@@ -3326,7 +3337,7 @@ async function debrief(run, c) {
     await page.click('#o-start');
     await waitFor(page, () => window.__game.screen === 'race');
     await toFlag(page, keys, 5, { deslot: true });
-    await waitFor(page, () => window.__game.screen === 'results');
+    await toResults(page, 'results');
     await frames(page, 2);
     const k = await card(page);
     const sum = await read(page, () => ({ d: window.__game.race.debrief(window.__game.localId), best: window.__game.race.car(window.__game.localId).bestLap, board: window.__game.R.board('race', 'circuit-1').map((r) => r.ms) }));
@@ -3346,7 +3357,7 @@ async function debrief(run, c) {
     await page.click('#o-again');
     await waitFor(page, () => window.__game.screen === 'race');
     await toFlag(page, keys, 5);
-    await waitFor(page, () => window.__game.screen === 'results');
+    await toResults(page, 'results');
     const k2 = await card(page);
     const d2 = await read(page, () => window.__game.race.debrief(window.__game.localId));
     const was = (Math.round(sum.best * 1000) / 1000).toFixed(3);
@@ -3359,7 +3370,7 @@ async function debrief(run, c) {
     await page.click('#o-champ');
     await waitFor(page, () => window.__game.screen === 'race');
     await toFlag(page, keys, 5);
-    await waitFor(page, () => window.__game.screen === 'champ');
+    await toResults(page, 'champ');
     const kc = await card(page);
     c.ok('Desktop championship round: the debrief follows the round results, its result line says the place, and Continue stays visible',
       kc.kind === 'ok' && kc.afterTable && /^P\d/.test(kc.rows.result) && kc.btns.some((b) => b.id === 'o-next') && btnsOk(kc), { rows: kc.rows, btns: kc.btns });
@@ -3406,7 +3417,7 @@ async function debrief(run, c) {
   await f.tap('#o-start');
   await waitFor(page, () => window.__game.screen === 'race');
   await toFlag(page, keys, 5, { deslot: true });
-  await waitFor(page, () => window.__game.screen === 'results');
+  await toResults(page, 'results');
   await frames(page, 2);
   const p1 = await card(page);
   c.ok('Touch 360x640: the debrief starts folded, showing its title and the takeaway (1 de-slot); Race Again and Menu visible and on top',
@@ -3447,8 +3458,275 @@ async function debrief(run, c) {
   return s;
 }
 
-const SCENARIOS = { tracks, race, controlled, routing, practice, championship, touch, responsive, touchrace, reverse, service, lastchance, stall, queue, autosg, autobay, localslot, online, memory, netbanner, racelength, carsetup, debrief };
-const USAGE = 'usage: browser-check.mjs [tracks|race|controlled|routing|practice|championship|touch|responsive|touchrace|reverse|service|lastchance|stall|queue|autosg|autobay|localslot|online|memory|netbanner|racelength|carsetup|debrief ...] | perf | compare <a.json> <b.json>\n'
+/**
+ * Post-finish spectating (#135, docs/spectating.md): a local Sprint race the player finishes ahead of the field, desktop (mouse
+ * and keys) and phone (Chromium touch emulation): the spectator view comes up by itself with Throttle still held across the
+ * flag (nothing more reaches any car), follows the leading car still running, Previous / Next, Whole track, the standings card
+ * with a row's Watch, the watched car finishing, the panel clear of the standings, times, minimap, buttons, messages and the
+ * connection banner at every MSG_VIEWS size with touch and with a mouse, Skip to results (a valid classification), Race again
+ * with the key / finger still down (the new race needs a fresh press), and a championship round watched then skipped.
+ */
+async function spectate(run, c) {
+  const S = (id, vars = {}) => Object.entries(vars).reduce((x, [k, v]) => x.split(`{${k}}`).join(String(v)), STRINGS[id]);
+  /** the local car to the line ending lap `lap`, the field put a little ahead on lap 1 (so it races on for minutes) */
+  const nearFlag = (page, lap) => read(page, (n) => {
+    const gm = window.__game, T = gm.T, r = gm.race, p = r.car(gm.localId);
+    gm.advance(7);
+    r.cars.forEach((x, i) => { if (x !== p) x.u += 40 + i * 8; });
+    p.u = T.FINISH_S + n * T.L - 3; p.hiU = p.u; p.crossed = n; p.lapsDone = n - 1; p.sectors = 7; p.v = 16; p.mode = 'race'; p.lapValid = true;
+  }, lap);
+  const state = (page) => read(page, () => {
+    const g = window.__game, r = g.race, p = r.car(g.localId), tg = g.spec.target ? r.car(g.spec.target) : null;
+    const el = (id) => document.getElementById(id);
+    return {
+      screen: g.screen, localId: g.localId, spec: g.spec, phase: r.phase, me: p.status, meId: p.id,
+      running: r.order().filter((x) => x.status === 'running').map((x) => x.id), target: tg && { id: tg.id, status: tg.status, num: tg.num, name: tg.name, lap: Math.min(r.targetLaps, tg.lapsDone + 1), laps: r.targetLaps },
+      held: { throttle: g.input.held('throttle'), brake: g.input.held('brake') }, pad: !el('t-pad').hidden, panel: !el('h-spec').hidden, dock: document.querySelector('.bl').getClientRects().length > 0 ? 'shown' : 'none',
+      who: el('h-spec-who').textContent, lap: el('h-spec-lap').textContent, mine: el('h-spec-me').textContent, time: el('h-time').textContent, whole: el('s-whole').getAttribute('aria-pressed'),
+      skip: !el('s-skip').hidden, leave: !el('s-leave').hidden, cam: g.camTarget, finishTime: p.finishTime,
+    };
+  });
+  /** the spectator panel against everything it could land on (#121, #126, #128, #130 layouts), the banner and a long message shown */
+  const measureSpec = () => {
+    const shown = (e) => e && e.getClientRects().length > 0 && getComputedStyle(e).visibility !== 'hidden' && getComputedStyle(e).display !== 'none';
+    const rectOf = (e) => { const r = e.getBoundingClientRect(); return { x: Math.round(r.x), y: Math.round(r.y), r: Math.round(r.right), b: Math.round(r.bottom) }; };
+    const hit = (a, b) => a.x < b.r - 0.5 && b.x < a.r - 0.5 && a.y < b.b - 0.5 && b.y < a.b - 0.5;
+    const parts = {};
+    for (const [k, q] of Object.entries({ top: '.tl', timer: '.tc', mini: '#h-mini', toast: '#h-toast', banner: '#net-banner', spec: '#h-spec' })) { const e = document.querySelector(q); if (shown(e)) parts[k] = rectOf(e); }
+    for (const e of document.querySelectorAll('.tr .btn')) if (shown(e)) parts[e.id] = rectOf(e);
+    const pairs = [];
+    if (parts.spec) for (const k of Object.keys(parts)) if (k !== 'spec' && hit(parts.spec, parts[k])) pairs.push(`spec/${k}`);
+    const btns = [...document.querySelectorAll('#h-spec button')].filter(shown).map((b) => { const r = b.getBoundingClientRect(); const top = document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2); return { id: b.id, w: Math.round(r.width), h: Math.round(r.height), onTop: !!top && (top === b || b.contains(top)), inside: r.x >= 0 && r.y >= 0 && r.right <= innerWidth + 0.5 && r.bottom <= innerHeight + 0.5 }; });
+    const sp = parts.spec;
+    return { pairs, btns, spec: sp, inside: !!sp && sp.x >= 0 && sp.y >= 0 && sp.r <= innerWidth + 0.5 && sp.b <= innerHeight + 0.5, banner: !!parts.banner, toast: !!parts.toast, pad: !document.getElementById('t-pad').hidden, dock: shown(document.querySelector('.bl')), touch: document.body.classList.contains('touch'), pageX: document.documentElement.scrollWidth - document.documentElement.clientWidth };
+  };
+  /** what a long message and the reconnect banner look like at their worst (layout only: set by hand, the race is held still) */
+  const crowd = (page) => read(page, (txt) => {
+    const t = document.getElementById('h-toast'); t.textContent = 'Second contact with Green Viper. One more and you serve a stop-and-go penalty'; t.className = 'toast show warn';
+    const b = document.getElementById('net-banner'); b.textContent = txt; b.className = 'show rec';
+    for (const x of window.__game.race.cars) Object.assign(x, { offences: 2, timePen: 10 });
+  }, S('net.reconnecting', { n: 20 }));
+
+  // ---------------------------------------------------------------- desktop, mouse and keys
+  const d = await open(run, { viewport: { width: 1280, height: 800 }, fixtures: { 'srgp.track': TRACK } });
+  {
+    const { page, keys } = d;
+    await page.click('[data-rlen="sprint"]');
+    await page.click('#o-start');
+    await waitFor(page, () => window.__game.screen === 'race');
+    // Throttle held across the flag, as a driver does (pressed while still racing: the car is 3 m from the line once placed)
+    await keys.set('KeyW', true);
+    await nearFlag(page, 5);
+    await read(page, () => window.__game.advance(3));
+    await waitFor(page, () => window.__game.spec.active);
+    await frames(page, 3);
+    let a = await state(page);
+    c.ok('Desktop: at the flag the spectator view comes up by itself (no card over the action); the driving dock and pad are gone and the panel shows',
+      a.screen === 'race' && a.me === 'finished' && a.spec.active && a.panel && a.dock === 'none' && !a.pad && a.phase === 'racing' && a.running.length === 3, a);
+    c.ok('Desktop: following the leading car still running, labelled as that car (number, name, lap of the actual 5) and never "You"; the player is still the local driver',
+      a.target && a.target.id === a.running[0] && a.target.id !== a.meId && a.localId === 'solo' && a.who === `${S('spec.watching')} #${a.target.num} ${a.target.name}` && a.lap === S('spec.lap', { n: a.target.lap, m: 5 }) && a.target.laps === 5, a);
+    c.ok('Desktop: the personal line is the player\'s own (flag, provisional place); Skip to results offered, no Leave (a local race)', a.mine === S('spec.youFinished', { n: 1 }) && a.skip && !a.leave, a.mine);
+    c.ok('Desktop: Throttle still physically held after the flag drives nothing (released on entry)', !a.held.throttle && !a.held.brake, a.held);
+    const t0 = a.time;
+    await sleep(1500);
+    a = await state(page);
+    c.ok('Desktop: the personal race clock stopped at the player\'s finish', a.time === t0 && t0 !== '0:00.0' && a.phase === 'racing', { t0, now: a.time, finishTime: a.finishTime });
+    // a fresh press while watching is ignored too
+    await keys.set('KeyW', false); await keys.set('KeyS', true);
+    await frames(page, 2);
+    a = await state(page);
+    c.ok('Desktop: a fresh Brake press while spectating is not taken as driving input', !a.held.brake && !a.held.throttle, a.held);
+    await keys.set('KeyS', false);
+    // Previous / Next
+    const first = a.target.id;
+    await keys.tap('ArrowRight'); await frames(page, 2);
+    const nx = await state(page);
+    await keys.tap('ArrowLeft'); await frames(page, 2);
+    const pv = await state(page);
+    await page.click('#s-next'); await frames(page, 2);
+    const nx2 = await state(page);
+    c.ok('Desktop: → and ← (and the ▶ button) move between the running cars; the local driver stays the player', nx.target.id !== first && nx.running.includes(nx.target.id) && pv.target.id === first && nx2.target.id !== first && nx2.localId === 'solo', { first, next: nx.target.id, back: pv.target.id, button: nx2.target.id });
+    // Whole track
+    await keys.tap('KeyC');
+    const centre = await read(page, () => ({ x: window.__game.T.BOUNDS.cx, z: -window.__game.T.BOUNDS.cy - 2 }));
+    // the camera eases over (frame-rate bound on this host): wait for it to arrive, up to 15 s
+    await waitFor(page, (q) => Math.hypot(window.__game.camTarget.x - q.x, window.__game.camTarget.z - q.z) < 3, centre, 15000).catch(() => null);
+    const w1 = await state(page);
+    await page.click('#s-whole'); await frames(page, 2);
+    const w2 = await state(page);
+    c.ok('Desktop: C shows the whole track (button pressed, camera over the circuit centre); the button goes back to following', w1.spec.whole && w1.whole === 'true' && Math.hypot(w1.cam.x - centre.x, w1.cam.z - centre.z) < 3 && !w2.spec.whole && w2.whole === 'false' && !!w2.spec.target, { w1: [w1.spec, w1.cam], centre, w2: w2.spec });
+    await page.screenshot({ path: path.join(run.out, 'spectate-desktop-1280x800.png') });
+    // standings: T opens, a row's Watch picks that car and returns
+    await keys.tap('KeyT');
+    await waitFor(page, () => window.__game.screen === 'netwait');
+    await frames(page, 2);
+    const card = await read(page, () => ({ head: document.getElementById('w-head').textContent, rows: [...document.querySelectorAll('#w-rows tr')].map((r) => r.dataset.status), picks: [...document.querySelectorAll('#w-rows [data-watch]')].map((b) => b.dataset.watch), me: document.querySelector('#w-rows tr.me')?.textContent ?? '', btns: [...document.querySelectorAll('.netwait > .row button')].map((b) => b.id) }));
+    const before = await read(page, () => window.__game.race.raceTime);
+    await sleep(600);
+    const after = await read(page, () => window.__game.race.raceTime);
+    c.ok('Desktop: T opens Standings / My result over the live race (it keeps running): your row, a Watch button on each running car only, Watch the race / Skip / Menu',
+      card.rows.length === 4 && card.picks.length === 3 && !card.picks.includes('solo') && card.me.includes(S('hud.you')) && card.btns.join() === 'w-watch,w-skip,w-menu' && after > before, { card, before, after });
+    const pick = card.picks[card.picks.length - 1];
+    await page.click(`#w-rows [data-watch="${pick}"]`);
+    await waitFor(page, () => window.__game.screen === 'race');
+    a = await state(page);
+    c.ok('Desktop: a standings row\'s Watch follows that car and returns to the race view', a.spec.target === pick && a.spec.active && !a.spec.whole, a.spec);
+    // the watched car takes the flag: the view moves on to another running car
+    await read(page, (id) => { const r = window.__game.race; r.finishCar(r.car(id), r.raceTime, null); }, pick);
+    await frames(page, 3);
+    a = await state(page);
+    c.ok('Desktop: when the watched car finishes the view moves to a car still running (never a stale target)', a.spec.target !== pick && a.running.includes(a.spec.target), { was: pick, now: a.spec.target, running: a.running });
+    // layout at every message size, mouse: the race held still while measured
+    await read(page, () => { window.__game.stepper.frame = () => 0; });
+    c.evidence['spec-mouse'] = [];
+    const sizes = [...MSG_VIEWS, [1280, 720], [1920, 1080]];
+    for (const [w, h] of sizes) {
+      await page.setViewportSize({ width: w, height: h });
+      await frames(page, 3);
+      await crowd(page);
+      await frames(page, 2);
+      const m = await read(page, measureSpec);
+      c.evidence['spec-mouse'].push({ size: `${w}x${h}`, pairs: m.pairs, spec: m.spec });
+      c.ok(`Spectator panel at ${w}x${h} (mouse): on screen, clear of the standings, times, minimap, HUD buttons, a long message and the reconnect banner; every button on top`,
+        !m.touch && m.inside && m.pairs.length === 0 && m.btns.length >= 5 && m.btns.every((b) => b.onTop && b.inside && b.h >= 36) && m.banner && m.toast && !m.dock && m.pageX <= 0, { pairs: m.pairs, spec: m.spec, btns: m.btns.filter((b) => !b.onTop || !b.inside || b.h < 36) });
+      if ([568, 844, 1280].includes(w)) await page.screenshot({ path: path.join(run.out, `spectate-mouse-${w}x${h}.png`) });
+    }
+    await page.setViewportSize({ width: 1280, height: 800 });
+    // the layout-only flags and penalties come off again before the race is finished
+    await read(page, () => { const st = window.__game.stepper; delete st.frame; for (const x of window.__game.race.cars) Object.assign(x, { offences: 0, timePen: 0 }); document.getElementById('net-banner').className = ''; });
+    await frames(page, 3);
+    // Skip to results with Throttle held down again before the press: a valid final classification, the player's own row
+    await keys.set('KeyW', true);
+    await page.click('#s-skip');
+    await waitFor(page, () => window.__game.screen === 'results');
+    const res = await read(page, () => { const r = window.__game.race; return { phase: r.phase, final: r.final.map((x) => `${x.id}:${x.status}:${x.pos}`), rows: document.querySelectorAll('.card.results tbody tr').length, mine: document.querySelector('.card.results tr.me')?.textContent ?? '', place: document.querySelector('.card.results .place').textContent, localId: window.__game.localId, spec: window.__game.spec.active, deb: document.querySelector('.card.results .debrief')?.dataset.debrief ?? null }; });
+    c.ok('Desktop: Skip to results finishes the field through the race\'s own run-on: phase done, every car terminal, the player\'s row and place, the debrief; spectating over',
+      res.phase === 'done' && res.final.length === 4 && res.final.every((x) => !x.includes(':running')) && res.final[0] === 'solo:finished:1' && res.rows === 4 && res.mine.includes(S('hud.you')) && res.place === S('res.youPlace', { n: 1 }) && res.localId === 'solo' && !res.spec && res.deb === 'ok', res);
+    // Race again with W still held from before: the new race does not accelerate until W is pressed again
+    await page.click('#o-again');
+    await waitFor(page, () => window.__game.screen === 'race' && window.__game.race.phase === 'racing', undefined, 30000);
+    await read(page, () => window.__game.advance(1.5));
+    await frames(page, 2);
+    const again = await read(page, () => { const g = window.__game, p = g.race.car(g.localId); return { held: g.input.held('throttle'), v: p.v, throttle: p.throttle, spec: g.spec.active, pad: !document.getElementById('t-pad').hidden, panel: !document.getElementById('h-spec').hidden, dock: document.querySelector('.bl').getClientRects().length > 0 ? 'shown' : 'none' }; });
+    c.ok('Desktop: Race again with Throttle held since the last race: driving mode is back (dock, no panel) and the car does not move until Throttle is pressed again',
+      !again.held && again.v < 0.05 && again.throttle < 0.01 && !again.spec && !again.panel && again.dock !== 'none', again);
+    await keys.set('KeyW', false);
+    await keys.set('KeyW', true);
+    await read(page, () => window.__game.advance(1));
+    const press = await read(page, () => { const g = window.__game; return { held: g.input.held('throttle'), v: g.race.car(g.localId).v }; });
+    await keys.set('KeyW', false);
+    c.ok('Desktop: a fresh press drives the new race', press.held && press.v > 0.5, press);
+    await page.click('#b-pause');
+    await page.click('#o-menu');
+    await waitFor(page, () => window.__game.screen === 'title');
+
+    // a championship round: watched after the flag, then skipped; stored once with a full classification
+    await page.click('#o-champ');
+    await waitFor(page, () => window.__game.screen === 'race' && window.__game.mode === 'champ');
+    await nearFlag(page, 5);
+    await keys.set('KeyW', true);
+    await read(page, () => window.__game.advance(3));
+    await keys.set('KeyW', false);
+    await waitFor(page, () => window.__game.spec.active);
+    await frames(page, 3);
+    const ch = await state(page);
+    const round = await read(page, () => document.getElementById('h-round').textContent);
+    c.ok('Desktop championship round: watched after the flag (the round label and the panel), the save not touched while watching',
+      ch.spec.active && ch.panel && !!ch.target && round.includes('1/4') && (await read(page, () => JSON.parse(localStorage.getItem('srgp.champ')).rounds.length)) === 0, { spec: ch.spec, round });
+    await page.click('#s-skip');
+    await waitFor(page, () => window.__game.screen === 'champ');
+    const saved = await read(page, () => JSON.parse(localStorage.getItem('srgp.champ')));
+    c.ok('Desktop championship: Skip stores the round once, against its circuit, with all four cars classified and the player first',
+      saved.rounds.length === 1 && saved.rounds[0].order.length === 4 && saved.rounds[0].order[0].idx === 0, saved.rounds[0]);
+    await frames(page, 4);
+    c.ok('Desktop championship: still one round after more frames', (await read(page, () => JSON.parse(localStorage.getItem('srgp.champ')).rounds.length)) === 1);
+  }
+  c.ok('Desktop part: no page or console errors', d.errors.length === 0, d.errors.slice(0, 5));
+  await d.context.close();
+
+  // ---------------------------------------------------------------- phone, touch emulation
+  const s = await open(run, { viewport: { width: 390, height: 844 }, dpr: 1, device: PHONE, fixtures: { 'srgp.track': TRACK } });
+  const { page } = s;
+  const cdp = await s.context.newCDPSession(page);
+  const f = new Fingers(page, cdp);
+  await page.locator('[data-touch="on"]').tap();
+  await page.locator('[data-rlen="sprint"]').tap();
+  await page.locator('#o-start').tap();
+  await waitFor(page, () => window.__game.screen === 'race' && !document.getElementById('t-pad').hidden);
+  // a finger on Throttle across the flag (put down while still racing: the car is 3 m from the line once placed)
+  const thrAt = await f.at('#t-throttle');
+  const finger = await f.put(thrAt);
+  await nearFlag(page, 5);
+  await read(page, () => window.__game.advance(3));
+  await waitFor(page, () => window.__game.spec.active);
+  await frames(page, 3);
+  let a = await state(page);
+  c.ok('Touch: at the flag the spectator view comes up; the pad is hidden and the finger still on the glass holds nothing', a.spec.active && a.panel && !a.pad && !a.held.throttle && a.touch !== false && a.dock === 'none', { spec: a.spec, pad: a.pad, held: a.held });
+  // the finger comes off: the browser sends no click to a menu card's buttons while another finger holds the glass
+  await f.lift(finger);
+  const first = a.target.id;
+  await f.tap('#s-next'); await frames(page, 2);
+  const nx = await state(page);
+  await f.tap('#s-prev'); await frames(page, 2);
+  const pv = await state(page);
+  c.ok('Touch: ▶ and ◀ change the watched driver; the local driver stays the player', nx.target.id !== first && pv.target.id === first && nx.localId === 'solo', { first, next: nx.target.id, back: pv.target.id });
+  await f.tap('#s-whole'); await frames(page, 2);
+  const w = await state(page);
+  c.ok('Touch: Whole track', w.spec.whole && w.whole === 'true', w.spec);
+  await f.tap('#s-stand');
+  await waitFor(page, () => window.__game.screen === 'netwait');
+  await frames(page, 2);
+  const m = await read(page, measureMenu);
+  c.ok('Touch: Standings opens the card; it fits the phone with every control reachable and 44 px or more', menuOk(m), m);
+  await page.screenshot({ path: path.join(run.out, 'spectate-touch-standings-390x844.png') });
+  await page.locator('#w-watch').tap();
+  await waitFor(page, () => window.__game.screen === 'race');
+  a = await state(page);
+  c.ok('Touch: Watch the race returns to spectating with the pad still hidden', a.spec.active && !a.pad && a.panel, { spec: a.spec, pad: a.pad });
+  // Skip, then Race again (Enter) with a finger already on the glass where Throttle will be: the pad comes back under it, and
+  // that finger holds nothing until it presses again
+  await f.tap('#s-skip');
+  await waitFor(page, () => window.__game.screen === 'results');
+  const ghost = await f.put(thrAt);
+  await page.keyboard.press('Enter');
+  await waitFor(page, () => window.__game.screen === 'race' && window.__game.race.phase === 'racing', undefined, 30000);
+  await read(page, () => window.__game.advance(1.5));
+  await frames(page, 2);
+  const again = await read(page, () => { const g = window.__game, p = g.race.car(g.localId); return { held: g.input.held('throttle'), v: p.v, pad: !document.getElementById('t-pad').hidden, spec: g.spec.active }; });
+  c.ok('Touch: Race again with a finger already down on Throttle\'s place: the pad is back, nothing is held, the car stays on the grid', again.pad && !again.held && again.v < 0.05 && !again.spec, again);
+  await f.lift(ghost);
+  const fresh = await f.put('#t-throttle');
+  await read(page, () => window.__game.advance(1));
+  const go = await read(page, () => { const g = window.__game; return { held: g.input.held('throttle'), v: g.race.car(g.localId).v }; });
+  await f.lift(fresh);
+  c.ok('Touch: a fresh touch on Throttle drives the new race', go.held && go.v > 0.5, go);
+  // the layout at every message size, with touch, watching this second race after its flag (no finger down)
+  await nearFlag(page, 5);
+  await read(page, () => window.__game.advance(3));
+  await waitFor(page, () => window.__game.spec.active);
+  // layout at every message size, touch
+  await read(page, () => { window.__game.stepper.frame = () => 0; });
+  c.evidence['spec-touch'] = [];
+  for (const [wd, ht] of MSG_VIEWS) {
+    await page.setViewportSize({ width: wd, height: ht });
+    await frames(page, 3);
+    await crowd(page);
+    await frames(page, 2);
+    const mm = await read(page, measureSpec);
+    c.evidence['spec-touch'].push({ size: `${wd}x${ht}`, pairs: mm.pairs, spec: mm.spec });
+    c.ok(`Spectator panel at ${wd}x${ht} (touch): on screen, clear of the standings, times, minimap, HUD buttons, a long message and the reconnect banner; every button on top and 48 px or more; no pad`,
+      mm.touch && mm.inside && mm.pairs.length === 0 && mm.btns.length >= 5 && mm.btns.every((b) => b.onTop && b.inside && b.h >= 48 && b.w >= 48) && !mm.pad && !mm.dock && mm.pageX <= 0, { pairs: mm.pairs, spec: mm.spec, btns: mm.btns.filter((b) => !b.onTop || !b.inside || b.h < 48 || b.w < 48) });
+    if ([360, 568, 844].includes(wd)) await page.screenshot({ path: path.join(run.out, `spectate-touch-${wd}x${ht}.png`) });
+  }
+  await page.setViewportSize({ width: 390, height: 844 });
+  await read(page, () => { delete window.__game.stepper.frame; for (const x of window.__game.race.cars) Object.assign(x, { offences: 0, timePen: 0 }); document.getElementById('net-banner').className = ''; });
+  await frames(page, 3);
+  c.ok('Touch part: no page or console errors', s.errors.length === 0, s.errors.slice(0, 5));
+  return s;
+}
+
+const SCENARIOS = { tracks, race, controlled, routing, practice, championship, touch, responsive, touchrace, reverse, service, lastchance, stall, queue, autosg, autobay, localslot, online, memory, netbanner, racelength, carsetup, debrief, spectate };
+const USAGE = 'usage: browser-check.mjs [tracks|race|controlled|routing|practice|championship|touch|responsive|touchrace|reverse|service|lastchance|stall|queue|autosg|autobay|localslot|online|memory|netbanner|racelength|carsetup|debrief|spectate ...] | perf | compare <a.json> <b.json>\n'
   + 'options: --dist <dir> --url <url> --commit <sha> --machine <name> --label <name> --viewport WxH --dpr N --preset low|balanced|high\n'
   + '         --seconds N --headed --channel <chrome|msedge> --out <dir> --max-minutes N';
 

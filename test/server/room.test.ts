@@ -572,8 +572,10 @@ describe('snapshot traffic follows wall time (#49)', () => {
   const LINK = 256 * 1024;   // modeled drain capacity, bytes/s (not a WAN measurement)
   /**
    * The issue's representative finish sequence: humans + AI on the production 10 ms tick, 8 s of racing, then every human
-   * finishes (Race.finishCar, as the race does at the line) while the AI field still runs, and the accelerated run-on goes to
-   * the classification. Optionally the process stalls first, so the race catches up at maxCatchUpSteps per tick.
+   * finishes (Race.finishCar, as the race does at the line) while the AI field still runs on to the classification. Since #135
+   * the finishers stay connected, so the field finishes at wall-clock pace (they may be watching) rather than in the accelerated
+   * run-on, which now only runs with nobody connected; the cap through switches between the two is in spectate.test.ts.
+   * Optionally the process stalls first, so the race catches up at maxCatchUpSteps per tick.
    */
   function finishSequence(humans: number, over: Partial<Config> = {}, stallMs = 0) {
     const h = harness(over, 12345);
@@ -614,7 +616,7 @@ describe('snapshot traffic follows wall time (#49)', () => {
     const hz = h.cfg.snapshotHz;
     expect(hz).toBe(20);
     const runOnMs = runOnTo - runOnFrom;
-    expect(runOnMs).toBeGreaterThan(2000);   // a real accelerated run-on: many simulated seconds per wall second
+    expect(runOnMs).toBeGreaterThan(2000);   // a real run-on to the classification (at wall-clock pace since #135)
     for (const p of peers) {
       expect(p.closed).toBe(null);
       expect(maxInWindow(p.stateAt, 1000)).toBeLessThanOrEqual(bound(1000, hz));

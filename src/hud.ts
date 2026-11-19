@@ -6,8 +6,19 @@ import { laneCue, pitCue } from './input';
 import { FuelLapsEstimator, SteadyFigure, fuelLapsVisible, fuelWarning, lapsToFlag } from './fuelLaps';
 import { raceLength } from './raceLength';
 
-/** `me` is the local driver: the HUD shows that car's state, whatever its grid slot. */
-export interface HudExtra { mode: 'race' | 'practice' | 'champ'; pbMs: number; round: string; me: DriverId; }
+/**
+ * The spectator panel's content (#135): the watched car (labelled as that car's, never "You"), whether the whole track is shown,
+ * the local driver's own result line, and which actions this race offers (Skip locally, Leave online).
+ */
+export interface SpecView {
+  target: { id: DriverId; name: string; num: number; lap: number; laps: number } | null;
+  whole: boolean; me: string; lost: boolean; skip: boolean; leave: boolean;
+}
+/**
+ * `me` is the local driver: the HUD shows that car's state, whatever its grid slot. `doneT`: race time the local driver's race
+ * ended (finish, DQ or DNF), so the personal clock stops there (#135). `spec`: the spectator panel, or null while driving.
+ */
+export interface HudExtra { mode: 'race' | 'practice' | 'champ'; pbMs: number; round: string; me: DriverId; doneT?: number | null; spec?: SpecView | null; }
 
 export function fmt(sec: number): string {
   if (!isFinite(sec) || sec <= 0) return '–:––.–';
@@ -99,6 +110,21 @@ export class Hud {
         </div>
       </div>
       <div class="br"><canvas id="h-mini"></canvas></div>
+      <div id="h-spec" class="specbar" role="region" aria-label="${t('spec.tag')}" hidden>
+        <div class="spec-info">
+          <div class="spec-who"><span class="chip cyan spec-tag">${t('spec.tag')}</span> <b id="h-spec-who"></b> <span id="h-spec-lap" class="mono"></span></div>
+          <div id="h-spec-me" class="spec-me"></div>
+          <div id="h-spec-lost" class="spec-lost" role="status"></div>
+        </div>
+        <div class="spec-btns">
+          <button id="s-prev" class="btn sq" aria-label="${t('spec.prev')}" title="${t('spec.prev')} (←)">◀</button>
+          <button id="s-next" class="btn sq" aria-label="${t('spec.next')}" title="${t('spec.next')} (→)">▶</button>
+          <button id="s-whole" class="btn" aria-pressed="false" title="C">${t('spec.whole')}</button>
+          <button id="s-stand" class="btn" title="T">${t('spec.stand')}</button>
+          <button id="s-skip" class="btn" hidden>${t('spec.skip')}</button>
+          <button id="s-leave" class="btn" hidden>${t('spec.leave')}</button>
+        </div>
+      </div>
       <div id="h-toast" class="toast"></div>
       <div id="h-lights" class="lights">${'<i></i>'.repeat(5)}</div>
       <div id="h-go" class="go"></div>
@@ -204,8 +230,32 @@ export class Hud {
     if (this.toastT > 0) { this.toastT -= dt; if (this.toastT <= 0) this.el['h-toast'].classList.remove('show'); }
   }
 
+  /**
+   * The spectator panel (#135). While it shows, the driving dock (meters, chips, race instructions) and the start lights are
+   * hidden (#hud.spec): nothing there is the driver's to act on any more, and the panel takes the dock's place.
+   */
+  spectate(v: SpecView | null): void {
+    const on = !!v;
+    if (this.root.classList.contains('spec') !== on) this.root.classList.toggle('spec', on);
+    const panel = this.el['h-spec'];
+    if (panel.hidden === on) panel.hidden = !on;
+    if (!v) return;
+    const tg = v.target;
+    this.set('h-spec-who', tg ? `${t('spec.watching')} #${tg.num} ${escHtml(tg.name)}` : t('spec.none'), true);
+    this.set('h-spec-lap', tg ? t('spec.lap', { n: Math.min(tg.laps, Math.max(1, tg.lap)), m: tg.laps }) : '');
+    this.set('h-spec-me', v.me);
+    this.set('h-spec-lost', v.lost ? t('net.lostContact') : '');
+    const whole = String(v.whole || !tg);
+    if (this.el['s-whole'].getAttribute('aria-pressed') !== whole) this.el['s-whole'].setAttribute('aria-pressed', whole);
+    for (const id of ['s-prev', 's-next']) { const b = this.el[id] as HTMLButtonElement; if (b.disabled === !!tg) b.disabled = !tg; }
+    if (this.el['s-skip'].hidden === v.skip) this.el['s-skip'].hidden = !v.skip;
+    if (this.el['s-leave'].hidden === v.leave) this.el['s-leave'].hidden = !v.leave;
+  }
+
   update(race: Race, dt: number, time: number, x: HudExtra = { mode: 'race', pbMs: 0, round: '', me: SOLO_ID }): void {
     const p = race.car(x.me) ?? race.cars[0];
+    this.spectate(x.spec ?? null);
+    const watch = x.spec?.target?.id ?? null;
     const order = race.order();
     const pos = order.indexOf(p) + 1;
     const practice = x.mode === 'practice';
@@ -225,10 +275,11 @@ export class Hud {
       this.set('h-bestlbl', t('hud.best'));
       this.el['h-stand'].style.display = '';
     }
-    const stand = order.map((c, i) => `<div class="${c === p ? 'me' : ''}"><b>${i + 1}</b><i style="background:${hex(c.color)}"></i><span class="nm">${escHtml(carLabel(c, p.id))}</span>${flags(c)}${c.mode === 'service' || c.mode === 'bayIn' ? ' ⛽' : ''}${c.status === 'finished' ? ' 🏁' : ''}</div>`).join('');
+    const stand = order.map((c, i) => `<div class="${c === p ? 'me' : ''}${c.id === watch ? ' watch' : ''}"><b>${i + 1}</b><i style="background:${hex(c.color)}"></i><span class="nm">${escHtml(carLabel(c, p.id))}</span>${flags(c)}${c.mode === 'service' || c.mode === 'bayIn' ? ' ⛽' : ''}${c.status === 'finished' ? ' 🏁' : ''}</div>`).join('');
     this.set('h-stand', stand, true);
     if (!practice) {
-      const cur = race.phase === 'countdown' ? 0 : p.finished ? p.finishTime : race.raceTime;
+      // the personal clock stops when the driver's own race does (#135): the flag, or the DQ / DNF the page saw (doneT)
+      const cur = race.phase === 'countdown' ? 0 : p.status === 'finished' ? p.finishTime : p.status !== 'running' && x.doneT != null ? x.doneT : p.finished ? p.finishTime : race.raceTime;
       this.set('h-time', fmt(cur).replace('–:––.–', '0:00.0'));
       this.set('h-last', fmt(p.lastLap));
       this.set('h-best', fmt(p.bestLap));
@@ -348,7 +399,7 @@ export class Hud {
     for (let i = 0; i < 5; i++) (kids[i] as HTMLElement).className = i < n ? 'on' : '';
 
     this.tickToast(dt);
-    this.drawMini(race, time, p.id);
+    this.drawMini(race, time, p.id, watch);
   }
 
   /**
@@ -428,7 +479,7 @@ export class Hud {
     g.fillStyle = '#062a33'; g.font = 'bold 10px sans-serif'; g.textAlign = 'center'; g.textBaseline = 'middle'; g.fillText('P', pe.x, pe.y + 6.5);
   }
 
-  drawMini(race: Race, time: number, me: DriverId): void {
+  drawMini(race: Race, time: number, me: DriverId, watch: DriverId | null = null): void {
     const g = this.mctx;
     // the static layers, pixel for pixel at the backing resolution (identity transform: no resampling, crisp at 2x)
     g.save(); g.setTransform(1, 0, 0, 1, 0, 0);
@@ -441,6 +492,10 @@ export class Hud {
     for (const c of cars) {
       if (c.mode === 'tow') continue;
       const p = this.mp({ x: c.x, y: c.y });
+      // the watched car (#135): a cyan ring, so the camera's subject can be found on the map; the player's own dot stays as it is
+      if (c.id === watch && c.id !== me) {
+        g.strokeStyle = 'rgba(34,211,238,0.95)'; g.lineWidth = 2; g.beginPath(); g.arc(p.x, p.y, 8.5, 0, Math.PI * 2); g.stroke();
+      }
       if (c.id === me) {
         const pulse = 7 + Math.sin(time * 6) * 2;
         g.strokeStyle = 'rgba(255,224,102,0.9)'; g.lineWidth = 2; g.beginPath(); g.arc(p.x, p.y, pulse + 2, 0, Math.PI * 2); g.stroke();

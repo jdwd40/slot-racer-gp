@@ -77,8 +77,12 @@ export const MODE_RULES: Record<Mode, ModeRules> = {
 
 /** AI fill names, by slot: never 'YOU' (DRIVERS[0].name), and always marked as AI. */
 const AI_NAMES = ['Gold Flash', 'Red Comet', 'Blue Arrow', 'Green Viper'];
-/** Run-on speed once every human is terminal: nobody is waiting on wall time, so the AI field is finished faster. */
-const RUNON_STEPS = 8;
+/**
+ * Run-on speed once every human is terminal and none of them is still connected (#135): nobody is watching or waiting on wall
+ * time, so the AI field is finished faster. While a terminal driver is connected (spectating, or on the standings card) the
+ * race keeps wall-clock pace instead, so the remaining cars can be watched at normal speed.
+ */
+export const RUNON_STEPS = 8;
 // The finish window (multiplayer and one-human) and the race time limit come from the race's length preset
 // (src/raceLength.ts): Standard's are the 90 s / 120 s / 1200 s every race used before presets (#132).
 /**
@@ -138,6 +142,8 @@ export class Room {
   /** wall-clock snapshot slot (see publish) of the last state broadcast, and the step it carried */
   private snapSlot = 0;
   private snapTick = -1;
+  /** #135: how the race is being stepped: wall-clock pace ('live') or the accelerated AI run-on ('runon'); for logs and tests */
+  pace: 'live' | 'runon' = 'live';
   /** this race's snapshot encoder (#67): holds the last broadcast state every member has, which deltas are relative to */
   private enc: SnapEncoder | null = null;
   /** the finalized envelope of the last race (state 'results'); built once per race */
@@ -437,7 +443,7 @@ export class Room {
     for (const p of this.parts) { p.inRace = !p.left; p.held = neutral(); p.ready = false; p.ctlAt = now; }
     this.state = 'race';
     this.baseWall = now; this.stepsDone = 0; this.lagSteps = 0; this.startedAt = now; this.greenAt = null;
-    this.laps = []; this.evBuf = []; this.result = null; this.snapSlot = 0; this.snapTick = -1;
+    this.laps = []; this.evBuf = []; this.result = null; this.snapSlot = 0; this.snapTick = -1; this.pace = 'live';
     this.log.info('race.start', { room: this.id, race: this.raceId, track: this.settings.track, length: len.id, mode: this.mode, humans, ai: this.roster.length - humans });
     this.touch(now);
     this.broadcastRoom();
@@ -489,6 +495,13 @@ export class Room {
     if (this.state === 'results' && now - this.resultsAt > this.cfg.resultsIdleS * 1000) this.close('idle');
   }
 
+  /**
+   * #135: whether a driver of this race may be watching it: an in-race seat that was not given up and still has a connection
+   * (a terminal driver on the spectator view or the standings card, or a driver still racing). A seat in its reconnect hold
+   * has no connection, so it does not count until it resumes; one that left never does.
+   */
+  private watched(): boolean { return this.parts.some((p) => p.inRace && !p.left && p.peer !== null); }
+
   /** This seat's car is still racing: running, not finished, not retired. */
   private stillRacing(p: Participant): boolean {
     const c = this.race?.car(p.id);
@@ -524,12 +537,20 @@ export class Room {
    * Timing policy (docs/online-server.md): race time advances in fixed STEP steps owed by elapsed wall time, at most
    * maxCatchUpSteps per tick. Time the server could not simulate yet is a backlog, never dropped: it is caught up on later
    * ticks (every car alike, so the race stays fair). A backlog above overloadAbortMs aborts the race with no result rather
-   * than skipping race time or inventing one. Once every human is terminal the AI run-on goes at RUNON_STEPS per tick.
+   * than skipping race time or inventing one. Once every human is terminal and none of them is connected any more (#135:
+   * nobody can be watching), the AI run-on goes at RUNON_STEPS per tick. Switching between the two never skips or repeats a
+   * step: the run-on re-anchors the wall clock to the steps done after every tick, so going back to wall-clock pace owes
+   * only the time since then (no burst), and either way the snapshots keep to their wall-clock slots (publish).
    */
   private stepRace(now: number): void {
     const race = this.race!;
     const scale = this.cfg.timeScale;
-    if (race.humansDoneT >= 0) {
+    const pace = race.humansDoneT >= 0 && !this.watched() ? 'runon' : 'live';
+    if (pace !== this.pace) {
+      this.log.info('race.pace', { room: this.id, race: this.raceId, pace, raceT: round3(race.raceTime) });
+      this.pace = pace;
+    }
+    if (pace === 'runon') {
       for (let i = 0; i < RUNON_STEPS && this.state === 'race'; i++) this.stepOnce(now);
       if (this.state !== 'race') return;
       this.baseWall = now - (this.stepsDone * STEP * 1000) / scale;
