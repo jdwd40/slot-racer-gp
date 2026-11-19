@@ -453,3 +453,29 @@ small { color: #9ca3af; font-weight: 500; }
 .acct-form[aria-busy="true"] { cursor: progress; }
 .net-entry .nm { display: inline-block; max-width: 12em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: bottom; }
 .ini.nm input:read-only { opacity: 0.75; }
+
+/* ---- spectating (#135, docs/spectating.md): once the driver's own race is over, the driving dock (meters, chips, race
+   instructions) and the start lights give way to the spectator panel at the bottom edge. It sits where the dock was, left of the
+   minimap where that is at the bottom right (desktop), and across the bottom where the minimap is at the top (touch, compact).
+   The touch pad is hidden then (main.ts syncPad), so nothing else lives down there; the banner and messages stay at the top */
+#hud.spec .dock, #hud.spec .lights { display: none !important; }
+.specbar { position: absolute; bottom: var(--eB); left: var(--eL); right: calc(var(--eR) + var(--mini-w) + 12px); width: fit-content; max-width: none; display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; padding: 8px 10px; pointer-events: auto; background: rgba(10,14,20,0.8); border: 1px solid rgba(34,211,238,0.35); border-radius: 12px; backdrop-filter: blur(4px); }
+.specbar[hidden] { display: none; }
+.spec-info { flex: 1 1 210px; min-width: 0; font-size: 14px; line-height: 1.35; }
+.spec-who b { overflow-wrap: anywhere; }
+.spec-tag { margin-right: 4px; }
+.spec-me { font-size: 12px; font-weight: 700; color: #ffe066; }
+.spec-lost { font-size: 12px; font-weight: 700; color: #fdba74; }
+.spec-lost:empty { display: none; }
+.spec-btns { display: flex; flex-wrap: wrap; gap: 6px; }
+.specbar .btn:disabled { opacity: 0.4; cursor: default; }
+.specbar #s-whole[aria-pressed="true"] { background: #22d3ee; border-color: #22d3ee; color: #062a33; }
+.specbar #s-skip, .specbar #s-leave { border-color: rgba(253,224,71,0.5); }
+.specbar .btn[hidden] { display: none; }
+#h-stand > div.watch .nm { text-decoration: underline; text-decoration-color: #22d3ee; text-underline-offset: 3px; }
+.netwait .w-pick { margin-left: 6px; padding: 4px 12px; min-height: 44px; min-width: 44px; font-size: 12px; box-shadow: 0 2px 0 #4b5563; }
+.touch .specbar { right: var(--eR); }
+@media (max-width: 700px), (max-height: 500px) {
+  .specbar { right: var(--eR); padding: 6px 8px; gap: 4px 8px; }
+  .spec-info { font-size: 13px; flex-basis: 180px; }
+}

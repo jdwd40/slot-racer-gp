@@ -10,7 +10,8 @@ import { debriefHtml, debriefOpen } from './debriefView';
 import { buildWorld, disposeWorld, arrowGeometry, bayPaints, BayPaint, World } from './world';
 import { Y0, disposeObject } from './gfx';
 import { makeCar, makePlayerMarker, dimCar, CarVisual } from './carModel';
-import { Hud, fmt, carLabel, flags, escHtml } from './hud';
+import { Hud, fmt, carLabel, flags, escHtml, type SpecView } from './hud';
+import { Spectator, shouldSpectate } from './spectate';
 import { Sfx } from './audio';
 import { t } from './i18n';
 import * as R from './records';
@@ -115,11 +116,20 @@ function newRace(): Race {
     // the AI rivals carry an explicit setup (Balanced), separate from their personality
     roster.push({ id: `ai${k}`, control: 'ai', slot: k === slot ? 0 : k, name: D.name, color: D.color, persona: D.persona, setup: DEFAULT_SETUP });
   }
-  // the lap target is fixed for this race when it is built: a later change of the setting only affects the next race
-  return new Race({ roster, track: T.DEF.id, length: mode === 'champ' && champ ? champ.length : raceLen });
+  // the lap target is fixed for this race when it is built: a later change of the setting only affects the next race.
+  // runOn 'watch' (#135): once the player is done the field races on live so it can be watched (Skip to results finishes it
+  // through the same synchronous run-on as before, with the same result)
+  return new Race({ roster, track: T.DEF.id, length: mode === 'champ' && champ ? champ.length : raceLen, runOn: 'watch' });
 }
 let race = newRace();
 const me = (): Car => race.car(localId) ?? race.cars[0];
+/**
+ * Post-finish spectating (#135, src/spectate.ts): a camera/view target of its own. Following another car never changes
+ * localId, the seat, the results or the debrief: those stay the local driver's.
+ */
+const spec = new Spectator();
+/** race time the local driver's race ended (flag, DQ or DNF) as this page saw it: the HUD's personal clock stops there (#135) */
+let myDoneT: number | null = null;
 const isMe = (c: Car): boolean => c.id === localId;
 const stepper = new FixedStepper();
 const poseOf = ({ x, y, z, h, roll, pitch }: Car): Pose => ({ x, y, z, h, roll, pitch });
@@ -141,7 +151,7 @@ function paintBays(): void {
   world.paintBays(bayPaint = bayPaints(race, localId));
 }
 rebuildVisuals();
-function setRace(r: Race): void { race = r; autoQuality.beginRace(); laneArrowKey = ''; lastCrossed = 0; prevPoses = race.cars.map(poseOf); stepper.rebase(); rebuildVisuals(); }
+function setRace(r: Race): void { endSpectate(); myDoneT = null; race = r; autoQuality.beginRace(); laneArrowKey = ''; lastCrossed = 0; prevPoses = race.cars.map(poseOf); stepper.rebase(); rebuildVisuals(); }
 
 // practice ghost + records
 const recorder = new GhostRecorder();
@@ -218,8 +228,12 @@ const netGuard = new NetWaitGuard({
 });
 /** Every change of screen ends the current hold, including restarting into the same one: what is still down needs pressing again. */
 function enter(s: Screen): void {
-  // the pending card's lost-contact timer lives only while that card shows: any other screen ends it (#43)
-  if (s !== 'netwait') netGuard.stop();
+  // spectating (#135) carries on through the race view, the standings card and the race menu; any other screen ends it
+  const watching = spec.active && (s === 'race' || s === 'netwait' || s === 'pause');
+  if (!watching) endSpectate();
+  // the pending card's lost-contact timer lives only while that card shows, or while a finished driver watches the race
+  // online: any other screen ends it (#43)
+  if (s !== 'netwait' && !(watching && net)) netGuard.stop();
   screen = s;
   releaseDriving();
   hud.setMore(false);
@@ -701,14 +715,16 @@ function onPlayerCross(): void {
 // ------------------------------------------------------------ input
 const input = new DrivingInput({
   // online, a tap is a numbered action for this browser's own seat; the server decides what it does
-  lane: () => { if (screen === 'race') { if (net) net.action('lane'); else race.requestLane(localId); } },
-  pit: () => { if (screen === 'race') { if (net) net.action('pit'); else race.requestPit(localId); } },
-  defer: () => { if (screen === 'race') { if (net) net.action('defer'); else race.requestDefer(localId); } },
+  lane: () => { if (driving()) { if (net) net.action('lane'); else race.requestLane(localId); } },
+  pit: () => { if (driving()) { if (net) net.action('pit'); else race.requestPit(localId); } },
+  defer: () => { if (driving()) { if (net) net.action('defer'); else race.requestDefer(localId); } },
   view: () => toggleView(),
   pause: () => { if (screen === 'race') showPause(); else if (screen === 'pause') resume(); },
 });
 const pad = new TouchPad([...hud.root.querySelectorAll<HTMLButtonElement>('[data-hold], [data-tap]')] as PadButton[], input, () => sfx.init());
 const anchor = new ControlsAnchor(vp);
+/** The local driver is driving: the race view, not spectating (#135). Holds, taps and sent controls need this. */
+function driving(): boolean { return screen === 'race' && !spec.active; }
 /** Let go of every hold, and of the reverse gear and Brake hold they built up: resuming never restores a reverse command. */
 function releaseDriving(): void { pad.reset(); input.clear(); race.clearReverse(); net?.release(); }
 
@@ -718,7 +734,8 @@ const coarsePointer = window.matchMedia(COARSE_QUERY);
 function syncPad(): void {
   const on = touchActive(touchMode, { coarse: coarsePointer.matches, maxTouchPoints: navigator.maxTouchPoints });
   document.body.classList.toggle('touch', on);
-  const show = on && screen === 'race';
+  // the driving pad goes with spectating (#135): a finger still on it is let go and needs a fresh press in the next race
+  const show = on && screen === 'race' && !spec.active;
   if (!show) pad.reset();
   hud.el['t-pad'].hidden = !show;
   hud.fitMini();
@@ -760,7 +777,7 @@ window.addEventListener('keydown', (e) => {
   // auto-repeat is not a press: a key held across a pause stays released until it is pressed again
   if (e.repeat) return;
   sfx.init();
-  if (screen === 'race' && KEY_HOLDS[k]) input.press(`key:${k}`, KEY_HOLDS[k]);
+  if (driving() && KEY_HOLDS[k]) input.press(`key:${k}`, KEY_HOLDS[k]);
   if (screen === 'title') {
     if (k === 'Enter' || k === 'Space') startSession('race');
     const n = ['Digit1', 'Digit2', 'Digit3', 'Digit4', 'Digit5'].indexOf(k);
@@ -779,6 +796,13 @@ window.addEventListener('keydown', (e) => {
   if (k === 'Minus' || k === 'NumpadSubtract') zoomBy(1.25);
   if (k === 'KeyM') toggleSound();
   if (k === 'Escape') { if (screen === 'netwait') { closeNetWait(); return; } input.tap('pause'); return; }
+  // spectating (#135): Previous / Next driver, the standings card (and back); C is the Whole track toggle (toggleView)
+  if (spec.active && screen === 'race') {
+    if (k === 'ArrowLeft') { specStep(-1); return; }
+    if (k === 'ArrowRight') { specStep(1); return; }
+    if (k === 'KeyT') { showStandings(); return; }
+  }
+  if (spec.active && screen === 'netwait' && k === 'KeyT') { closeNetWait(); return; }
   if (screen === 'pause' && k === 'Enter') { resume(); return; }
   if (screen === 'results' && k === 'Enter') { restartSession(); return; }
   if (KEY_TAPS[k]) input.tap(KEY_TAPS[k]);
@@ -815,6 +839,13 @@ function toggleSound(): void {
   hud.el['b-snd'].setAttribute('aria-pressed', String(!sfx.muted));
 }
 hudButton('b-ghost', toggleGhost);
+// the spectator panel (#135): mouse, keyboard and touch alike; none of them reaches a car
+hudButton('s-prev', () => specStep(-1));
+hudButton('s-next', () => specStep(1));
+hudButton('s-whole', () => toggleView());
+hudButton('s-stand', () => showStandings());
+hudButton('s-skip', () => skipToResults());
+hudButton('s-leave', () => net?.leave());
 function toggleGhost(): void {
   ghost.shown = !ghost.shown;
   hud.el['b-ghost'].classList.toggle('off', !ghost.shown);
@@ -833,17 +864,19 @@ function fullSpan(): number {
 }
 /** Spans are view heights, so a portrait screen widens the view until a follow span covers the same width as it does on a square one. */
 const portraitFit = (): number => Math.min(1, vp.w / vp.h);
-function toggleView(): void { camMode = camMode === 'follow' ? 'full' : 'follow'; }
+function toggleView(): void { if (spec.active) { spec.whole = !spec.whole; return; } camMode = camMode === 'follow' ? 'full' : 'follow'; }
 function zoomBy(f: number): void {
-  if (camMode === 'full') { camMode = 'follow'; }
+  if (spec.active) spec.whole = false;
+  else if (camMode === 'full') { camMode = 'follow'; }
   followSpan = THREE.MathUtils.clamp(followSpan * f, 10, 70);
 }
 let shadowSpan = 0;
-function updateCamera(dt: number, p: Pose): void {
+/** `view`: follow `p` (a car moving at `v`) or show the whole track. Spectating (#135) passes the watched car and its view. */
+function updateCamera(dt: number, p: Pose, view: 'follow' | 'full' = camMode, v = me().v): void {
   const desired = new THREE.Vector3();
   let span: number;
-  if (camMode === 'follow') {
-    const lead = Math.min(followSpan * 0.28, me().v * 0.3);
+  if (view === 'follow') {
+    const lead = Math.min(followSpan * 0.28, v * 0.3);
     const lx = Math.cos(p.h) * lead, ly = Math.sin(p.h) * lead;
     const kl = 1 - Math.exp(-2.2 * dt);
     camLead.x += (lx - camLead.x) * kl; camLead.y += (ly - camLead.y) * kl;
@@ -853,7 +886,7 @@ function updateCamera(dt: number, p: Pose): void {
     desired.set(T.BOUNDS.cx, 0, -T.BOUNDS.cy - 2);
     span = fullSpan();
   }
-  const k = 1 - Math.exp(-(camMode === 'follow' ? 7 : 3) * dt);
+  const k = 1 - Math.exp(-(view === 'follow' ? 7 : 3) * dt);
   camTarget.lerp(desired, k);
   curSpan += (span - curSpan) * (1 - Math.exp(-4 * dt));
   const dist = curSpan / 2 / Math.tan(THREE.MathUtils.degToRad(camera.fov / 2));
@@ -977,7 +1010,7 @@ function syncCars(dt: number, time: number, poses: Pose[]): void {
   for (const m of world.bridgeMats) m.opacity = bridgeFade;
   const p = me();
   const inSession = screen === 'race' || screen === 'pause' || screen === 'results' || screen === 'netwait';
-  const wanted = inSession && (camMode === 'full' || curSpan * portraitFit() > 34 || (under && p.mode !== 'off'));
+  const wanted = inSession && ((spec.active ? !spec.focus(race) : camMode === 'full') || curSpan * portraitFit() > 34 || (under && p.mode !== 'off'));
   markerFade += ((wanted ? 1 : 0) - markerFade) * Math.min(1, dt * 8);
   playerMarker.visible = markerFade > 0.02;
   if (playerMarker.visible) {
@@ -1041,7 +1074,8 @@ function syncArrows(time: number): void {
 let motorMix: number[] = [];
 function syncAudio(): void {
   const playing = screen === 'race' || screen === 'results' || screen === 'netwait';
-  motorMix = race.cars.map((c) => (!playing || c.mode === 'off' || c.mode === 'tow' ? 0 : isMe(c) ? 1 : Math.max(0, 1 - Math.sqrt(dist2(c)) / 28) * 0.55));
+  // spectating (#135): the watched car is heard at full volume too
+  motorMix = race.cars.map((c) => (!playing || c.mode === 'off' || c.mode === 'tow' ? 0 : isMe(c) || (spec.active && c.id === spec.target) ? 1 : Math.max(0, 1 - Math.sqrt(dist2(c)) / 28) * 0.55));
   if (!sfx.ctx) return;
   race.cars.forEach((c, i) => {
     // backing up runs the motor too: pitch follows speed by magnitude
@@ -1063,8 +1097,6 @@ let netRaceId: string | null = null;
 const netBuf = new SnapBuffer(NET_DELAY_MS);
 let netNotice = '';
 let netResult: ResultView | null = null;
-/** the local driver's car became terminal and the pending card was dismissed to watch the race */
-let netWatch = false;
 /**
  * #134: the signed-in driver's server bests as read when this race started, before its result could be stored (the
  * debrief's personal-best baseline); null for a guest, before the read returns, or if it failed.
@@ -1478,7 +1510,7 @@ function onNetRoom(r: PublicRoom): void {
 
 /** Back from a race to the room: local view state only. */
 function leaveNetRace(): void {
-  netRaceId = null; netResult = null; netWatch = false; netBuf.reset(); netTick = -1;
+  netRaceId = null; netResult = null; netBuf.reset(); netTick = -1;
 }
 
 function onNetState(m: Extract<ServerMsg, { t: 'state' }>, at: number): void {
@@ -1507,9 +1539,10 @@ function onNetState(m: Extract<ServerMsg, { t: 'state' }>, at: number): void {
   netLag = m.lagMs;
   netGuard.news();
   for (const w of m.ev as WireEvent[]) { const e = localEvent(race, w); if (e) handle(e); }
-  const p = me();
-  if (p.status !== 'running' && !netWatch && screen === 'race') showNetWait();
-  else if (screen === 'netwait') renderNetWait();
+  // a driver whose own race is over switches to the spectator view (#135, syncSpectate), not a card over the action
+  noteDone();
+  syncSpectate();
+  if (screen === 'netwait') renderNetWait();
 }
 
 /**
@@ -1813,43 +1846,61 @@ function showNetMenu(): void {
   bindSettings();
   overlay.querySelector('#o-resume')!.addEventListener('click', () => {
     if (netResult && netResult.raceId === netRaceId) showNetResults(netResult);
-    else if (me().status !== 'running' && !netWatch) showNetWait();
-    else resume();
+    else resume();   // a driver whose race is over goes back to spectating (#135)
   });
   overlay.querySelector('#o-leave')!.addEventListener('click', () => net?.leave());
 }
 
 /** Standings rows from the server: positions only for classified finishers, explicit DQ and DNF, nothing estimated. */
-function standingRows(rows: { id: string; name: string; color: number; num: number; pos: number | null; status: string; time: number | null; best: number; pits: number; reason: string; lap?: string; setup?: SetupId }[]): string {
+function standingRows(rows: { id: string; name: string; color: number; num: number; pos: number | null; status: string; time: number | null; best: number; pits: number; reason: string; lap?: string; setup?: SetupId }[], pick = false): string {
   return rows.map((x) => {
+    // #135: on the live standings a car still racing can be picked to watch (never the driver's own: it is not running)
+    const watch = pick && x.status === 'running' && x.id !== localId ? ` <button class="cta alt small w-pick" data-watch="${esc(x.id)}">${t('spec.watchRow')}</button>` : '';
     const cell = x.status === 'dq' ? `<td class="mono dq">${t('res.dq')}</td>` : x.status === 'dnf' ? `<td class="mono">${t('res.dnf')}</td>` : x.status === 'running' ? `<td class="mono"><small>${t('net.stillRacing')}${x.lap ? ` · ${x.lap}` : ''}</small></td>` : `<td class="mono">${fmt(x.time ?? NaN)}</td>`;
-    return `<tr class="${x.id === localId ? 'me' : ''}" data-status="${x.status}"><td>${x.pos ?? '–'}</td><td>${colorDot(x.color)}#${x.num} ${esc(x.id === localId ? t('hud.you') : x.name)} ${setupChip(x.setup)}</td>${cell}<td class="mono">${fmt(x.best)}</td><td>${x.pits}</td><td>${x.reason}</td></tr>`;
+    return `<tr class="${x.id === localId ? 'me' : ''}" data-status="${x.status}"><td>${x.pos ?? '–'}</td><td>${colorDot(x.color)}#${x.num} ${esc(x.id === localId ? t('hud.you') : x.name)} ${setupChip(x.setup)}${watch}</td>${cell}<td class="mono">${fmt(x.best)}</td><td>${x.pits}</td><td>${x.reason}</td></tr>`;
   }).join('');
 }
 const STAND_HEAD = (): string => `<thead><tr><th>#</th><th>${t('res.driver')}</th><th>${t('res.time')}</th><th>${t('res.best')}</th><th>${t('res.pits')}</th><th>${t('res.pen')}</th></tr></thead>`;
 
 /** what the pending card last showed: unchanged content is left alone, so a selection or a screen reader's place in the table is not reset for nothing */
 let netWaitShown = { head: '', rows: '' };
-/** This driver is done but the race is not: live state with no positions invented for anyone still running. */
+/**
+ * Standings / My result (#135): this driver is done but the race is not. Live state with no positions invented for anyone still
+ * running, the driver's own result, and a way back to watching; a running car's row picks it as the one to watch. Online it is
+ * the pending card (with Leave, and its lost-contact safety net, #43); locally the race carries on behind it, with Skip to
+ * results and the menu.
+ */
 function showNetWait(): void {
   enter('netwait');
   netWaitShown = { head: '', rows: '' };
   overlay.className = 'overlay show see';
   // the card and its buttons are built once; each snapshot updates only the heading and the standings, so a press or the
   // keyboard focus on Watch or Leave survives the 20 Hz updates
+  const acts = net
+    ? `<button class="cta alt" id="w-leave">${t('net.leave')}</button>`
+    : `<button class="cta alt" id="w-skip">${t('spec.skip')}</button><button class="cta alt" id="w-menu">${t('pause.menu')}</button>`;
   overlay.innerHTML = `<div class="card results netwait">
     <h2>${t('net.pendingTitle')}</h2>
     <div class="place" id="w-head"></div>
-    <p><small>${t('net.pendingNote')}</small></p>
+    <p><small>${t(net ? 'net.pendingNote' : 'spec.localNote')}</small></p>
     <p class="deb-pending"><small>${t('deb.pending')}</small></p>
     <p id="w-lost" class="net-msg" role="status" aria-live="polite"></p>
     <div class="tscroll"><table>${STAND_HEAD()}<tbody id="w-rows"></tbody></table></div>
-    <div class="row"><button class="cta" id="w-watch">${t('net.watch')}</button><button class="cta alt" id="w-leave">${t('net.leave')}</button></div>
+    <div class="row"><button class="cta" id="w-watch">${t('net.watch')}</button>${acts}</div>
   </div>`;
   overlay.querySelector('#w-watch')!.addEventListener('click', closeNetWait);
-  overlay.querySelector('#w-leave')!.addEventListener('click', () => net?.leave());
+  overlay.querySelector('#w-leave')?.addEventListener('click', () => net?.leave());
+  overlay.querySelector('#w-skip')?.addEventListener('click', skipToResults);
+  overlay.querySelector('#w-menu')?.addEventListener('click', toMenu);
+  // a running car's Watch button: follow that car and go back to the race view (event delegation: the rows are redrawn)
+  overlay.querySelector('#w-rows')!.addEventListener('click', (e) => {
+    const b = (e.target as Element | null)?.closest<HTMLElement>('[data-watch]');
+    if (!b || !spec.active) return;
+    if (spec.pick(race, b.dataset.watch!)) closeNetWait();
+  });
   renderNetWait();
-  netGuard.start();
+  // online, the safety net normally runs already (it started with spectating); a fresh window either way
+  if (net) netGuard.start();
 }
 function renderNetWaitView(v: NetWaitView): void {
   if (v === 'closed') { showNetClosed(); return; }
@@ -1869,7 +1920,8 @@ function showNetClosed(): void {
   back.addEventListener('click', () => { if (online.state === 'available') showOnline(); else showTitle(); });
   back.focus({ preventScroll: true });
 }
-function closeNetWait(): void { netWatch = true; resume(); }
+/** Back to watching (#135): the spectator view, with the target kept (or the one picked from the standings). */
+function closeNetWait(): void { if (!spec.active && me().status !== 'running') enterSpectate(); resume(); }
 function renderNetWait(): void {
   const headEl = overlay.querySelector('#w-head'), rowsEl = overlay.querySelector('#w-rows');
   if (!headEl || !rowsEl) return;
@@ -1880,7 +1932,7 @@ function renderNetWait(): void {
     setup: c.setup.id,
   }));
   const head = p.status === 'dq' ? `${t('res.youDq')} · ${t(`res.dqReason.${p.dqReason}`)}` : p.status === 'dnf' ? t('res.youDnf') : t('net.youFinished');
-  const body = standingRows(rows);
+  const body = standingRows(rows, spec.active);
   if (netWaitShown.head !== head) { headEl.innerHTML = head; netWaitShown.head = head; }
   if (netWaitShown.rows !== body) { rowsEl.innerHTML = body; netWaitShown.rows = body; }
 }
@@ -1939,8 +1991,9 @@ let bannerMemo = '';
 /** This browser's held pedals for its own seat: sent the moment they change (and checked every frame), never another seat's. */
 function sendHeld(): void {
   if (!net || !netRaceId) return;
-  const driving = screen === 'race';
-  net.setHeld(driving && input.held('throttle'), driving && input.held('brake'));
+  // spectating (#135) sends nothing held: the heartbeat keeps the seat, with neutral pedals for the driver's own finished car
+  const drive = driving();
+  net.setHeld(drive && input.held('throttle'), drive && input.held('brake'));
 }
 input.onChange = sendHeld;
 
@@ -1969,23 +2022,88 @@ function syncBanner(): void {
 // in which case the session resumes the same seat on return
 window.addEventListener('pagehide', () => { net?.release(); });
 
+// ------------------------------------------------------------ spectating (#135, docs/spectating.md)
+/** Remember when the local driver's own race ended, once per race: the HUD's personal clock stops there. */
+function noteDone(): void {
+  const p = race.car(localId);
+  if (myDoneT === null && p && p.status !== 'running' && race.phase !== 'countdown') myDoneT = p.status === 'finished' ? p.finishTime : race.raceTime;
+}
+/** Enter the spectator view when the local driver's race is over, and keep its target valid while it lasts. Every frame. */
+function syncSpectate(): void {
+  if (spec.active) { spec.ensure(race); return; }
+  if (screen !== 'race' || (net && !netRaceId)) return;
+  if (shouldSpectate(race, race.car(localId), !net)) enterSpectate();
+}
+/**
+ * The spectator view: everything held is let go (keys, fingers, reverse, and the server's held pedals) and the driving pad is
+ * hidden; the camera follows the leading car still running. Online the lost-contact safety net (#43) runs while watching, so a
+ * dead link never leaves a silently frozen scene.
+ */
+function enterSpectate(): void {
+  releaseDriving();
+  noteDone();
+  spec.enter(race);
+  hud.setMore(false);
+  syncPad();
+  hud.toast(meLine(), me().status === 'finished' ? 'good' : 'warn');
+  if (net && !netGuard.active) netGuard.start();
+}
+/** Leave the spectator view (results, leave, restart, a new race): the next race starts in driving mode. */
+function endSpectate(): void {
+  if (!spec.active) return;
+  spec.reset();
+  hud.spectate(null);
+  // the pad and the held-input state come back with the race view; anything held needs a fresh press
+  syncPad();
+}
+function specStep(dir: -1 | 1): void { if (spec.active) spec.step(race, dir); }
+/** Standings / My result: the live standings card; Escape, T or Watch the race comes back. */
+function showStandings(): void { if (spec.active) showNetWait(); }
+/** Local only: finish the rest of the field now through the race's own run-on (a valid final classification), then results. */
+function skipToResults(): void {
+  if (net || !spec.active || !race.skipRunOut()) return;
+  for (const e of race.events) handle(e);
+  race.events.length = 0;
+  showResults();
+}
+/** The local driver's own result line: always theirs, never the watched car's. */
+function meLine(): string {
+  const p = me();
+  if (p.status === 'dq') return `${t('spec.youDq')} · ${t(`res.dqReason.${p.dqReason}`)}`;
+  if (p.status === 'dnf') return t('spec.youDnf');
+  return t('spec.youFinished', { n: race.order().filter((c) => c.status === 'finished').indexOf(p) + 1 });
+}
+function specView(): SpecView {
+  const c = spec.target ? race.car(spec.target) : undefined;
+  return {
+    target: c ? { id: c.id, name: c.name, num: c.num, lap: c.lapsDone + 1, laps: race.targetLaps } : null,
+    whole: spec.whole || !c, me: meLine(),
+    lost: !!net && (net.conn === 'reconnecting' || (netGuard.active && netGuard.view === 'lost')),
+    skip: !net, leave: !!net,
+  };
+}
+
 // ------------------------------------------------------------ loop
 /** one simulation step: physics, events, timing-line bookkeeping and ghost recording */
 function tick(dt: number): void {
   prevPoses = race.cars.map(poseOf);
   // single-player adapter: this browser's held keys and touch pedals drive the local driver only
-  race.update(dt, { [localId]: { up: input.held('throttle'), down: input.held('brake') } });
+  // a spectating driver (#135) drives nothing: their own finished car gets neutral pedals, as the run-on would give it
+  const drive = driving();
+  race.update(dt, { [localId]: { up: drive && input.held('throttle'), down: drive && input.held('brake') } });
   for (const e of race.events) handle(e);
   race.events.length = 0;
   const p = me();
   if (p.crossed !== lastCrossed) { lastCrossed = p.crossed; onPlayerCross(); }
   recorder.sample(p, race.raceTime);
-  if (race.phase === 'done' && screen === 'race') showResults();
+  noteDone();
+  if (race.phase === 'done' && (screen === 'race' || screen === 'netwait')) showResults();
 }
 let last = performance.now();
 let time = 0;
 showTitle();
-const simulating = (): boolean => !net && (screen === 'race' || screen === 'results');
+// the local standings card (#135) keeps the race running behind it, as the race view does
+const simulating = (): boolean => !net && (screen === 'race' || screen === 'results' || screen === 'netwait');
 function frame(now: number): void {
   requestAnimationFrame(frame);
   // checked here, not on resize: browser bars and moving to another display do not always send that event, and the canvas is redrawn in this same frame
@@ -2015,7 +2133,11 @@ function frame(now: number): void {
     alpha = stepper.alpha;
     poses = race.cars.map((c, i) => blendPose(prevPoses[i], c, alpha));
   }
-  updateCamera(dt, poses[Math.max(0, race.cars.indexOf(me()))]);
+  syncSpectate();
+  // spectating (#135): the camera follows the watched car, or shows the whole track; the local driver's own car otherwise
+  const focus = spec.active ? spec.focus(race) : null;
+  if (spec.active) updateCamera(dt, poses[Math.max(0, race.cars.indexOf(focus ?? me()))], focus ? 'follow' : 'full', focus?.v ?? 0);
+  else updateCamera(dt, poses[Math.max(0, race.cars.indexOf(me()))]);
   syncCars(dt, time, poses);
   // the blended cars trail the live state by up to a step; the ghost must trail with them to line up
   ghost.update(race.raceTime - (1 - alpha) * STEP, screen === 'race' ? dt : 0);
@@ -2023,7 +2145,8 @@ function frame(now: number): void {
   syncAudio();
   const hudShown = screen === 'race' || screen === 'pause' || screen === 'results' || screen === 'netwait';
   syncBanner();
-  hud.frame(hudShown, race, dt, time, { mode: mode === 'online' ? 'race' : mode, me: localId, pbMs, round: mode === 'champ' && champ ? `${champ.rounds.length + (champRoundSaved ? 0 : 1)}/${R.CHAMP_TRACKS.length}` : '' });
+  if (screen === 'netwait' && !net) renderNetWait();
+  hud.frame(hudShown, race, dt, time, { mode: mode === 'online' ? 'race' : mode, me: localId, pbMs, doneT: myDoneT, spec: spec.active ? specView() : null, round: mode === 'champ' && champ ? `${champ.rounds.length + (champRoundSaved ? 0 : 1)}/${R.CHAMP_TRACKS.length}` : '' });
   renderer.render(scene, camera);
 }
 requestAnimationFrame(frame);
@@ -2077,4 +2200,4 @@ function qaNetResult(r: ResultView, meId: string, pbBests?: CareerStats['bests']
   try { showNetResults(r); } finally { localId = keep; }
 }
 
-(window as unknown as { __game: unknown }).__game = { get online() { return online; }, get auth() { return { state: accounts.auth.state, busy: accounts.busy, displayName: accounts.account?.displayName ?? null }; }, get net() { return net && { conn: net.conn, me: net.me, room: net.room, result: net.result, reconnects: net.reconnects, tick: netTick, lagMs: netLag, buf: netBuf.stats, raceId: netRaceId, held: net.client.held, ctlSeq: net.client.ctlSeq, actSeq: net.client.actSeq }; }, netDrop: () => net?.client.ws?.close(4000, 'qa drop'), qaNetLobby, qaNetResult, get race() { return race; }, T, R, applyTrack, startSession, showTitle, get mode() { return mode; }, get preset() { return preset; }, get touchMode() { return touchMode; }, setTouchMode, input, get audio() { return sfx.ctx?.state ?? null; }, get muted() { return sfx.muted; }, suspendAudio: () => sfx.ctx?.suspend(), get champ() { return champ; }, get raceLen() { return raceLen; }, get carSetup() { return carSetupId; }, get bays() { return bayPaint; }, get ghost() { return ghost; }, get pbMs() { return pbMs; }, get screen() { return screen; }, get view() { return camMode; }, get aspect() { return camera.aspect; }, get mini() { return { w: hud.mW, h: hud.mH }; }, stepper, advance: (sec: number) => { for (let t = 0; t < sec && simulating(); t += STEP) tick(STEP); }, setView: (m: 'follow' | 'full') => { camMode = m; }, zoom: (span: number) => { camMode = 'follow'; followSpan = span; curSpan = span; }, snapCam: () => { const p = me(); camLead.set(0, 0); camTarget.set(p.x, 0, -p.y); }, get marker() { return playerMarker; }, get localId() { return localId; }, setLocalSlot: (n: number) => { localSlot = Math.max(0, Math.min(DRIVERS.length - 1, Math.floor(n))); }, get camTarget() { return { x: camTarget.x, z: camTarget.z }; }, get motorMix() { return motorMix; }, arrows: { lane: laneArrow, pit: pitArrow }, info: () => ({ calls: renderer.info.render.calls, tris: renderer.info.render.triangles, objects: world.root.children.length, frames: renderer.info.render.frame, geometries: renderer.info.memory.geometries, textures: renderer.info.memory.textures }) };
+(window as unknown as { __game: unknown }).__game = { get online() { return online; }, get auth() { return { state: accounts.auth.state, busy: accounts.busy, displayName: accounts.account?.displayName ?? null }; }, get net() { return net && { conn: net.conn, me: net.me, room: net.room, result: net.result, reconnects: net.reconnects, tick: netTick, lagMs: netLag, buf: netBuf.stats, raceId: netRaceId, held: net.client.held, ctlSeq: net.client.ctlSeq, actSeq: net.client.actSeq }; }, netDrop: () => net?.client.ws?.close(4000, 'qa drop'), qaNetLobby, qaNetResult, get race() { return race; }, T, R, applyTrack, startSession, showTitle, get mode() { return mode; }, get preset() { return preset; }, get touchMode() { return touchMode; }, setTouchMode, input, get audio() { return sfx.ctx?.state ?? null; }, get muted() { return sfx.muted; }, suspendAudio: () => sfx.ctx?.suspend(), get champ() { return champ; }, get raceLen() { return raceLen; }, get carSetup() { return carSetupId; }, get bays() { return bayPaint; }, get ghost() { return ghost; }, get pbMs() { return pbMs; }, get screen() { return screen; }, get view() { return camMode; }, get aspect() { return camera.aspect; }, get mini() { return { w: hud.mW, h: hud.mH }; }, stepper, advance: (sec: number) => { for (let t = 0; t < sec && simulating(); t += STEP) tick(STEP); }, setView: (m: 'follow' | 'full') => { camMode = m; }, zoom: (span: number) => { camMode = 'follow'; followSpan = span; curSpan = span; }, snapCam: () => { const p = me(); camLead.set(0, 0); camTarget.set(p.x, 0, -p.y); }, get marker() { return playerMarker; }, get localId() { return localId; }, get spec() { return { active: spec.active, target: spec.target, whole: spec.whole, doneT: myDoneT }; }, setLocalSlot: (n: number) => { localSlot = Math.max(0, Math.min(DRIVERS.length - 1, Math.floor(n))); }, get camTarget() { return { x: camTarget.x, z: camTarget.z }; }, get motorMix() { return motorMix; }, arrows: { lane: laneArrow, pit: pitArrow }, info: () => ({ calls: renderer.info.render.calls, tris: renderer.info.render.triangles, objects: world.root.children.length, frames: renderer.info.render.frame, geometries: renderer.info.memory.geometries, textures: renderer.info.memory.textures }) };

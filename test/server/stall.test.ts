@@ -408,7 +408,12 @@ describe('a driver whose link is down is held, not recovered (#74)', () => {
     expect(peers[1].closed).toMatchObject({ code: 4000 });
     expect(room.race!.car(ids[1])!).toMatchObject({ status: 'dnf', dnfReason: 'retired' });
     expect(room.race!.car(ids[0])!).toMatchObject({ status: 'finished' });
-    // and the finished driver, still connected, is sent the result
+    // and the finished driver, still connected, is sent the result. Since #135 a connected finisher may be watching, so the AI
+    // field finishes at wall-clock pace (bounded by the finish window) rather than in an accelerated run-on: the result comes
+    // when the last car is done
+    h.advance(600_000, 50, undefined, () => room.state !== 'race');
+    expect(room.state).toBe('results');
+    expect(peers[0].closed).toBe(null);
     expect(peers[0].of('result')).toHaveLength(1);
     expect(room.result!.classification!.find((x) => x.id === ids[0])).toMatchObject({ status: 'finished' });
   });

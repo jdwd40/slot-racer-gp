@@ -465,8 +465,12 @@ describe('the room server streams v2 states', () => {
     // `length: 'standard'`, and with that key removed the 11.8 digest still results, so the key is the only change. Re-pinned for
     // #133 (car setups; rules unchanged): each participant gained `setup: 'balanced', tuning: 0`, and with those keys and
     // `length` removed the same 11.8 digest results. Re-pinned for #134 (post-race debrief; rules unchanged): the envelope gained
-    // `debrief` (each human's summary), and with it removed as well the same 11.8 digest results (fa2c3efc…efce55 before it)
-    const run = () => {
+    // `debrief` (each human's summary), and with it removed as well the same 11.8 digest results (fa2c3efc…efce55 before it).
+    // #135 (pacing): both seats stay connected, so once both humans are done the AI field now finishes at wall-clock pace
+    // instead of the accelerated run-on. `runon` forces the old pacing: it still gives every pinned digest byte for byte, and
+    // the envelope at wall-clock pace differs from it in exactly one field, the wall time it was finished at (times.finishedAt):
+    // the classification, laps, debriefs, race time and ticks are the same
+    const run = (pace: 'auto' | 'runon' = 'runon') => {
       const h = harness({}, 4242);
       const peers = [new FakePeer(), new FakePeer()];
       const c = h.mgr.create(peers[0], { name: 'P0', accountId: null, mode: 'multiplayer', settings: { track: 'circuit-1', aiFill: true } });
@@ -474,6 +478,7 @@ describe('the room server streams v2 states', () => {
       const j = h.mgr.join(peers[1], '10.0.0.1', { code: c.room.code, name: 'P1', accountId: null });
       if (!j.ok) throw new Error(j.code);
       const ids = [c.participant, j.participant], room = c.room;
+      if (pace === 'runon') (room as unknown as { watched: () => boolean }).watched = () => false;
       room.handle(ids[1], { t: 'ready', ready: true }, h.now); room.handle(ids[0], { t: 'start' }, h.now);
       let n = 0;
       h.advance(2_000_000, 50, () => { n++; ids.forEach((id, k) => room.handle(id, { t: 'ctl', seq: n, up: (n + 7 * k) % 40 < 31, down: false }, h.now)); }, () => room.state !== 'race');
@@ -492,7 +497,9 @@ describe('the room server streams v2 states', () => {
       const { debrief, ...rest } = env;
       expect(debrief?.v).toBe(1);
       expect(debrief?.drivers.map((d) => d.driver)).toEqual(ids);
+      const { finishedAt, ...times } = env.times;
       return {
+        env: { ...JSON.parse(norm({ ...env, times })) as object, finishedAt },
         digest: createHash('sha256').update(norm(env)).digest('hex'), outcome: env.outcome, ticks: env.times.ticks,
         withoutDebrief: createHash('sha256').update(norm(rest)).digest('hex'),
         withoutLength: createHash('sha256').update(norm({ ...rest, settings: before, participants })).digest('hex'),
@@ -500,11 +507,20 @@ describe('the room server streams v2 states', () => {
     };
     const a = run(), b = run();
     expect(b).toEqual(a);
-    expect(a).toEqual({
+    const { env: envA, ...pinA } = a;
+    expect(pinA).toEqual({
       digest: '7ae0d802fad4c5c12aea426e22de1bbbbd7f4a6bfe70e77cb80ff41e1a99de2b', outcome: 'completed', ticks: 18031,
       withoutDebrief: 'fa2c3efc136b23dfa92190b42be59f150f29db02eb294674daccb89668efce55',
       withoutLength: '3fc80036feb8faedd8c8c6faca71d2fa7e622ad6ccf168dcab02bf4f95f68629',
     });
+    // #135: the same race at wall-clock pace (both finishers connected): only the finish wall time moves, and later
+    const { env: envL, ...pinL } = run('auto');
+    const { finishedAt: atA, ...restA } = envA as { finishedAt: string };
+    const { finishedAt: atL, ...restL } = envL as { finishedAt: string };
+    expect(restL).toEqual(restA);
+    expect(Date.parse(atL)).toBeGreaterThan(Date.parse(atA));
+    expect(pinL.ticks).toBe(18031);
+    expect(pinL.digest).toBe('ee772cedc3948411b2c36fa7f7bcfe25bae15a837f067451d05937f9ca78e042');
   });
 });
 

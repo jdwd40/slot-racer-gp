@@ -11,7 +11,7 @@ After a race the results card shows a compact personal debrief: the result, pace
 
 ## Collection window
 
-From the green light (the first step out of the countdown) until **that driver's own terminal result**: the finish, a DQ or a DNF (finish window, time limit, run-out, retirement). The step in which the car becomes terminal freezes its summary; afterwards nothing is added: not the cool-down lap after the flag (driven by the AI), not the AI run-on (`runOut` locally, the accelerated `RUNON_STEPS` on the server), not a de-slot or contact after the finish, not time spent watching. A visit still under way at that moment is closed then and named in `open` (shown as a note). A new `Race` (Race Again, a rematch, the next round) starts every figure from zero.
+From the green light (the first step out of the countdown) until **that driver's own terminal result**: the finish, a DQ or a DNF (finish window, time limit, run-out, retirement). The step in which the car becomes terminal freezes its summary; afterwards nothing is added: not the cool-down lap after the flag (driven by the AI), not the AI run-on (watched live or skipped locally, at wall-clock pace or the accelerated `RUNON_STEPS` on the server), not a de-slot or contact after the finish, not time spent watching (#135, [spectating.md](spectating.md)). A visit still under way at that moment is closed then and named in `open` (shown as a note). A new `Race` (Race Again, a rematch, the next round) starts every figure from zero.
 
 ## Metric definitions (`DriverDebrief`, model version 1)
 

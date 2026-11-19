@@ -509,8 +509,13 @@ export interface RaceOpts {
    * How the AI field is finished once every human is terminal. 'sync' (default, the browser): run on synchronously at close,
    * up to RUN_OUT_MAX seconds in one call. 'live' (the room server): the race stays in 'racing' and keeps stepping normally
    * until every car is terminal (finish window and time limit still apply), so no single update blocks for the run-on.
+   * 'watch' (the browser's local race with spectating, #135): like 'live', the field keeps racing step by step after every
+   * human is terminal, so it can be watched at normal speed; it closes once every car is terminal, and never runs longer than
+   * the synchronous run-on would (the preset's runOutS after CLOSE_DELAY, then the cars still running are classified
+   * 'runout', exactly as 'sync' does). skipRunOut() finishes it at once through the same synchronous run-on. The steps, and so
+   * the result, are the same as 'sync': only when they are simulated differs.
    */
-  runOn?: 'sync' | 'live';
+  runOn?: 'sync' | 'live' | 'watch';
 }
 
 /** A terminal, authoritative result row: only cars with a terminal status ever appear, and never an estimated time. */
@@ -599,7 +604,9 @@ export class Race {
   readonly rng: Rng;
   readonly finishWindow: number;
   readonly timeLimit: number;
-  readonly runOn: 'sync' | 'live';
+  readonly runOn: 'sync' | 'live' | 'watch';
+  /** 'watch' (#135): simulation time the watched run-on began (CLOSE_DELAY after humansDoneT), -1 before */
+  watchT = -1;
   /** the final standings, set once when the race closes; null until then */
   final: readonly Standing[] | null = null;
   /** highest action sequence number applied, per driver: a null-prototype table, so any string driver ID (even `__proto__`) is an own key */
@@ -1000,10 +1007,10 @@ export class Race {
   }
 
   /** Close the race once: the field is run on, the standings are frozen and a single `final` event is sent. */
-  private close(): void {
+  private close(runOutS = this.length.runOutS): void {
     if (this.phase === 'done') return;
     this.phase = 'done';
-    this.runOut();
+    this.runOut(runOutS);
     this.final = Object.freeze((this.standings() ?? []).map((x) => Object.freeze(x)));
     this.emit({ type: 'final' });
   }
@@ -1067,7 +1074,25 @@ export class Race {
     const humans = this.cars.filter((c) => c.human);
     const done = (humans.length ? humans : this.cars).every((c) => c.status !== 'running');
     if (done && this.humansDoneT < 0) this.humansDoneT = this.t;
-    if (this.humansDoneT >= 0 && this.t - this.humansDoneT > CLOSE_DELAY && (this.runOn === 'sync' || this.cars.every((c) => c.status !== 'running'))) this.close();
+    if (this.humansDoneT >= 0 && this.t - this.humansDoneT > CLOSE_DELAY) {
+      if (this.runOn === 'sync' || this.cars.every((c) => c.status !== 'running')) { this.close(); return; }
+      if (this.runOn !== 'watch') return;
+      // watched (#135): the same bound as the synchronous run-on, counted in the same simulated steps
+      if (this.watchT < 0) this.watchT = this.t;
+      if (this.t - this.watchT >= this.length.runOutS) { this.classifyRunning('runout'); this.close(); }
+    }
+  }
+
+  /**
+   * #135: finish a watched race now (the local Skip to results): once every human is terminal, the rest of the field is run on
+   * synchronously through the same steps it would have been watched through (runOut), with what is left of the run-on budget,
+   * and the race closes with its final standings. False (nothing changes) before every human is terminal or once closed.
+   */
+  skipRunOut(): boolean {
+    if (this.phase !== 'racing' || this.humansDoneT < 0) return false;
+    const used = this.watchT >= 0 ? this.t - this.watchT : 0;
+    this.close(Math.max(0, this.length.runOutS - used));
+    return true;
   }
 
   // ---------------------------------------------------------------- car step
