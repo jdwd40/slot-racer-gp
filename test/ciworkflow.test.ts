@@ -90,8 +90,8 @@ describe('CI release gate (#55)', () => {
   const all = jobs();
   const deploy = all.get('deploy')!;
 
-  it('has the client check, server and deploy jobs', () => {
-    expect([...all.keys()].sort()).toEqual(['check', 'deploy', 'server']);
+  it('has the client check, server, lint and deploy jobs', () => {
+    expect([...all.keys()].sort()).toEqual(['check', 'deploy', 'lint', 'server']);
   });
 
   it('deploy needs both the client check job and the server/database/package/smoke job', () => {
@@ -140,6 +140,36 @@ describe('CI release gate (#55)', () => {
     expect(all.get('check')!.join('\n')).toMatch(/python3 deploy\/artifact\.py pack dist bundle "\$CHECKED_SHA"/);
     // the server job still deploys nothing and holds no secrets
     expect(all.get('server')!.join('\n')).not.toMatch(/secrets\.|ssh|deploy\/run\.sh/);
+  });
+});
+
+// ESLint runs on every PR and push to main as its own visible job, but is not a deploy gate yet (#148): it is outside
+// deploy.needs, so its result can neither block nor allow a deployment, and it holds no secrets and deploys nothing.
+describe('ESLint report job (#148)', () => {
+  const all = jobs();
+  const lint = all.get('lint')!;
+
+  it('runs npm run lint after a lockfile install, on the same triggers as the gating jobs', () => {
+    expect(lint, 'a lint job').toBeDefined();
+    const body = lint.join('\n');
+    expect(body).toMatch(/run: npm ci\n/);
+    expect(body).toMatch(/run: npm run lint\s*$/m);
+    expect(body.indexOf('run: npm ci')).toBeLessThan(body.indexOf('run: npm run lint'));
+    expect(body, 'no job-level if: (runs on PRs and main alike)').not.toMatch(/^ {4}if:/m);
+    expect(JSON.parse(readFileSync('package.json', 'utf8')).scripts.lint).toMatch(/^eslint\b/);
+  });
+
+  it('is not a deploy gate: deploy does not need it and its condition never mentions it', () => {
+    const deploy = all.get('deploy')!;
+    expect(needsOf(deploy)).not.toContain('lint');
+    expect(ifOf(deploy)).not.toMatch(/lint/);
+    for (const id of ['check', 'server']) expect(needsOf(all.get(id)!), `${id} does not wait for lint`).toEqual([]);
+  });
+
+  it('holds no secrets, deploys nothing and keeps the workflow\'s read-only permissions', () => {
+    const body = lint.join('\n');
+    expect(body).not.toMatch(/secrets\.|ssh|deploy\/run\.sh|upload-artifact/);
+    expect(body).not.toMatch(/^ {4}permissions:/m);
   });
 });
 

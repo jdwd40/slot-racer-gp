@@ -6,7 +6,7 @@
 // ~7 FPS an offline race runs slower than real time. Low draws a quarter of Balanced's pixels, which is the one lever
 // that helps there. This is a render-quality choice only: nothing here reaches the simulation, results or the server.
 
-import { GRAPHICS_KEY, PRESETS, PresetId } from './graphics';
+import { PRESETS, PresetId } from './graphics';
 
 /** Per-device record of the automatic switch: `switched:<preset it replaced>` or `manual`. */
 export const AUTO_KEY = 'srgp.gfxAuto';
@@ -21,7 +21,8 @@ export const SLOW_MEDIAN_MS = 50;
 export const MIN_SAMPLES = 10;
 
 /**
- * - `eligible`: never switched automatically and the player has not picked a preset: may switch once.
+ * - `eligible`: never switched automatically and the player has not picked a preset since #66 (a preset saved before #66,
+ *   with no record here, is still eligible): may switch once.
  * - `switched`: switched to Low automatically; never switches again, and the player may undo it.
  * - `manual`: the player picked a preset (or undid the switch): their choice is final, nothing is switched automatically.
  */
@@ -55,10 +56,11 @@ export class AutoQuality {
       this.st = 'switched';
       const f = v.slice('switched:'.length);
       this.from = isPreset(f) ? f : null;
-    } else if (isPreset(this.read(GRAPHICS_KEY))) {
-      // a preset saved before this feature existed was the player's own pick (only the selector ever saved one)
-      this.st = 'manual';
     }
+    // No record but a saved preset (GRAPHICS_KEY): stays `eligible`, a one-time correction (L4, #148). Since #66 every pick
+    // in the selector writes `manual` here alongside the preset, so a preset with no record was saved before #66 existed.
+    // There is no timestamp to tell whether that old pick was deliberate, so such a device may still switch to Low once on
+    // a slow first race, with the usual Undo; after that switch, an Undo or any later pick it never switches again.
   }
 
   get state(): AutoState { return this.st; }

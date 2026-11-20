@@ -65,6 +65,30 @@ jobs:
           retention-days: 30
           overwrite: false
 
+  # ESLint (#148): a visible report on PRs and main, deliberately NOT a deploy gate. It is not in deploy.needs, so neither
+  # its warnings nor a failure of this job can block or allow a deployment; the rules are warn-only (eslint.config.js), so
+  # warnings alone leave it green. Do not add it to deploy.needs until the warnings are paid down and that is decided.
+  lint:
+    name: ESLint report (warn-only, not a deploy gate)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Install dependencies from the lockfile
+        run: npm ci
+
+      - name: ESLint
+        run: npm run lint
+
   # The online room server: built, tested on PostgreSQL 17, smoke-checked and packaged as a checked artifact. It needs no
   # secrets (the database is a throwaway service container). The static deploy below waits for it (#55): an online-enabled
   # client never ships for a commit whose server/database/package/smoke checks did not pass. Nothing here deploys the

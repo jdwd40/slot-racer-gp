@@ -126,12 +126,65 @@ describe('the player decides', () => {
     expect(r.preset).toBe('balanced');
   });
 
-  it('treats a preset saved before this feature as the player’s own choice', () => {
-    const aq = new AutoQuality(memStorage({ [GRAPHICS_KEY]: 'high' }));
-    const r = rig(aq, 'high'); aq.beginRace();
-    r.run(10000, 150);
-    expect(r.switches).toBe(0);
-    expect(aq.state).toBe('manual');
+  describe('a preset saved before this feature existed (L4, #148: a one-time correction)', () => {
+    it('no AUTO_KEY record + a stored preset → eligible: a slow first race switches once, with the usual Undo', () => {
+      const store = memStorage({ [GRAPHICS_KEY]: 'high' });
+      const aq = new AutoQuality(store);
+      expect(aq.state).toBe('eligible');
+      const r = rig(aq, 'high'); aq.beginRace();
+      r.run(10000, 150);
+      expect(r.switches).toBe(1);
+      expect(aq.state).toBe('switched');
+      expect(store.getItem(AUTO_KEY)).toBe('switched:high');
+      expect(aq.undo('low')).toBe('high');
+      expect(aq.state).toBe('manual');
+      expect(store.getItem(AUTO_KEY)).toBe('manual');
+    });
+
+    it('a fast device with an old stored preset keeps it and stays eligible (nothing is recorded)', () => {
+      const store = memStorage({ [GRAPHICS_KEY]: 'high' });
+      const aq = new AutoQuality(store);
+      const r = rig(aq, 'high'); aq.beginRace();
+      r.run(10000, 16);
+      expect(r.switches).toBe(0);
+      expect(r.preset).toBe('high');
+      expect(aq.state).toBe('eligible');
+      expect(store.getItem(AUTO_KEY)).toBeNull();
+    });
+
+    it('after the correction switched once, a reload is `switched` and never switches again', () => {
+      const store = memStorage({ [GRAPHICS_KEY]: 'balanced' });
+      const a = new AutoQuality(store);
+      const r = rig(a); a.beginRace(); r.run(10000, 150);
+      expect(r.switches).toBe(1);
+      store.setItem(GRAPHICS_KEY, 'low');   // what setPreset('low') saves alongside
+      const b = new AutoQuality(store);
+      expect(b.state).toBe('switched');
+      expect(b.undoTarget('low')).toBe('balanced');
+      const r2 = rig(b, 'low'); b.beginRace(); r2.preset = 'balanced'; r2.run(10000, 150);
+      expect(r2.switches).toBe(0);
+    });
+
+    it('a stored preset with a `manual` record (picked in the selector since #66) stays manual', () => {
+      for (const preset of ['high', 'low', 'balanced']) {
+        const aq = new AutoQuality(memStorage({ [GRAPHICS_KEY]: preset, [AUTO_KEY]: 'manual' }));
+        expect(aq.state, preset).toBe('manual');
+        const r = rig(aq, preset === 'low' ? 'balanced' : preset as PresetId); aq.beginRace();
+        r.run(10000, 150);
+        expect(r.switches, preset).toBe(0);
+      }
+    });
+
+    it('an old stored preset, then a pick in the selector → manual for good, before or after any race', () => {
+      const store = memStorage({ [GRAPHICS_KEY]: 'high' });
+      const a = new AutoQuality(store);
+      a.playerChose();
+      expect(store.getItem(AUTO_KEY)).toBe('manual');
+      const b = new AutoQuality(store);
+      expect(b.state).toBe('manual');
+      const r = rig(b, 'high'); b.beginRace(); r.run(10000, 150);
+      expect(r.switches).toBe(0);
+    });
   });
 
   it('a pick mid-window stops the measurement for that race', () => {

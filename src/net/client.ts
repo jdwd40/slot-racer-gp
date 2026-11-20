@@ -54,6 +54,26 @@ const SERVER_TYPES: Record<ServerMsg['t'], true> = { welcome: true, joined: true
  */
 export interface RxStats { total: number; byType: Partial<Record<ServerMsg['t'], number>>; dropped: number; undecodable: number; }
 
+/** The close code the server gives a hello it refused for its protocol (server/app.ts, unchanged since protocol 1). */
+export const CLOSE_PROTOCOL = 4002;
+
+/**
+ * The server refused this page's hello. `code` is the refusal's typed nack code (`protocol` when the server speaks another
+ * protocol version); callers branch on it, never on the message text. The message keeps its historic wording
+ * (`hello refused: <code>`) for logs and older tests only.
+ */
+export class HelloRefused extends Error {
+  constructor(readonly code: string, readonly detail?: string) {
+    super(`hello refused: ${code}`);
+    this.name = 'HelloRefused';
+  }
+}
+
+/** Whether a failed connect() was the server refusing this page's protocol (a newer or older server). */
+export function isProtocolRefusal(e: unknown): boolean {
+  return e instanceof HelloRefused && e.code === 'protocol';
+}
+
 export class OnlineClient {
   ws: SocketLike | null = null;
   room: PublicRoom | null = null;
@@ -131,9 +151,20 @@ export class OnlineClient {
     ws.onerror = () => undefined;
     this.send({ t: 'hello', v: version, proto: PROTOCOL_NAME });
     let m: ServerMsg;
-    try { m = await this.wait((x) => x.t === 'welcome' || (x.t === 'nack' && x.ref === 'hello')); } catch (e) { this.drop(); throw e; }
-    // a refused hello is closed by the server, with a code the caller reads from `closed`
-    if (m.t !== 'welcome') throw new Error(`hello refused: ${(m as { code: string }).code}`);
+    try { m = await this.wait((x) => x.t === 'welcome' || (x.t === 'nack' && x.ref === 'hello')); } catch (e) {
+      // the server closed this socket with its protocol-refusal code before a nack was read: the same refusal, typed
+      // (`closed` is set by lost() meanwhile: TypeScript still narrows it to the null assigned at the top of connect())
+      const closed = this.closed as { code: number } | null;
+      const refused = this.ws === null && closed?.code === CLOSE_PROTOCOL;
+      this.drop();
+      throw refused ? new HelloRefused('protocol') : e;
+    }
+    // a refused hello is closed by the server (CLOSE_PROTOCOL for a protocol mismatch). Every server since protocol 1 sends
+    // `{ t: 'nack', ref: 'hello', code, detail? }`; a nack without a string code is still a refusal, never a welcome.
+    if (m.t !== 'welcome') {
+      const n = m as { code?: unknown; detail?: unknown };
+      throw new HelloRefused(typeof n.code === 'string' ? n.code : 'unknown', typeof n.detail === 'string' ? n.detail : undefined);
+    }
     this.welcome = m;
     if (this.ws === ws) { this.answered = false; this.startKeepalive(ws); }
   }

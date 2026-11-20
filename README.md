@@ -4,6 +4,8 @@ A tabletop slot-car racing game: TypeScript, Three.js and Vite. The game runs en
 
 Originally exported from Tesana on 2026-10-26; the Tesana play-service integration has since been removed so the game is self-hosted.
 
+Licence: all rights reserved, see [LICENSE](LICENSE). The source is public for reference only; no permission to copy, modify, distribute or use it is granted without written permission.
+
 ## Run it locally
 
 Use Node 22, the project's pinned runtime (`.nvmrc` pins it, so `nvm use` picks it up). Vite and Vitest need at least Node 22.12. Node 22 is in maintenance LTS and reaches end of life around April 2027; the upgrade checklist is in [docs/online-server.md](docs/online-server.md#upgrading-node).
@@ -20,6 +22,7 @@ npm run build:server && npm run server   # optional room server on 127.0.0.1:878
 
 ```bash
 npm run typecheck  # tsc --noEmit over src/, server/, test/, scripts/*.ts and the build configs
+npm run lint       # ESLint + typescript-eslint recommended rules, warn-only (eslint.config.js): reports, exits 0 on warnings
 npm test           # vitest run: the regression suite, once, no watch mode
 npm run check:browser  # bounded real-browser checks, about 11 minutes; not part of CI
 npm run test:db    # database tests against a private local PostgreSQL (.local-pg/); CI runs them on PostgreSQL 17
@@ -27,7 +30,7 @@ npm run server:smoke -- http://127.0.0.1:8787   # health and connection check of
 node scripts/online-check.mjs                   # browser checks of lobbies and online races against the real server code (diagnostics)
 ```
 
-The same checks plus `npm run build` run in GitHub Actions (`.github/workflows/ci.yml`) on pull requests and pushes to `main`. The `server` CI job builds, tests (PostgreSQL 17 service container, no secrets), smoke-checks and packages the room server. A push to `main` deploys the exact checked static build artifact to the VPS site only when **both** the `check` and `server` jobs succeeded for that commit; a failed, cancelled or skipped job blocks it, and PRs never deploy ([deployment and rollback](docs/deployment.md)). Nothing deploys the room server automatically: the owner rolls it out by hand ([release procedure](docs/online-server.md#release-procedure-owner)). Green CI is not four-player browser or accelerated-hardware validation; that is #4. The tests also cover the room server (`test/server/`): room rules, the protocol, headless WebSocket races and the database layer.
+The same checks plus `npm run build` run in GitHub Actions (`.github/workflows/ci.yml`) on pull requests and pushes to `main`. The `server` CI job builds, tests (PostgreSQL 17 service container, no secrets), smoke-checks and packages the room server. A push to `main` deploys the exact checked static build artifact to the VPS site only when **both** the `check` and `server` jobs succeeded for that commit; a failed, cancelled or skipped job blocks it, and PRs never deploy ([deployment and rollback](docs/deployment.md)). A separate `lint` job runs `npm run lint` on the same triggers as a visible report; it is not in the deploy job's `needs`, so it never gates a deployment. Nothing deploys the room server automatically: the owner rolls it out by hand ([release procedure](docs/online-server.md#release-procedure-owner)). Green CI is not four-player browser or accelerated-hardware validation; that is #4. The tests also cover the room server (`test/server/`): room rules, the protocol, headless WebSocket races and the database layer.
 
 The game tests cover the simulation and graphics preset logic (`src/race.ts`, `src/pit.ts`, `src/track.ts`, `src/records.ts`, `src/timing.ts`, `src/graphics.ts`, `src/autoQuality.ts`, `src/input.ts`): collision penalties, lap counting, lane changes, leaderboards and championship scoring, fixed-step timing, graphics preset resolution and storage, the automatic fallback to Low on slow devices, input sources and touch pointer handling, and a bounded all-AI race on each circuit, plus the frame-time statistics. Rendering and browser input are covered by `npm run check:browser` instead, and audio by neither. See [browser validation](docs/validation.md), which also has the frame-time capture and comparison.
 

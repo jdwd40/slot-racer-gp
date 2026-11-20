@@ -1,7 +1,7 @@
 // One browser's online seat: the connection, the room it is in, reconnection within the server's grace period and the
 // result of each race. No race logic and no DOM: main.ts renders what this reports, and tests drive it with the `ws` package.
 // The private reconnect token is kept in memory and in sessionStorage (this tab only), never in a URL, log or the page.
-import { OnlineClient, type SocketCtor } from './client';
+import { OnlineClient, isProtocolRefusal, type SocketCtor } from './client';
 import type { AwardsView, ChampionshipTag, ClientMsg, ErrorCode, LiveryId, Mode, PublicRoom, RoomSettings, ServerMsg } from './protocol';
 import type { ActionType, DriverId, Standing } from '../race';
 import { LENGTH_SET, isRaceLengthId, type RaceLengthId } from '../raceLength';
@@ -107,8 +107,7 @@ export class NetSession {
       // dropped seat and start a reconnect nobody asked for (and lose the stored seat)
       this.client.drop();
       this.setConn('offline');
-      const msg = String((e as Error).message);
-      return msg.includes('protocol') ? { ok: false, code: 'protocol' } : { ok: false, code: 'unreachable' };
+      return isProtocolRefusal(e) ? { ok: false, code: 'protocol' } : { ok: false, code: 'unreachable' };
     }
     let r: ServerMsg;
     try { r = await this.client.request(this.forServer(req)); } catch { this.client.drop(); this.setConn('offline'); return { ok: false, code: 'unreachable' }; }
@@ -229,7 +228,7 @@ export class NetSession {
         if (n.code === 'expired' || n.code === 'forbidden' || n.code === 'not_found') { this.client.drop(); this.finish('expired', n.detail); return; }
       } catch (e) {
         // the server now speaks another protocol: retrying cannot succeed, and the old page must never race on it
-        if (String((e as Error).message).includes('hello refused: protocol')) { this.client.drop(); this.finish('outdated'); return; }
+        if (isProtocolRefusal(e)) { this.client.drop(); this.finish('outdated'); return; }
         /* otherwise not reachable yet */
       }
       // a refused or failed attempt gives its socket up before the next one, or each retry would hold another server connection
