@@ -14,6 +14,9 @@
 //   * "real": real time, behind a TCP proxy that can add latency, jitter and stalls, for responsiveness measurements.
 // Browsers are Chromium (Playwright) with SwiftShader on a GPU-less host, and touch is Chromium's touch emulation:
 // diagnostics only, not evidence of smooth play on a physical phone or tablet. Exit code 0 pass, 1 fail, 2 time limit.
+// window.__game (#146): every page is opened with ?qa=1 appended, which turns on the full debug hook these checks read in the
+// production-style dist-online/ build (VITE_ONLINE=1, no VITE_QA) and on a deployed site (race2 --url); without the flag a
+// default build exposes only a minimal read-only hook (screen, online, preset, mode).
 import { execFileSync } from 'node:child_process';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import net from 'node:net';
@@ -22,7 +25,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { build } from 'esbuild';
 import { chromium } from 'playwright-core';
 import { preview } from 'vite';
-import { instrument, Keys, Checks, Fingers, PadKeys, PHONE, environment, driveUntil, waitFor, read, sleep, LAPS, STRINGS } from './browser-check.mjs';
+import { withQa, instrument, Keys, Checks, Fingers, PadKeys, PHONE, environment, driveUntil, waitFor, read, sleep, LAPS, STRINGS } from './browser-check.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const OUT = path.join(ROOT, '.qa/online-check', new Date().toISOString().replace(/[:.]/g, '-'));
@@ -124,7 +127,8 @@ async function openPage(run, url, view = 'laptop', { touch = false, name = view,
     };
     raf(tick);
   });
-  await page.goto(url);
+  // ?qa=1 (#146): the full window.__game hook these checks read, on the local build and on a deployed (production) site alike
+  await page.goto(withQa(url));
   await waitFor(page, () => window.__game && window.__game.screen === 'title', undefined, 120000);
   const low = page.locator('[data-preset="low"]');
   if (await low.count()) await low.click();

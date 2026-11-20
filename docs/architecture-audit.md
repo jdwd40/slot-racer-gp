@@ -178,7 +178,7 @@ Ranked by practical impact on the two goals.
 7. **Variable sub-step size and unseeded randomness** (Medium, see 2.2/M3).
 8. **Snapshot-unfriendly `Car` shape** (Medium, M4).
 9. **No WebGL failure message** (Medium, D6).
-10. **`window.__game` and `Race.dbg` in production** (Low, A8). Keep for tests, but gate behind `import.meta.env.DEV` or a query flag.
+10. **`window.__game` and `Race.dbg` in production** (Low, A8). Keep for tests, but gate behind `import.meta.env.DEV` or a query flag. Done for `window.__game` in #146: the full hook needs DEV, `VITE_QA=1` or `?qa=1` (see [validation](validation.md)); `Race.dbg` is unchanged.
 11. **Duplicated driver tables, four-car literals, event object references** (Low, A4/A5/A9).
 12. **Repository hygiene** (Low, D7/D8): favicon, export artefacts, loose zip.
 
@@ -294,7 +294,7 @@ Small, independent tasks. Estimated effort is for a developer who knows the code
 
 **Preparing for multiplayer (no behaviour change)**
 
-11. Gate `window.__game` behind `import.meta.env.DEV` or `?debug`. (Low, minutes)
+11. Gate `window.__game` behind `import.meta.env.DEV` or `?debug`. (Low, minutes) Done in #146 (`?qa=1`).
 12. Replace `driverName`/`driverColor` in `main.ts` with `DRIVERS`. (Low, minutes)
 13. Move `recordChampRound()`'s classification into `race.ts` (or `records.ts`) as a pure function with a test. (Medium, an hour)
 14. Per-car input and human flag (M2). (High, half a day)

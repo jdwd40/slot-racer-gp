@@ -1,11 +1,14 @@
 #!/usr/bin/env node
 // Bounded browser validation of the real game. Procedure and results: docs/validation.md.
 //
-//   node scripts/browser-check.mjs [tracks race controlled routing practice championship touch responsive touchrace reverse service lastchance stall queue autosg autobay localslot online memory netbanner racelength carsetup debrief]   functional checks (default: all)
+//   node scripts/browser-check.mjs [tracks race controlled routing practice championship touch responsive touchrace reverse service lastchance stall queue autosg autobay localslot online memory netbanner racelength carsetup debrief spectate qahook]   functional checks (default: all)
 //   node scripts/browser-check.mjs perf --label updated --machine "<name>"          frame-time capture
 //   node scripts/browser-check.mjs compare <baseline.json> <updated.json>           like-for-like comparison
 //
 // Every browser context is a throwaway profile, so nothing of the user's is read or written.
+// window.__game (#146): the full debug hook these checks drive is exposed only by a dev server, a VITE_QA=1 build or a page
+// opened with ?qa=1; every page opened here gets ?qa=1 appended (withQa), so dist/, dist-online/ and --url sites all work.
+// A default (production) build without the flag has only a minimal read-only hook; scenario `qahook` checks that gate.
 // Exit code: 0 all checks passed (unavailable ones are listed), 1 a check failed, 2 the time limit was hit.
 import { execFileSync } from 'node:child_process';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
@@ -77,7 +80,7 @@ function instrument({ seed }) {
   window.requestAnimationFrame = (cb) => raf((ts) => {
     cb(ts);
     const g = window.__game;
-    if (!g) return;
+    if (!g?.race) return;   // no hook yet, or the minimal one of a page opened without ?qa=1 (#146)
     const r = g.race, p = r.car(window.__game.localId);
     qa.rows.push({ ts, screen: g.screen, phase: r.phase, raceTime: r.raceTime, dropped: g.stepper ? g.stepper.dropped : null, v: +p.v.toFixed(2), throttle: +p.throttle.toFixed(2), brake: p.brake });
     note(ts, r.raceTime, 'screen', g.screen);
@@ -385,6 +388,16 @@ async function carsetup(run, c) {
   return s;
 }
 
+/**
+ * The page URL with the QA flag (#146): a default build (production included) exposes only a minimal read-only
+ * `window.__game`; `?qa=1` turns on the full diagnostics hook these checks drive. Any existing query and hash are kept.
+ */
+function withQa(url) {
+  const u = new URL(url);
+  u.searchParams.set('qa', '1');
+  return u.href;
+}
+
 async function open(run, { seed = SEED, fixtures = null, viewport = run.viewport, dpr = run.dpr, preset = run.preset, device = {} } = {}) {
   // newContext is an empty, throwaway profile; nothing here touches a real browser profile
   const context = await run.browser.newContext({ viewport, deviceScaleFactor: dpr, ...device });
@@ -394,7 +407,7 @@ async function open(run, { seed = SEED, fixtures = null, viewport = run.viewport
   page.on('pageerror', (e) => errors.push(`pageerror: ${e.message}`));
   page.on('console', (m) => { if (m.type() === 'error') errors.push(`console: ${m.text()}`); });
   await page.addInitScript(instrument, { seed });
-  const load = async () => { await page.goto(run.url); await page.waitForFunction(() => window.__game && window.__game.screen === 'title'); await page.evaluate(scriptedTime); };
+  const load = async () => { await page.goto(withQa(run.url)); await page.waitForFunction(() => window.__game && window.__game.screen === 'title'); await page.evaluate(scriptedTime); };
   await load();
   if (fixtures) {
     await page.evaluate((f) => { for (const [k, v] of Object.entries(f)) localStorage.setItem(k, v); }, fixtures);
@@ -2974,6 +2987,65 @@ async function online(run, c) {
 }
 
 /**
+ * Debug hook gate (#146). The build opened without `?qa=1` (the production page as a visitor sees it): `window.__game` is the
+ * minimal read-only object (screen, online, preset, mode, hook) with no functions, no setters and no driving or network
+ * keys, and neither it nor the window property can be changed. Then with `?qa=1`: the full hook, tagged `hook: 'url'`.
+ * A dev server or a VITE_QA build exposes the full hook without the flag, so the first half is unavailable there.
+ */
+async function qahook(run, c) {
+  const FULL = ['advance', 'startSession', 'showTitle', 'qaNetLobby', 'qaNetResult', 'netDrop', 'setLocalSlot', 'setView', 'zoom', 'race', 'net', 'input', 'stepper'];
+  const context = await run.browser.newContext({ viewport: run.viewport });
+  const page = await context.newPage();
+  page.setDefaultTimeout(30000);
+  const errors = [];
+  page.on('pageerror', (e) => errors.push(`pageerror: ${e.message}`));
+  page.on('console', (m) => { if (m.type() === 'error') errors.push(`console: ${m.text()}`); });
+  // the shared recorder (no __game needed to load); the run's report reads it from the ?qa=1 page at the end
+  await page.addInitScript(instrument, { seed: SEED });
+  const plain = new URL(run.url); plain.searchParams.delete('qa');
+  await page.goto(plain.href);
+  await page.waitForFunction(() => window.__game && window.__game.screen === 'title');
+  const bare = await read(page, (full) => {
+    const g = window.__game, keys = Object.keys(g), d = Object.getOwnPropertyDescriptor(window, '__game');
+    const props = Object.fromEntries(keys.map((k) => { const p = Object.getOwnPropertyDescriptor(g, k); return [k, { get: !!p.get, set: !!p.set, writable: !!p.writable, configurable: p.configurable, fn: typeof (p.get ? p.get.call(g) : p.value) === 'function' }]; }));
+    const json = (v) => { try { return JSON.stringify(v); } catch { return 'not serialisable (not the minimal hook)'; } };
+    const before = json(g);
+    // every write is refused (strict mode, so a refused write throws): a property set, a new key, a delete, a nested change
+    // through `online`, replacing or redefining window.__game
+    const tries = (function () {
+      'use strict';
+      const out = [];
+      const t = (name, f) => { try { f(); out.push(name + ':allowed'); } catch (e) { out.push(name + ':' + e.name); } };
+      t('set', () => { g.screen = 'race'; });
+      t('add', () => { g.advance = () => 0; });
+      t('delete', () => { delete g.mode; });
+      t('nested', () => { g.online.state = 'hacked'; });
+      t('replace', () => { window.__game = { advance: () => 0 }; });
+      t('redefine', () => { Object.defineProperty(window, '__game', { value: {} }); });
+      return out;
+    })();
+    return { hook: g.hook, keys, props, present: full.filter((k) => k in g), frozen: Object.isFrozen(g), sameAfter: json(window.__game) === before && window.__game === g, windowProp: { writable: d.writable, configurable: d.configurable }, tries, screen: g.screen, online: g.online, mode: g.mode, preset: g.preset };
+  }, FULL);
+  if (bare.hook === 'dev' || bare.hook === 'build') {
+    c.unavailable('Default build without ?qa=1: minimal read-only __game', `this build exposes the full hook without the flag (hook: ${bare.hook})`);
+  } else {
+    c.ok('Default build without ?qa=1: __game is the minimal hook (screen, online, preset, mode, hook) and nothing else', bare.hook === 'minimal' && bare.keys.slice().sort().join() === 'hook,mode,online,preset,screen', bare.keys);
+    c.ok('Default build without ?qa=1: no advance, startSession, qaNetLobby, netDrop, setLocalSlot or any other full-hook key', bare.present.length === 0, bare.present);
+    c.ok('Minimal hook: getters only, no setters, no functions, nothing configurable', Object.entries(bare.props).every(([k, p]) => !p.set && !p.fn && p.configurable === false && (k === 'hook' ? !p.get && !p.writable : p.get)), bare.props);
+    c.ok('Minimal hook: frozen; a set, an added key, a delete, a nested change and replacing window.__game are all refused (TypeError) and change nothing', bare.frozen && bare.sameAfter && !bare.windowProp.writable && !bare.windowProp.configurable && ['set', 'add', 'delete', 'nested', 'replace', 'redefine'].every((t) => bare.tries.includes(`${t}:TypeError`)) && bare.online.state !== 'hacked', { tries: bare.tries, frozen: bare.frozen, windowProp: bare.windowProp });
+    c.ok('Minimal hook: live values (title screen, a known preset and online state)', bare.screen === 'title' && typeof bare.preset === 'string' && typeof bare.online?.state === 'string' && typeof bare.mode === 'string', { screen: bare.screen, preset: bare.preset, online: bare.online, mode: bare.mode });
+  }
+  await page.goto(withQa(run.url));
+  await page.waitForFunction(() => window.__game && window.__game.screen === 'title');
+  const qa = await read(page, (full) => ({ hook: window.__game.hook, missing: full.filter((k) => !(k in window.__game)) }), FULL);
+  c.ok('With ?qa=1: the full hook (advance, startSession, qaNetLobby, netDrop, setLocalSlot and the rest)', ['url', 'dev', 'build'].includes(qa.hook) && qa.missing.length === 0, qa);
+  await read(page, () => { window.__game.startSession('race'); window.__game.advance(1); });
+  const drove = await read(page, () => ({ screen: window.__game.screen, t: window.__game.race.t }));
+  c.ok('With ?qa=1: the hook drives the game (startSession, advance)', drove.screen === 'race' && drove.t > 0, drove);
+  return { context, page, errors };
+}
+
+/**
  * GPU textures across repeated races (#37): every race rebuilds the four car visuals, and the old ones must free their
  * textures (the number roundels leaked before). renderer.info.memory.textures returns to the first race's count each time.
  */
@@ -3725,8 +3797,8 @@ async function spectate(run, c) {
   return s;
 }
 
-const SCENARIOS = { tracks, race, controlled, routing, practice, championship, touch, responsive, touchrace, reverse, service, lastchance, stall, queue, autosg, autobay, localslot, online, memory, netbanner, racelength, carsetup, debrief, spectate };
-const USAGE = 'usage: browser-check.mjs [tracks|race|controlled|routing|practice|championship|touch|responsive|touchrace|reverse|service|lastchance|stall|queue|autosg|autobay|localslot|online|memory|netbanner|racelength|carsetup|debrief|spectate ...] | perf | compare <a.json> <b.json>\n'
+const SCENARIOS = { tracks, race, controlled, routing, practice, championship, touch, responsive, touchrace, reverse, service, lastchance, stall, queue, autosg, autobay, localslot, online, memory, netbanner, racelength, carsetup, debrief, spectate, qahook };
+const USAGE = 'usage: browser-check.mjs [tracks|race|controlled|routing|practice|championship|touch|responsive|touchrace|reverse|service|lastchance|stall|queue|autosg|autobay|localslot|online|memory|netbanner|racelength|carsetup|debrief|spectate|qahook ...] | perf | compare <a.json> <b.json>\n'
   + 'options: --dist <dir> --url <url> --commit <sha> --machine <name> --label <name> --viewport WxH --dpr N --preset low|balanced|high\n'
   + '         --seconds N --headed --channel <chrome|msedge> --out <dir> --max-minutes N';
 
@@ -3834,5 +3906,5 @@ async function main() {
 }
 
 // scripts/online-check.mjs reuses the driver, input helpers and checks; run directly, this file is the browser check
-export { instrument, Keys, Checks, Fingers, PadKeys, PHONE, environment, capture, driveUntil, waitFor, read, sleep, LAPS, STRINGS };
+export { withQa, instrument, Keys, Checks, Fingers, PadKeys, PHONE, environment, capture, driveUntil, waitFor, read, sleep, LAPS, STRINGS };
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) main().catch((e) => { console.error(e.message); process.exit(1); });
