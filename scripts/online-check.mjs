@@ -25,7 +25,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { build } from 'esbuild';
 import { chromium } from 'playwright-core';
 import { preview } from 'vite';
-import { withQa, instrument, Keys, Checks, Fingers, PadKeys, PHONE, environment, driveUntil, waitFor, read, sleep, LAPS, STRINGS } from './browser-check.mjs';
+import { withQa, booted, instrument, Keys, Checks, Fingers, PadKeys, PHONE, environment, driveUntil, waitFor, read, sleep, LAPS, STRINGS } from './browser-check.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const OUT = path.join(ROOT, '.qa/online-check', new Date().toISOString().replace(/[:.]/g, '-'));
@@ -129,7 +129,7 @@ async function openPage(run, url, view = 'laptop', { touch = false, name = view,
   });
   // ?qa=1 (#146): the full window.__game hook these checks read, on the local build and on a deployed (production) site alike
   await page.goto(withQa(url));
-  await waitFor(page, () => window.__game && window.__game.screen === 'title', undefined, 120000);
+  await waitFor(page, booted, undefined, 120000);
   const low = page.locator('[data-preset="low"]');
   if (await low.count()) await low.click();
   let keys = new Keys(page);
@@ -150,7 +150,7 @@ const waitOnline = (page) => waitFor(page, () => window.__game.online.state !== 
 async function goOnline(s, name) {
   await waitOnline(s.page);
   // under four software-rendered pages the one health probe can time out: that page then (correctly) offers no Online, so reload once
-  if (!(await s.page.locator('#o-online').count())) { s.probeRetries = (s.probeRetries ?? 0) + 1; await s.page.reload(); await waitFor(s.page, () => window.__game && window.__game.screen === 'title', undefined, 120000); await waitOnline(s.page); }
+  if (!(await s.page.locator('#o-online').count())) { s.probeRetries = (s.probeRetries ?? 0) + 1; await s.page.reload(); await waitFor(s.page, booted, undefined, 120000); await waitOnline(s.page); }
   await s.page.click('#o-online');
   await s.page.fill('#n-name', name);
 }
@@ -201,7 +201,7 @@ async function gate(run, c) {
   const { page } = s;
   await read(page, (f) => { for (const [k, v] of Object.entries(f)) localStorage.setItem(k, v); }, fixtures);
   await page.reload();
-  await waitFor(page, () => window.__game && window.__game.screen === 'title');
+  await waitFor(page, booted);
   await waitOnline(page);
   const st = await read(page, () => ({ online: window.__game.online, button: !!document.getElementById('o-online'), note: document.querySelector('.net-off')?.textContent ?? '' }));
   c.ok('Service down: health check fails, so online play is not offered (no Online button) and the page says so', st.online.state === 'unavailable' && !st.button && st.note.length > 0, st);
@@ -630,7 +630,7 @@ async function connection(run, c) {
 
   // ---- reload the phone mid-race: Rejoin from the title within the grace period
   await b.page.reload();
-  await waitFor(b.page, () => window.__game && window.__game.screen === 'title');
+  await waitFor(b.page, booted);
   await waitOnline(b.page);
   await b.page.locator('#o-rejoin').tap();
   await waitFor(b.page, () => window.__game.screen === 'race' && window.__game.net && window.__game.net.me, undefined, 15000).catch(async (e) => { throw new Error(`${e.message} ${JSON.stringify(await read(b.page, () => ({ screen: window.__game.screen, msg: document.getElementById('n-msg')?.textContent, net: window.__game.net && window.__game.net.conn })))} ${run.real.log.lines.slice(-10).join(' ')}`); });
@@ -709,7 +709,7 @@ async function accounts(run, c) {
   const a = await openPage(run, run.acctUrl, 'phonePortrait', { touch: true, name: 'phone A' });
   await read(a.page, (f) => { for (const [k, v] of Object.entries(f)) localStorage.setItem(k, v); }, fixtures);
   await a.page.reload();
-  await waitFor(a.page, () => window.__game && window.__game.screen === 'title', undefined, 120000);
+  await waitFor(a.page, booted, undefined, 120000);
   await waitOnline(a.page);
   await waitFor(a.page, () => window.__game.auth.state === 'guest', undefined, 15000);
   c.ok('Health reports accounts: the title offers Sign in, the browser restores as a guest', (await a.page.locator('#o-account').textContent()) === STRINGS['acct.signIn'], await read(a.page, () => window.__game.auth));

@@ -1,15 +1,13 @@
-import * as THREE from 'three';
 import { ONLINE_ENABLED, afterProtocolRefusal, afterRetry, behindHtml, outdatedHtml, probeOnline, startRecheck, type OnlineStatus } from './online';
-import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 import * as T from './track';
 import { Race, Car, RaceEvent, DRIVERS, PEN, SOLO_ID, DriverId, RosterEntry } from './race';
 import { LENGTH_IDS, lengthOr, raceLength, type RaceLengthId } from './raceLength';
 import { DEFAULT_SETUP, SETUP_IDS, setupOr, type SetupId } from './carSetup';
 import { comparePb, readDebrief, type PbCompare } from './debrief';
 import { debriefHtml, debriefOpen } from './debriefView';
-import { buildWorld, disposeWorld, arrowGeometry, bayPaints, BayPaint, World } from './world';
-import { Y0, disposeObject } from './gfx';
-import { makeCar, makePlayerMarker, dimCar, CarVisual } from './carModel';
+import { bayPaints, type BayPaint } from './bays';
+// the 3D view and Three.js are a separate chunk (#147): type-only here, loaded with import() by loadView below
+import type { View3D } from './view3d';
 import { Hud, fmt, carLabel, flags, escHtml, type SpecView } from './hud';
 import { Spectator, shouldSpectate } from './spectate';
 import { Sfx } from './audio';
@@ -41,46 +39,20 @@ const app = document.getElementById('app')!;
 /** The game's box: the canvas, HUD and menus all fill it, so they cannot drift apart. CSS sizes it to the dynamic viewport. */
 const viewSize = (): { w: number; h: number } => ({ w: app.clientWidth || window.innerWidth, h: app.clientHeight || window.innerHeight });
 let vp = viewSize();
-/** Create the renderer, or show a readable message and stop if WebGL cannot initialise. */
-function createRenderer(): THREE.WebGLRenderer {
-  try {
-    return new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
-  } catch (err) {
-    app.innerHTML = `<div class="fatal"><h1>${t('title.name')}</h1><p>${t('ui.noWebgl')}</p><p><small>${t('ui.noWebglHint')}</small></p></div>`;
-    throw err;
-  }
-}
-const renderer = createRenderer();
 let preset = savedPreset();
 // watches the first seconds of each race and drops to Low once on a device that cannot keep up (#66, src/autoQuality.ts)
 const autoQuality = new AutoQuality((() => { try { return window.localStorage; } catch { return null; } })());
 let dpr = window.devicePixelRatio;
-renderer.setPixelRatio(pixelRatioFor(preset, dpr));
-renderer.setSize(vp.w, vp.h, false);
-renderer.outputColorSpace = THREE.SRGBColorSpace;
-renderer.toneMapping = THREE.ACESFilmicToneMapping;
-renderer.toneMappingExposure = 1.05;
-renderer.shadowMap.enabled = true;
-renderer.shadowMap.type = THREE.PCFShadowMap;
-app.appendChild(renderer.domElement);
 
-const scene = new THREE.Scene();
-scene.background = new THREE.Color(0x2b2420);
-const pmrem = new THREE.PMREMGenerator(renderer);
-scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
-scene.environmentIntensity = 0.3;
-
-const camera = new THREE.PerspectiveCamera(38, vp.w / vp.h, 0.5, 600);
-scene.add(new THREE.HemisphereLight(0xe8f2ff, 0x4d6b3a, 0.7));
-const sun = new THREE.DirectionalLight(0xfff1dc, 2.1);
-sun.castShadow = true;
-sun.shadow.mapSize.set(2048, 2048);
-sun.shadow.bias = -0.0004;
-sun.shadow.normalBias = 0.02;
-scene.add(sun, sun.target);
-
-let world: World = buildWorld();
-scene.add(world.root);
+/**
+ * The 3D view (#147, src/view3d.ts): the renderer, scene, circuit, car models, arrows and marker, with Three.js, in a chunk of
+ * its own. null until that chunk has loaded and the view is built: the title and every menu work without it, the frame loop
+ * draws nothing 3D, and a race or practice start waits for it (startSession). Fetched as soon as the title is up (loadView).
+ */
+let view: View3D | null = null;
+/** where the 3D view is: 'loading' (fetching or building), 'ready', 'failed' (the chunk did not load), 'nogl' (no WebGL) */
+let viewState: 'loading' | 'ready' | 'failed' | 'nogl' = 'loading';
+let viewLoading: Promise<void> | null = null;
 
 // ------------------------------------------------------------ cars
 /** local race / practice / championship run on this device; 'online' is a server race (connected solo or multiplayer) */
@@ -136,27 +108,19 @@ const stepper = new FixedStepper();
 const poseOf = ({ x, y, z, h, roll, pitch }: Car): Pose => ({ x, y, z, h, roll, pitch });
 /** each car's placement before the latest simulation step; drawing blends from here to the live state */
 let prevPoses = race.cars.map(poseOf);
-let visuals: CarVisual[] = [];
-function disposeVisual(v: CarVisual): void {
-  disposeObject(v.group);
-  v.group.removeFromParent();
-}
-function rebuildVisuals(): void {
-  visuals.forEach(disposeVisual);
-  visuals = race.cars.map((c) => { const v = makeCar(c.color, c.num, isMe(c)); scene.add(v.group); return v; });
-  paintBays();
-}
 /** Bays are painted from the race's owners (Car.bayHome): the player's in the chosen livery, with its number and tag. */
 let bayPaint: BayPaint[] = [];
-function paintBays(): void {
-  world.paintBays(bayPaint = bayPaints(race, localId));
+/** The car models and bay paint for the current race (models only once the 3D view is there: it builds them itself then). */
+function rebuildVisuals(): void {
+  bayPaint = bayPaints(race, localId);
+  view?.rebuildCars(race, isMe, bayPaint);
 }
 rebuildVisuals();
-function setRace(r: Race): void { endSpectate(); myDoneT = null; race = r; autoQuality.beginRace(); laneArrowKey = ''; lastCrossed = 0; prevPoses = race.cars.map(poseOf); stepper.rebase(); rebuildVisuals(); }
+function setRace(r: Race): void { endSpectate(); myDoneT = null; race = r; autoQuality.beginRace(); view?.resetArrows(); lastCrossed = 0; prevPoses = race.cars.map(poseOf); stepper.rebase(); rebuildVisuals(); }
 
 // practice ghost + records
 const recorder = new GhostRecorder();
-const ghost = new GhostPlayer(scene);
+const ghost = new GhostPlayer();
 let pbMs = 0;
 /**
  * The local driver's compatible personal best (ms) read when this race started (#134): their own fastest lap on this device's
@@ -169,24 +133,6 @@ const freshIds = new Set<string>();
 let champ: R.Championship | null = R.loadChamp();
 let champRoundSaved = false;
 
-// lane-change / pit arrows
-const arrowMat = new THREE.MeshBasicMaterial({ color: 0xffd23f, transparent: true, opacity: 0.85, depthWrite: false, side: THREE.DoubleSide });
-const laneArrow = new THREE.Mesh(new THREE.BufferGeometry(), arrowMat);
-laneArrow.visible = false; laneArrow.renderOrder = 5; scene.add(laneArrow);
-let laneArrowKey = '';
-const pitArrowMat = new THREE.MeshBasicMaterial({ color: 0x22d3ee, transparent: true, opacity: 0.85, depthWrite: false, side: THREE.DoubleSide });
-const pitArrowGeo = (): THREE.BufferGeometry => arrowGeometry(T.PIT_IN0 - 3.5, T.PIT_IN1 + 1.5, (s) => (s < T.PIT_IN0 ? -T.LANE_HALF : T.pitD(s)), 0.2);
-const pitArrow = new THREE.Mesh(pitArrowGeo(), pitArrowMat);
-pitArrow.visible = false; pitArrow.renderOrder = 5; scene.add(pitArrow);
-
-// the player marker: shown in overview views and, through the deck, beneath a bridge.
-// It sits outside the car's group so the tow and recovery blinks leave it steady, and it draws over everything so decks can't hide it.
-const playerMarker = makePlayerMarker();
-scene.add(playerMarker);
-const MARKER_PX = 20;      // ring radius in CSS pixels once zoomed out, whatever the viewport or preset
-const MARKER_MIN = 1.25;   // world units: never tighter than the car in close views
-let markerFade = 0;
-let bridgeFade = 1;
 /** true while the player's car is on the lower level of a crossing */
 function playerUnderBridge(): boolean {
   const p = me();
@@ -207,6 +153,17 @@ app.appendChild(menuLayer);
 const overlay = document.createElement('div');
 overlay.className = 'overlay';
 menuLayer.appendChild(overlay);
+/**
+ * The 3D view's status line (#147): "Loading the race view…" while a start waits for it (or a race is up without it), and a
+ * short error with Reload / Try again if its chunk could not be loaded (an old tab after a deploy, or a dropped connection),
+ * so the page is never left blank or stuck. Outside the overlay, so redrawing a card never removes it.
+ */
+const viewNote = document.createElement('div');
+viewNote.id = 'view-note';
+viewNote.hidden = true;
+app.appendChild(viewNote);
+/** a race, practice or championship round asked for before the 3D view was ready, and the screen it was asked from */
+let pendingStart: { m: Mode; from: Screen } | null = null;
 
 let online: OnlineStatus = ONLINE_ENABLED ? { state: 'checking' } : { state: 'off' };
 
@@ -236,6 +193,9 @@ function enter(s: Screen): void {
   // online: any other screen ends it (#43)
   if (s !== 'netwait' && !(watching && net)) netGuard.stop();
   screen = s;
+  // leaving the screen a start was asked from cancels that start (a session starting goes to the race screen itself)
+  if (pendingStart && s !== pendingStart.from) pendingStart = null;
+  syncViewNote();
   releaseDriving();
   hud.setMore(false);
   syncPad();
@@ -281,15 +241,10 @@ function trackSvg(def: T.TrackDef): string {
 
 /** Switch the active circuit: rebuild the world, arrows, minimap and a fresh race. */
 function applyTrack(id: string): void {
-  if (T.DEF.id === id && world) return;
+  if (T.DEF.id === id) return;
   T.setTrack(id);
   try { localStorage.setItem(TRACK_KEY, id); } catch { /* ignore */ }
-  disposeWorld(world);
-  world = buildWorld();
-  scene.add(world.root);
-  pitArrow.geometry.dispose();
-  pitArrow.geometry = pitArrowGeo();
-  laneArrow.visible = false; laneArrowKey = '';
+  view?.setTrack();
   hud.rebuildMini();
   setRace(newRace());
   camTarget.set(T.BOUNDS.cx, 0, -T.BOUNDS.cy - 2);
@@ -669,7 +624,18 @@ function toMenu(): void {
   showTitle();
 }
 
+/**
+ * Start a local race, practice or championship round. Before the 3D view has loaded (#147) the start waits for it, from the
+ * same screen, and then goes ahead exactly as below; a failed load is retried by asking again.
+ */
 function startSession(m: Mode): void {
+  if (view) { pendingStart = null; startSessionNow(m); return; }
+  if (viewState === 'nogl') return;
+  pendingStart = { m, from: screen };
+  syncViewNote();
+  void loadView();
+}
+function startSessionNow(m: Mode): void {
   mode = m;
   setRace(newRace());
   camMode = 'follow';
@@ -769,7 +735,7 @@ const NON_SCROLL = ['Space', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'];
 /** This key belongs to what has focus: text fields take everything, and a focused menu button keeps Space and Enter. */
 function ownedByWidget(target: EventTarget | null, code: string): boolean {
   const el = target instanceof Element ? target : null;
-  return !!el?.closest('input, textarea, select, [contenteditable]') || ((code === 'Space' || code === 'Enter') && !!el?.closest('.overlay button'));
+  return !!el?.closest('input, textarea, select, [contenteditable]') || ((code === 'Space' || code === 'Enter') && !!el?.closest('.overlay button, #view-note button'));
 }
 window.addEventListener('keydown', (e) => {
   const k = e.code;
@@ -816,7 +782,6 @@ window.addEventListener('blur', suspend);
 // back from hidden: the online keepalive gives the socket a fresh silence window (src/net/client.ts) instead of counting time
 // this page was frozen or throttled against it; a socket that really died is then caught by the watchdog and resumed
 document.addEventListener('visibilitychange', () => { autoQuality.interrupt(); if (document.hidden) suspend(); else { net?.client.wake(); netGuard.wake(); } stepper.rebase(); });
-renderer.domElement.addEventListener('wheel', (e) => { e.preventDefault(); zoomBy(e.deltaY > 0 ? 1.12 : 0.89); }, { passive: false });
 
 /**
  * A HUD button for mouse, keyboard and touch alike. A finger acts on touchstart, because a second finger gets no click while the first holds Throttle;
@@ -856,10 +821,10 @@ function toggleGhost(): void {
 // ------------------------------------------------------------ camera
 let camMode: 'follow' | 'full' = 'full';
 let followSpan = 20;
-const camTarget = new THREE.Vector3();
-const camLead = new THREE.Vector2();
+/** the point the camera looks at (world x, z; y is always 0) and its smoothed look-ahead: plain numbers, the view places the camera */
+const camTarget = { x: 0, z: 0, set(x: number, _y: number, z: number): void { this.x = x; this.z = z; } };
+const camLead = { x: 0, y: 0, set(x: number, y: number): void { this.x = x; this.y = y; } };
 let curSpan = 20;
-const TILT = THREE.MathUtils.degToRad(13);
 function fullSpan(): number {
   return Math.max(T.BOUNDS.h + 11, (T.BOUNDS.w + 13) / (vp.w / vp.h));
 }
@@ -869,40 +834,28 @@ function toggleView(): void { if (spec.active) { spec.whole = !spec.whole; retur
 function zoomBy(f: number): void {
   if (spec.active) spec.whole = false;
   else if (camMode === 'full') { camMode = 'follow'; }
-  followSpan = THREE.MathUtils.clamp(followSpan * f, 10, 70);
+  followSpan = Math.max(10, Math.min(70, followSpan * f));
 }
-let shadowSpan = 0;
-/** `view`: follow `p` (a car moving at `v`) or show the whole track. Spectating (#135) passes the watched car and its view. */
-function updateCamera(dt: number, p: Pose, view: 'follow' | 'full' = camMode, v = me().v): void {
-  const desired = new THREE.Vector3();
+/** `look`: follow `p` (a car moving at `v`) or show the whole track. Spectating (#135) passes the watched car and its view. */
+function updateCamera(dt: number, p: Pose, look: 'follow' | 'full' = camMode, v = me().v): void {
+  const desired = { x: 0, z: 0 };
   let span: number;
-  if (view === 'follow') {
+  if (look === 'follow') {
     const lead = Math.min(followSpan * 0.28, v * 0.3);
     const lx = Math.cos(p.h) * lead, ly = Math.sin(p.h) * lead;
     const kl = 1 - Math.exp(-2.2 * dt);
     camLead.x += (lx - camLead.x) * kl; camLead.y += (ly - camLead.y) * kl;
-    desired.set(p.x + camLead.x, 0, -(p.y + camLead.y));
+    desired.x = p.x + camLead.x; desired.z = -(p.y + camLead.y);
     span = followSpan / portraitFit();
   } else {
-    desired.set(T.BOUNDS.cx, 0, -T.BOUNDS.cy - 2);
+    desired.x = T.BOUNDS.cx; desired.z = -T.BOUNDS.cy - 2;
     span = fullSpan();
   }
-  const k = 1 - Math.exp(-(view === 'follow' ? 7 : 3) * dt);
-  camTarget.lerp(desired, k);
+  const k = 1 - Math.exp(-(look === 'follow' ? 7 : 3) * dt);
+  camTarget.x += (desired.x - camTarget.x) * k; camTarget.z += (desired.z - camTarget.z) * k;
   curSpan += (span - curSpan) * (1 - Math.exp(-4 * dt));
-  const dist = curSpan / 2 / Math.tan(THREE.MathUtils.degToRad(camera.fov / 2));
-  camera.position.set(camTarget.x, Math.cos(TILT) * dist, camTarget.z + Math.sin(TILT) * dist);
-  camera.lookAt(camTarget);
-  // shadows follow the view
-  const sh = curSpan * Math.max(1, vp.w / vp.h) * 0.62 + 4;
-  if (Math.abs(sh - shadowSpan) > shadowSpan * 0.08) {
-    shadowSpan = sh;
-    const c = sun.shadow.camera;
-    c.left = -sh; c.right = sh; c.top = sh; c.bottom = -sh; c.near = 1; c.far = 160;
-    c.updateProjectionMatrix();
-  }
-  sun.position.set(camTarget.x - 22, 45, camTarget.z + 14);
-  sun.target.position.copy(camTarget);
+  // the camera itself, and the shadows that follow the view, are the 3D view's
+  view?.placeCamera(camTarget, curSpan, vp.w / vp.h);
 }
 
 /**
@@ -912,10 +865,7 @@ function updateCamera(dt: number, p: Pose, view: 'follow' | 'full' = camMode, v 
 function fitRenderer(): void {
   vp = viewSize();
   dpr = window.devicePixelRatio;
-  camera.aspect = vp.w / vp.h;
-  camera.updateProjectionMatrix();
-  renderer.setPixelRatio(pixelRatioFor(preset, dpr));
-  renderer.setSize(vp.w, vp.h, false);
+  view?.fit(vp, pixelRatioFor(preset, dpr));
   hud.fitMini();
 }
 
@@ -984,91 +934,14 @@ function handle(e: RaceEvent): void {
 function dist2(c: { x: number; y: number }): number { const dx = c.x - camTarget.x, dy = -c.y - camTarget.z; return dx * dx + dy * dy; }
 
 // ------------------------------------------------------------ visuals sync
+/** The cars, the bridge decks and the player marker (src/view3d.ts draws them): which view wants the marker is decided here. */
 function syncCars(dt: number, time: number, poses: Pose[]): void {
-  race.cars.forEach((c, i) => {
-    const v = visuals[i];
-    const pose = poses[i];
-    v.group.position.set(pose.x, pose.z, -pose.y);
-    v.group.rotation.set(pose.roll, pose.h, pose.pitch, 'YXZ');
-    // body roll from wobble / crash tumble
-    if (c.mode === 'off' && c.off) {
-      v.body.rotation.x = Math.sin(c.off.t * 9) * 0.25 * Math.max(0, 1 - c.off.t);
-      v.body.rotation.z = Math.sin(c.off.t * 7) * 0.15 * Math.max(0, 1 - c.off.t);
-    } else {
-      v.body.rotation.x = c.wobble * Math.sin(time * 31 + i) * 0.12;
-      v.body.rotation.z = -Math.min(0.06, c.v * 0.004) * (c.throttle - c.brake * 0.6);
-    }
-    for (const w of v.wheels) w.rotation.z -= (c.v * dt) / 0.12;
-    const blink = c.mode === 'tow' ? Math.floor(time * 8) % 2 === 0 && c.towT < 0.9 : c.recoverT > 0 ? Math.floor(time * 12) % 2 === 0 : true;
-    v.group.visible = blink;
-    // held for an away driver (#74, Car.away from the server's snapshot): out of traffic, so drawn see-through on every client
-    dimCar(v, c.away);
-  });
-  // bridge decks turn translucent while the player drives beneath them
+  if (!view) return;
   const under = playerUnderBridge();
-  const target = under ? 0.28 : 1;
-  bridgeFade += (target - bridgeFade) * Math.min(1, dt * 8);
-  for (const m of world.bridgeMats) m.opacity = bridgeFade;
   const p = me();
   const inSession = screen === 'race' || screen === 'pause' || screen === 'results' || screen === 'netwait';
-  const wanted = inSession && ((spec.active ? !spec.focus(race) : camMode === 'full') || curSpan * portraitFit() > 34 || (under && p.mode !== 'off'));
-  markerFade += ((wanted ? 1 : 0) - markerFade) * Math.min(1, dt * 8);
-  playerMarker.visible = markerFade > 0.02;
-  if (playerMarker.visible) {
-    const mp = poses[Math.max(0, race.cars.indexOf(p))];
-    playerMarker.position.set(mp.x, mp.z + Y0 + 0.05, -mp.y);
-    playerMarker.quaternion.copy(camera.quaternion);
-    // curSpan is the world height of the view, so this holds a constant on-screen size
-    playerMarker.scale.setScalar(Math.max(MARKER_MIN, (MARKER_PX * curSpan) / vp.h) * (1 + Math.sin(time * 3) * 0.04));
-    for (const m of playerMarker.children) ((m as THREE.Mesh).material as THREE.MeshBasicMaterial).opacity = markerFade;
-  }
-}
-
-function syncArrows(time: number): void {
-  const p = me();
-  // lane change arrow: a pit route draws its choice for the next switch, straight when that means staying in lane
-  const route = race.nextRoute(p);
-  if (p.laneReq || p.change || route) {
-    const sw = p.change ? { s0: p.change.s0, s1: p.change.s1 } : race.nextSwitch(p);
-    const from = p.change ? p.change.from : Math.sign(p.laneSide) || 1;
-    const to = p.change ? p.change.to : route ? route.to : -from;
-    const key = `${sw.s0}:${from}:${to}`;
-    if (key !== laneArrowKey) {
-      laneArrowKey = key;
-      laneArrow.geometry.dispose();
-      const len = sw.s1 - sw.s0;
-      laneArrow.geometry = arrowGeometry(sw.s0 - 2.5, sw.s1 + 1.2, (s) => T.LANE_HALF * (from + (to - from) * T.smooth((s - sw.s0) / len)), 0.16);
-    }
-    laneArrow.visible = true;
-    arrowMat.opacity = p.change ? 0.35 : 0.55 + Math.sin(time * 8) * 0.3;
-    arrowMat.color.setHex(route && !route.override ? 0x22d3ee : 0xffd23f);
-  } else laneArrow.visible = false;
-  pitArrow.visible = route !== null;
-  pitArrowMat.opacity = 0.55 + Math.sin(time * 8) * 0.3;
-  if (route) {
-    // cyan when the car will reach the entrance in the outside lane: the next switch only counts if it comes first
-    const s = race.s(p);
-    const side = T.ahead(s, race.nextSwitch(p).s0) < T.ahead(s, T.PIT_IN0) ? route.to : p.change ? p.change.to : p.laneSide;
-    pitArrowMat.color.setHex(side < 0 ? 0x22d3ee : 0xff6b6b);
-  }
-  // the player's own bay glows while the car is heading for it (cyan, pulsing) and while it stands in it (green); no other bay is offered
-  const bound = (p.mode === 'pitlane' && p.pitFuel && !p.serviced) || ((p.mode === 'race') && p.sgCtl && p.sgOwed <= 0);
-  world.bayGlow.forEach((m, j) => {
-    const own = j === p.bayHome;
-    const inIt = (p.mode === 'service' || p.mode === 'bayIn') && p.bay === j;
-    m.color.setHex(inIt ? 0x3cff8a : 0x7dd3fc);
-    m.opacity = inIt ? 0.45 : own && bound && race.bayFree(j, p) ? 0.25 + Math.sin(time * 7) * 0.15 : 0;
-  });
-  // penalty box: pulses red while the player owes a stop-and-go, solid while serving
-  const owes = p.sgOwed > 0 && !p.finished;
-  world.penGlow.opacity = !owes ? 0 : p.sgServing ? 0.5 : 0.25 + Math.sin(time * 7) * 0.15;
-  world.penGlow.color.setHex(p.sgServing ? 0x3cff8a : 0xff4444);
-  world.startLights.forEach((m, i) => {
-    const on = race.phase === 'countdown' && i < race.lights;
-    m.emissive.setHex(on ? 0xff1a1a : 0x000000);
-    m.emissiveIntensity = on ? 3 : 0;
-    m.color.setHex(on ? 0xff3333 : 0x330000);
-  });
+  const markerWanted = inSession && ((spec.active ? !spec.focus(race) : camMode === 'full') || curSpan * portraitFit() > 34 || (under && p.mode !== 'off'));
+  view.syncCars({ race, poses, dt, time, meIdx: Math.max(0, race.cars.indexOf(p)), under, markerWanted, span: curSpan, vpH: vp.h });
 }
 
 /** motor volume per car from the last audio sync: the local driver's car at full volume, the rest by distance */
@@ -2106,6 +1979,8 @@ showTitle();
 // the local standings card (#135) keeps the race running behind it, as the race view does
 const simulating = (): boolean => !net && (screen === 'race' || screen === 'results' || screen === 'netwait');
 function frame(now: number): void {
+  // no WebGL: the page is the readable message (noWebgl), as it was before the view was split out
+  if (viewState === 'nogl') return;
   requestAnimationFrame(frame);
   // checked here, not on resize: browser bars and moving to another display do not always send that event, and the canvas is redrawn in this same frame
   const size = viewSize();
@@ -2142,15 +2017,79 @@ function frame(now: number): void {
   syncCars(dt, time, poses);
   // the blended cars trail the live state by up to a step; the ghost must trail with them to line up
   ghost.update(race.raceTime - (1 - alpha) * STEP, screen === 'race' ? dt : 0);
-  syncArrows(time);
+  view?.syncArrows(race, me(), time);
   syncAudio();
   const hudShown = screen === 'race' || screen === 'pause' || screen === 'results' || screen === 'netwait';
   syncBanner();
   if (screen === 'netwait' && !net) renderNetWait();
   hud.frame(hudShown, race, dt, time, { mode: mode === 'online' ? 'race' : mode, me: localId, pbMs, doneT: myDoneT, spec: spec.active ? specView() : null, round: mode === 'champ' && champ ? `${champ.rounds.length + (champRoundSaved ? 0 : 1)}/${R.CHAMP_TRACKS.length}` : '' });
-  renderer.render(scene, camera);
+  view?.render();
 }
 requestAnimationFrame(frame);
+
+// ------------------------------------------------------------ 3D view (#147)
+/**
+ * Fetch and build the 3D view (src/view3d.ts and Three.js, a chunk of their own). Called as soon as the title is up, so it is
+ * normally there before Start is pressed; a start before then waits for it (startSession). Once only, unless it failed.
+ */
+function loadView(): Promise<void> {
+  if (view || viewState === 'nogl') return Promise.resolve();
+  if (viewLoading) return viewLoading;
+  viewState = 'loading';
+  syncViewNote();
+  viewLoading = import('./view3d').then((m) => {
+    let v: View3D;
+    try {
+      v = new m.View3D(app, vp, pixelRatioFor(preset, dpr));
+    } catch (err) {
+      if (err instanceof m.NoWebglError) { noWebgl(); return; }
+      viewState = 'failed'; viewLoading = null; pendingStart = null; syncViewNote();
+      throw err;
+    }
+    attachView(v);
+  }, (err: unknown) => {
+    // the chunk did not arrive: offline, or an old tab whose build a deploy has replaced (the old chunk is gone)
+    console.warn('3D view failed to load:', err);
+    // a start that was waiting is dropped: the note says what happened, and Start works again once Try again has loaded it
+    viewState = 'failed'; viewLoading = null; pendingStart = null;
+    syncViewNote();
+  });
+  return viewLoading;
+}
+/** The 3D view is built: it draws the current circuit, race, ghost and camera from now on, and a waiting start goes ahead. */
+function attachView(v: View3D): void {
+  view = v;
+  viewState = 'ready';
+  v.canvas.addEventListener('wheel', (e) => { e.preventDefault(); zoomBy(e.deltaY > 0 ? 1.12 : 0.89); }, { passive: false });
+  fitRenderer();
+  rebuildVisuals();
+  ghost.attach(v.ghostCar);
+  syncViewNote();
+  const p = pendingStart;
+  pendingStart = null;
+  if (p && screen === p.from) startSessionNow(p.m);
+}
+/** No WebGL: the same readable message the page showed before the view was split out, in place of the game. */
+function noWebgl(): void {
+  viewState = 'nogl';
+  pendingStart = null;
+  app.innerHTML = `<div class="fatal"><h1>${t('title.name')}</h1><p>${t('ui.noWebgl')}</p><p><small>${t('ui.noWebglHint')}</small></p></div>`;
+}
+function syncViewNote(): void {
+  const raceUp = screen === 'race' || screen === 'pause' || screen === 'results' || screen === 'netwait';
+  const show = viewState === 'failed' ? 'failed' : !view && viewState === 'loading' && (pendingStart || raceUp) ? 'loading' : '';
+  if (viewNote.dataset.show === show) return;
+  viewNote.dataset.show = show;
+  viewNote.hidden = !show;
+  viewNote.setAttribute('role', show === 'failed' ? 'alert' : 'status');
+  if (show === 'loading') viewNote.innerHTML = `<p>${t('ui.viewLoading')}</p>`;
+  else if (show === 'failed') {
+    viewNote.innerHTML = `<p>${t('ui.viewFailed')}</p><div class="row"><button class="cta" id="v-reload">${t('ui.viewReload')}</button><button class="cta alt" id="v-retry">${t('ui.viewRetry')}</button></div>`;
+    viewNote.querySelector('#v-reload')!.addEventListener('click', () => location.reload());
+    viewNote.querySelector('#v-retry')!.addEventListener('click', () => { void loadView(); });
+  } else viewNote.innerHTML = '';
+}
+void loadView();
 
 // probed once the page has loaded, so scene building on a slow device cannot eat the probe's time budget
 if (ONLINE_ENABLED) {
@@ -2202,4 +2141,4 @@ function qaNetResult(r: ResultView, meId: string, pbBests?: CareerStats['bests']
 }
 
 // the full hook only in a dev server, a VITE_QA build or with ?qa=1; a default (production) build gets a minimal read-only one (#146)
-installGameHook(window, hookLevel(import.meta.env, location.search), () => ({ get online() { return online; }, get auth() { return { state: accounts.auth.state, busy: accounts.busy, displayName: accounts.account?.displayName ?? null }; }, get net() { return net && { conn: net.conn, me: net.me, room: net.room, result: net.result, reconnects: net.reconnects, tick: netTick, lagMs: netLag, buf: netBuf.stats, raceId: netRaceId, held: net.client.held, ctlSeq: net.client.ctlSeq, actSeq: net.client.actSeq }; }, netDrop: () => net?.client.ws?.close(4000, 'qa drop'), qaNetLobby, qaNetResult, get race() { return race; }, T, R, applyTrack, startSession, showTitle, get mode() { return mode; }, get preset() { return preset; }, get touchMode() { return touchMode; }, setTouchMode, input, get audio() { return sfx.ctx?.state ?? null; }, get muted() { return sfx.muted; }, suspendAudio: () => sfx.ctx?.suspend(), get champ() { return champ; }, get raceLen() { return raceLen; }, get carSetup() { return carSetupId; }, get bays() { return bayPaint; }, get ghost() { return ghost; }, get pbMs() { return pbMs; }, get screen() { return screen; }, get view() { return camMode; }, get aspect() { return camera.aspect; }, get mini() { return { w: hud.mW, h: hud.mH }; }, stepper, advance: (sec: number) => { for (let t = 0; t < sec && simulating(); t += STEP) tick(STEP); }, setView: (m: 'follow' | 'full') => { camMode = m; }, zoom: (span: number) => { camMode = 'follow'; followSpan = span; curSpan = span; }, snapCam: () => { const p = me(); camLead.set(0, 0); camTarget.set(p.x, 0, -p.y); }, get marker() { return playerMarker; }, get localId() { return localId; }, get spec() { return { active: spec.active, target: spec.target, whole: spec.whole, doneT: myDoneT }; }, setLocalSlot: (n: number) => { localSlot = Math.max(0, Math.min(DRIVERS.length - 1, Math.floor(n))); }, get camTarget() { return { x: camTarget.x, z: camTarget.z }; }, get motorMix() { return motorMix; }, arrows: { lane: laneArrow, pit: pitArrow }, info: () => ({ calls: renderer.info.render.calls, tris: renderer.info.render.triangles, objects: world.root.children.length, frames: renderer.info.render.frame, geometries: renderer.info.memory.geometries, textures: renderer.info.memory.textures }) }), { screen: () => screen, online: () => online, preset: () => preset, mode: () => mode });
+installGameHook(window, hookLevel(import.meta.env, location.search), () => ({ get online() { return online; }, get auth() { return { state: accounts.auth.state, busy: accounts.busy, displayName: accounts.account?.displayName ?? null }; }, get net() { return net && { conn: net.conn, me: net.me, room: net.room, result: net.result, reconnects: net.reconnects, tick: netTick, lagMs: netLag, buf: netBuf.stats, raceId: netRaceId, held: net.client.held, ctlSeq: net.client.ctlSeq, actSeq: net.client.actSeq }; }, netDrop: () => net?.client.ws?.close(4000, 'qa drop'), qaNetLobby, qaNetResult, get race() { return race; }, T, R, applyTrack, startSession, showTitle, get mode() { return mode; }, get preset() { return preset; }, get touchMode() { return touchMode; }, setTouchMode, input, get audio() { return sfx.ctx?.state ?? null; }, get muted() { return sfx.muted; }, suspendAudio: () => sfx.ctx?.suspend(), get champ() { return champ; }, get raceLen() { return raceLen; }, get carSetup() { return carSetupId; }, get bays() { return bayPaint; }, get ghost() { return ghost; }, get pbMs() { return pbMs; }, get screen() { return screen; }, get view() { return camMode; }, get aspect() { return view ? view.camera.aspect : vp.w / vp.h; }, get mini() { return { w: hud.mW, h: hud.mH }; }, stepper, advance: (sec: number) => { for (let t = 0; t < sec && simulating(); t += STEP) tick(STEP); }, setView: (m: 'follow' | 'full') => { camMode = m; }, zoom: (span: number) => { camMode = 'follow'; followSpan = span; curSpan = span; }, snapCam: () => { const p = me(); camLead.set(0, 0); camTarget.set(p.x, 0, -p.y); }, get marker() { return view?.marker ?? null; }, get localId() { return localId; }, get spec() { return { active: spec.active, target: spec.target, whole: spec.whole, doneT: myDoneT }; }, setLocalSlot: (n: number) => { localSlot = Math.max(0, Math.min(DRIVERS.length - 1, Math.floor(n))); }, get camTarget() { return { x: camTarget.x, z: camTarget.z }; }, get motorMix() { return motorMix; }, get arrows() { return view && { lane: view.laneArrow, pit: view.pitArrow }; }, info: () => view?.info() ?? null, get view3d() { return viewState; }, loadView }), { screen: () => screen, online: () => online, preset: () => preset, mode: () => mode });

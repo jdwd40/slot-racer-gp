@@ -1,11 +1,11 @@
 // Personal-best ghost: records the player's lap as compact (t, u, d, yaw)
 // samples and replays it through the track geometry, so lane changes, ramps
 // and banking come out exactly as driven. The ghost is purely visual.
-import * as THREE from 'three';
+// No Three.js here (#147): this module is in the first (title) chunk. The ghost car's model is made by the 3D view
+// (carModel.makeGhostCar) and attached once that chunk has loaded; until then the player keeps its data and draws nothing.
 import * as T from './track';
 import { Car } from './race';
-import { makeCar, CarVisual } from './carModel';
-import { disposeObject } from './gfx';
+import type { CarVisual } from './carModel';
 import { GhostData, GHOST_HZ, GHOST_VERSION } from './records';
 
 export class GhostRecorder {
@@ -39,25 +39,15 @@ export class GhostRecorder {
 }
 
 export class GhostPlayer {
-  visual: CarVisual;
+  /** the ghost car's model, from the 3D view (null until that has loaded): see attach */
+  visual: CarVisual | null = null;
   data: GhostData | null = null;
   t0 = -1;
   shown = true;
   private i = 0;
 
-  constructor(scene: THREE.Scene) {
-    this.visual = makeCar(0x7dd3fc, 0, false);
-    this.visual.group.traverse((o) => {
-      const m = o as THREE.Mesh;
-      if (!m.isMesh) return;
-      m.castShadow = false; m.receiveShadow = false;
-      const mats = Array.isArray(m.material) ? m.material : [m.material];
-      for (const mat of mats) { mat.transparent = true; mat.opacity = 0.42; mat.depthWrite = false; }
-      m.renderOrder = 6;
-    });
-    this.visual.group.visible = false;
-    scene.add(this.visual.group);
-  }
+  /** Give the player its car model (carModel.makeGhostCar, already in the scene). Playback state is kept. */
+  attach(visual: CarVisual): void { this.visual = visual; visual.group.visible = false; }
 
   setData(d: GhostData | null): void { this.data = d; this.t0 = -1; this.i = 0; }
   /** restart playback at the player's crossing time */
@@ -65,6 +55,7 @@ export class GhostPlayer {
   get running(): boolean { return this.data !== null && this.t0 >= 0; }
 
   update(raceTime: number, dt: number): void {
+    if (!this.visual) return;
     const g = this.visual.group;
     if (!this.data || this.t0 < 0 || !this.shown) { g.visible = false; return; }
     const s = this.data.s;
@@ -85,10 +76,5 @@ export class GhostPlayer {
     g.rotation.set(T.rollAt(sPos), p.h + yaw, Math.atan(T.slopeZ(sPos)), 'YXZ');
     const v = f < 1 && tb > ta ? (s[b + 1] - s[a + 1]) / (tb - ta) : 0;
     for (const w of this.visual.wheels) w.rotation.z -= (v * dt) / 0.12;
-  }
-
-  dispose(): void {
-    disposeObject(this.visual.group);
-    this.visual.group.removeFromParent();
   }
 }

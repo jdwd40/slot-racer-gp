@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Bounded browser validation of the real game. Procedure and results: docs/validation.md.
 //
-//   node scripts/browser-check.mjs [tracks race controlled routing practice championship touch responsive touchrace reverse service lastchance stall queue autosg autobay localslot online memory netbanner racelength carsetup debrief spectate qahook]   functional checks (default: all)
+//   node scripts/browser-check.mjs [tracks race controlled routing practice championship touch responsive touchrace reverse service lastchance stall queue autosg autobay localslot online memory netbanner racelength carsetup debrief spectate qahook boot]   functional checks (default: all)
 //   node scripts/browser-check.mjs perf --label updated --machine "<name>"          frame-time capture
 //   node scripts/browser-check.mjs compare <baseline.json> <updated.json>           like-for-like comparison
 //
@@ -389,6 +389,13 @@ async function carsetup(run, c) {
 }
 
 /**
+ * The page has booted: the title is up and the 3D view (#147: src/view3d.ts and Three.js, a chunk loaded after the title) is
+ * built, so `startSession` and `advance` act at once. A build or hook without that state (older builds, the minimal hook)
+ * counts as loaded. Runs in the page (waitForFunction).
+ */
+const booted = () => { const g = window.__game; return !!g && g.screen === 'title' && (g.view3d ?? 'ready') === 'ready'; };
+
+/**
  * The page URL with the QA flag (#146): a default build (production included) exposes only a minimal read-only
  * `window.__game`; `?qa=1` turns on the full diagnostics hook these checks drive. Any existing query and hash are kept.
  */
@@ -407,12 +414,12 @@ async function open(run, { seed = SEED, fixtures = null, viewport = run.viewport
   page.on('pageerror', (e) => errors.push(`pageerror: ${e.message}`));
   page.on('console', (m) => { if (m.type() === 'error') errors.push(`console: ${m.text()}`); });
   await page.addInitScript(instrument, { seed });
-  const load = async () => { await page.goto(withQa(run.url)); await page.waitForFunction(() => window.__game && window.__game.screen === 'title'); await page.evaluate(scriptedTime); };
+  const load = async () => { await page.goto(withQa(run.url)); await page.waitForFunction(booted); await page.evaluate(scriptedTime); };
   await load();
   if (fixtures) {
     await page.evaluate((f) => { for (const [k, v] of Object.entries(f)) localStorage.setItem(k, v); }, fixtures);
     await page.reload();
-    await page.waitForFunction(() => window.__game && window.__game.screen === 'title');
+    await page.waitForFunction(booted);
     await page.evaluate(scriptedTime);
   }
   const choice = page.locator(`[data-preset="${preset}"]`);
@@ -1045,7 +1052,7 @@ async function touch(run, c) {
     c.ok('Space on a car button picks the car and does not start a race', await read(page, () => window.__game.screen === 'title'));
     await page.click('[data-touch="off"]');
     await page.reload();
-    await page.waitForFunction(() => window.__game?.screen === 'title');
+    await page.waitForFunction(booted);
     c.ok('Off persists across a reload', await radio(page) === 'off' && await read(page, () => localStorage.getItem('srgp.touch')) === 'off');
 
     await page.click('#o-start');
@@ -2108,7 +2115,7 @@ async function responsive(run, c) {
   await page.locator('#o-menu').tap();
   await waitFor(page, () => window.__game.screen === 'title');
   await page.reload();
-  await page.waitForFunction(() => window.__game?.screen === 'title');
+  await page.waitForFunction(booted);
   c.ok('Championship by touch: round stored, continue, leave, and the save survives a reload', rounds === 2 && await read(page, () => window.__game.champ.rounds.length === 2 && !!document.getElementById('o-champ-cont')), rounds);
 
   // practice
@@ -2137,7 +2144,7 @@ async function responsive(run, c) {
   await size(page, 640, 360);
   await frames(page, 2);
   await page.reload();
-  await page.waitForFunction(() => window.__game?.screen === 'title');
+  await page.waitForFunction(booted);
   const kept = await read(page, () => ({ preset: window.__game.preset, touch: window.__game.touchMode, saved: localStorage.getItem('srgp.graphics') ?? null }));
   c.ok('Graphics and touch choices made by touch survive rotation and a reload', kept.preset === 'balanced' && kept.touch === 'on', kept);
   await page.locator('[data-preset="low"]').tap();
@@ -2953,7 +2960,7 @@ async function online(run, c) {
   const { page } = s;
   page.on('request', (r) => { const u = new URL(r.url()); if (u.pathname.startsWith('/api') || u.pathname === '/ws') net.push(u.pathname); });
   await page.reload();
-  await waitFor(page, () => window.__game && window.__game.screen === 'title');
+  await page.waitForFunction(booted);
   await waitFor(page, () => window.__game.online.state !== 'checking', undefined, 10000);
   const st = await read(page, () => window.__game.online);
   if (st.state === 'off') {
@@ -2987,6 +2994,91 @@ async function online(run, c) {
 }
 
 /**
+ * Boot with the 3D view split out (#147). Three.js and the race view are a chunk of their own (src/view3d.ts), loaded after
+ * the title. With that chunk held back by the network: the title renders and its menus work (Leaderboards and back), no canvas
+ * exists yet, and Start Race waits, saying so, then reaches the race once the chunk arrives. With the chunk failing to load (an
+ * old tab after a deploy removed it, or a dropped connection): the title stays up with a short error offering Reload and Try
+ * again, Start Race does not leave a blank page, and Try again loads it and the race starts.
+ */
+async function boot(run, c) {
+  const CHUNK = /\/(assets\/view3d-[^/]+\.js|src\/view3d\.ts)(\?.*)?$/;
+  const errors = [];
+  const fresh = async () => {
+    const context = await run.browser.newContext({ viewport: { width: 960, height: 540 } });
+    const page = await context.newPage();
+    page.setDefaultTimeout(30000);
+    page.on('pageerror', (e) => errors.push(`pageerror: ${e.message}`));
+    // the refused chunk's own network error is expected here; anything else is not
+    page.on('console', (m) => { if (m.type() === 'error' && !/Failed to load resource|ERR_FAILED|view3d/.test(m.text())) errors.push(`console: ${m.text()}`); });
+    await page.addInitScript(instrument, { seed: SEED });
+    return { context, page };
+  };
+  const state = (page) => read(page, () => {
+    const g = window.__game, note = document.getElementById('view-note');
+    return { screen: g.screen, view3d: g.view3d, canvas: !!document.querySelector('#app > canvas'), title: !!document.querySelector('.card.title #o-start'),
+      note: note && !note.hidden ? note.textContent.trim() : '', noteKind: note?.dataset.show ?? '', reload: !!document.getElementById('v-reload'), retry: !!document.getElementById('v-retry') };
+  });
+
+  // ---- held: the title and menus before the 3D chunk, and a start that waits for it
+  const a = await fresh();
+  let release;
+  const gate = new Promise((r) => { release = r; });
+  let asked = 0;
+  await a.page.route(CHUNK, async (route) => { asked++; await gate; await route.continue(); });
+  await a.page.goto(withQa(run.url));
+  await waitFor(a.page, () => window.__game && window.__game.screen === 'title');
+  for (let i = 0; i < 100 && !asked; i++) await sleep(50);
+  const held = await state(a.page);
+  c.ok('Chunk held: the title renders with no 3D view yet (no canvas, view loading)', held.title && !held.canvas && held.view3d === 'loading' && held.noteKind === '', held);
+  c.ok('The 3D chunk is requested right after the title (prefetch), before Start is pressed', asked > 0, { asked });
+  await a.page.click('#o-boards');
+  await waitFor(a.page, () => window.__game.screen === 'boards');
+  await a.page.click('#o-back');
+  await waitFor(a.page, () => window.__game.screen === 'title');
+  c.ok('Chunk held: the menus work (Leaderboards and back)', (await state(a.page)).title);
+  await a.page.click('#o-start');
+  await a.page.waitForTimeout(300);
+  const waiting = await state(a.page);
+  c.ok('Chunk held: Start Race waits on the title and says the race view is loading', waiting.screen === 'title' && waiting.noteKind === 'loading' && waiting.note === text('ui.viewLoading'), waiting);
+  release();
+  await waitFor(a.page, () => window.__game.screen === 'race');
+  await frames(a.page, 3);
+  const raced = await state(a.page);
+  const race = await read(a.page, () => ({ mode: window.__game.mode, view: window.__game.view, phase: window.__game.race.phase, calls: window.__game.info().calls }));
+  c.ok('Chunk arrived: the waiting start goes ahead into the race, drawn by the 3D view', raced.view3d === 'ready' && raced.canvas && raced.noteKind === '' && race.mode === 'race' && race.view === 'follow' && race.phase === 'countdown' && race.calls > 0, { ...raced, ...race });
+  await a.context.close();
+
+  // ---- failed: a short error instead of a blank page, and Try again recovers
+  const b = await fresh();
+  let refuse = true;
+  await b.page.route(CHUNK, (route) => (refuse ? route.abort('failed') : route.continue()));
+  await b.page.goto(withQa(run.url));
+  await waitFor(b.page, () => window.__game && window.__game.screen === 'title');
+  await waitFor(b.page, () => window.__game.view3d === 'failed');
+  const failed = await state(b.page);
+  c.ok('Chunk failed: the title stays up with a short error, Reload and Try again', failed.title && failed.noteKind === 'failed' && failed.note.startsWith(text('ui.viewFailed').slice(0, 30)) && failed.reload && failed.retry && !failed.canvas, failed);
+  await b.page.click('#o-start');
+  await waitFor(b.page, () => window.__game.view3d === 'failed');
+  await b.page.waitForTimeout(200);
+  const again = await state(b.page);
+  c.ok('Chunk failed: Start Race keeps the title and the error (not a blank page)', again.screen === 'title' && again.title && again.noteKind === 'failed', again);
+  await b.page.screenshot({ path: path.join(run.out, 'boot-failed.png') });
+  refuse = false;
+  await b.page.click('#v-retry');
+  const retried = await waitFor(b.page, () => window.__game.view3d !== 'loading' && window.__game.view3d !== 'failed', undefined, 15000).then(() => true, () => false);
+  const after = await state(b.page);
+  if (retried) {
+    await b.page.click('#o-start');
+    await waitFor(b.page, () => window.__game.screen === 'race');
+    c.ok('Try again after the connection is back: the view loads and Start Race reaches the race', after.view3d === 'ready' && after.noteKind === '' && after.canvas, after);
+  } else {
+    // a browser that remembers the failed import() for this page: Reload is the way back (offered alongside)
+    c.unavailable('Try again after the connection is back', `this browser kept the failed import (${JSON.stringify(after)}); Reload is offered`);
+  }
+  return { context: b.context, page: b.page, errors };
+}
+
+/**
  * Debug hook gate (#146). The build opened without `?qa=1` (the production page as a visitor sees it): `window.__game` is the
  * minimal read-only object (screen, online, preset, mode, hook) with no functions, no setters and no driving or network
  * keys, and neither it nor the window property can be changed. Then with `?qa=1`: the full hook, tagged `hook: 'url'`.
@@ -3004,7 +3096,7 @@ async function qahook(run, c) {
   await page.addInitScript(instrument, { seed: SEED });
   const plain = new URL(run.url); plain.searchParams.delete('qa');
   await page.goto(plain.href);
-  await page.waitForFunction(() => window.__game && window.__game.screen === 'title');
+  await page.waitForFunction(booted);
   const bare = await read(page, (full) => {
     const g = window.__game, keys = Object.keys(g), d = Object.getOwnPropertyDescriptor(window, '__game');
     const props = Object.fromEntries(keys.map((k) => { const p = Object.getOwnPropertyDescriptor(g, k); return [k, { get: !!p.get, set: !!p.set, writable: !!p.writable, configurable: p.configurable, fn: typeof (p.get ? p.get.call(g) : p.value) === 'function' }]; }));
@@ -3036,7 +3128,7 @@ async function qahook(run, c) {
     c.ok('Minimal hook: live values (title screen, a known preset and online state)', bare.screen === 'title' && typeof bare.preset === 'string' && typeof bare.online?.state === 'string' && typeof bare.mode === 'string', { screen: bare.screen, preset: bare.preset, online: bare.online, mode: bare.mode });
   }
   await page.goto(withQa(run.url));
-  await page.waitForFunction(() => window.__game && window.__game.screen === 'title');
+  await page.waitForFunction(booted);
   const qa = await read(page, (full) => ({ hook: window.__game.hook, missing: full.filter((k) => !(k in window.__game)) }), FULL);
   c.ok('With ?qa=1: the full hook (advance, startSession, qaNetLobby, netDrop, setLocalSlot and the rest)', ['url', 'dev', 'build'].includes(qa.hook) && qa.missing.length === 0, qa);
   await read(page, () => { window.__game.startSession('race'); window.__game.advance(1); });
@@ -3797,8 +3889,8 @@ async function spectate(run, c) {
   return s;
 }
 
-const SCENARIOS = { tracks, race, controlled, routing, practice, championship, touch, responsive, touchrace, reverse, service, lastchance, stall, queue, autosg, autobay, localslot, online, memory, netbanner, racelength, carsetup, debrief, spectate, qahook };
-const USAGE = 'usage: browser-check.mjs [tracks|race|controlled|routing|practice|championship|touch|responsive|touchrace|reverse|service|lastchance|stall|queue|autosg|autobay|localslot|online|memory|netbanner|racelength|carsetup|debrief|spectate|qahook ...] | perf | compare <a.json> <b.json>\n'
+const SCENARIOS = { tracks, race, controlled, routing, practice, championship, touch, responsive, touchrace, reverse, service, lastchance, stall, queue, autosg, autobay, localslot, online, memory, netbanner, racelength, carsetup, debrief, spectate, qahook, boot };
+const USAGE = 'usage: browser-check.mjs [tracks|race|controlled|routing|practice|championship|touch|responsive|touchrace|reverse|service|lastchance|stall|queue|autosg|autobay|localslot|online|memory|netbanner|racelength|carsetup|debrief|spectate|qahook|boot ...] | perf | compare <a.json> <b.json>\n'
   + 'options: --dist <dir> --url <url> --commit <sha> --machine <name> --label <name> --viewport WxH --dpr N --preset low|balanced|high\n'
   + '         --seconds N --headed --channel <chrome|msedge> --out <dir> --max-minutes N';
 
@@ -3906,5 +3998,5 @@ async function main() {
 }
 
 // scripts/online-check.mjs reuses the driver, input helpers and checks; run directly, this file is the browser check
-export { withQa, instrument, Keys, Checks, Fingers, PadKeys, PHONE, environment, capture, driveUntil, waitFor, read, sleep, LAPS, STRINGS };
+export { withQa, booted, instrument, Keys, Checks, Fingers, PadKeys, PHONE, environment, capture, driveUntil, waitFor, read, sleep, LAPS, STRINGS };
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) main().catch((e) => { console.error(e.message); process.exit(1); });

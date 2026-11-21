@@ -5,6 +5,7 @@ import * as R from '../src/records';
 import { Race, RaceEvent, PEN } from '../src/race';
 import { fmt } from '../src/hud';
 import { GhostRecorder, GhostPlayer } from '../src/ghost';
+import { makeGhostCar } from '../src/carModel';
 import { FixedStepper, STEP, MAX_GAP, MAX_STEPS, blendPose, Pose } from '../src/timing';
 import { seedRandom, memStorage, fresh, park, place, msgs, all, me } from './helpers';
 
@@ -463,13 +464,13 @@ describe('practice ghosts and saves', () => {
     R.saveGhost(g);
     const loaded = R.loadGhost('circuit-1', 'sunburst', 'JD')!;
     expect(JSON.stringify(loaded)).toBe(JSON.stringify(g));
-    const player = new GhostPlayer(new (class { add(): void {} })() as never);
+    const player = new GhostPlayer(); player.attach(makeGhostCar());
     player.setData(loaded); player.launch(100);
     expect(path.length).toBeGreaterThan(300);
     // from the second sample on: the t=0 sample is taken just past the line, so it reads up to one step ahead
     for (const want of path.filter((p) => p.t >= 1 / R.GHOST_HZ)) {
       player.update(100 + want.t, 0);
-      const at = player.visual.group.position;
+      const at = player.visual!.group.position;
       expect(Math.hypot(at.x - want.x, -at.z - want.y)).toBeLessThan(0.03);
     }
   });
@@ -481,13 +482,13 @@ describe('practice ghosts and saves', () => {
     localStorage.setItem('srgp.ghost.circuit-1.sunburst.JD', JSON.stringify(old));
     const g = R.loadGhost('circuit-1', 'sunburst', 'JD');
     expect(g).toEqual(old);
-    const player = new GhostPlayer(new (class { add(): void {} })() as never);
+    const player = new GhostPlayer(); player.attach(makeGhostCar());
     player.setData(g); player.launch(50);
     player.update(50 + (0.051 + 0.117) / 2, 0);
     const want = T.point3(T.FINISH_S + 1.7, 1.2);
-    expect(player.visual.group.visible).toBe(true);
-    expect(player.visual.group.position.x).toBeCloseTo(want.x, 3);
-    expect(player.visual.group.position.z).toBeCloseTo(-want.y, 3);
+    expect(player.visual!.group.visible).toBe(true);
+    expect(player.visual!.group.position.x).toBeCloseTo(want.x, 3);
+    expect(player.visual!.group.position.z).toBeCloseTo(-want.y, 3);
   });
 
   it('ranks a lap from the new loop among board entries saved by the previous build', () => {
