@@ -15,9 +15,9 @@ concurrency:
 
 jobs:
   check:
-    name: Type check, tests and production build
+    name: Type check, tests, production build and Playwright smoke
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
     outputs:
       artifact-id: ${{ steps.static.outputs.artifact-id }}
     steps:
@@ -49,6 +49,19 @@ jobs:
         env:
           VITE_ONLINE: '1'
         run: npm run build
+
+      # The Playwright smoke (#145) on this exact build, before it is packaged: a failure here leaves no artifact, so it gates
+      # the deploy like every other step of this job (test/ciworkflow.test.ts checks the order). Client-only: /api is stubbed
+      # in the page, no room server or VPS. Playwright's own headless Chromium for the locked playwright-core, plus the OS
+      # libraries it needs (not cached: Playwright advises against it, the download is about as fast as a cache restore).
+      # The full browser-check matrix stays a manual command (npm run check:browser, docs/validation.md).
+      - name: Install Playwright Chromium (headless shell) for the smoke
+        timeout-minutes: 5
+        run: npx playwright-core install --with-deps --only-shell chromium
+
+      - name: Playwright smoke of the production build (title, Start Race, 3D view, no page errors)
+        timeout-minutes: 4
+        run: npm run check:smoke -- --out "$RUNNER_TEMP/smoke"
 
       - name: Package this checked build (no VPS rebuild)
         env:
@@ -88,6 +101,31 @@ jobs:
 
       - name: ESLint
         run: npm run lint
+
+  # Test coverage (#145): measured on pull requests and printed in the job log and job summary. Report only, like lint: no
+  # threshold (vitest.config.ts sets none), not in deploy.needs, and it never runs on main, so it can neither block nor allow
+  # a deployment. Database tests skip here (no PostgreSQL service), so server/ figures leave out what only they reach.
+  coverage:
+    name: Test coverage report (pull requests, no threshold, not a deploy gate)
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Install dependencies from the lockfile
+        run: npm ci
+
+      - name: Coverage (v8) of src/ and server/
+        run: npm run test:coverage
 
   # The online room server: built, tested on PostgreSQL 17, smoke-checked and packaged as a checked artifact. It needs no
   # secrets (the database is a throwaway service container). The static deploy below waits for it (#55): an online-enabled

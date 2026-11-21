@@ -18,3 +18,4 @@ server-bundle/
 .local-pg/
 dist-online/
 dist-online
+coverage/

@@ -18,7 +18,7 @@ const warnOnly = (c) => !c.rules ? c : {
 const unused = ['warn', { argsIgnorePattern: '^_', varsIgnorePattern: '^_', caughtErrorsIgnorePattern: '^_', destructuredArrayIgnorePattern: '^_' }];
 
 export default tseslint.config(
-  { ignores: ['node_modules/', 'dist/', 'dist-online/', 'server-dist/', 'server-bundle/', 'bundle/', '.local-pg/', '.qa/', 'public/'] },
+  { ignores: ['node_modules/', 'dist/', 'dist-online/', 'server-dist/', 'server-bundle/', 'bundle/', '.local-pg/', '.qa/', 'public/', 'coverage/'] },
   warnOnly(js.configs.recommended),
   {
     files: ['**/*.ts'],
