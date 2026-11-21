@@ -4,7 +4,7 @@
 // never "a new version is available", whichever way the mismatch is found (health probe or a refused hello).
 import { describe, it, expect, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
-import type { SocketCtor, SocketLike } from '../src/net/client';
+import { CLOSE_PROTOCOL, HelloRefused, OnlineClient, isProtocolRefusal, type SocketCtor, type SocketLike } from '../src/net/client';
 import { NetSession, type EndReason } from '../src/net/session';
 import { PROTOCOL_VERSION } from '../src/net/protocol';
 import { RECHECK_MAX, RECHECK_MS, afterProtocolRefusal, afterRetry, behindHtml, outdatedHtml, probeOnline, startRecheck, type OnlineStatus } from '../src/online';
@@ -14,7 +14,12 @@ const health = (protocol: unknown) => (() => Promise.resolve(new Response(JSON.s
 /** A server endpoint whose hello answer can change between sockets (an upgrade while a session is open). */
 function fakeServer() {
   const sockets: Fake[] = [];
-  const srv = { upgraded: false, version: PROTOCOL_VERSION };
+  /**
+   * `refusal`: how a refused hello is answered. `nack` is what every server since protocol 1 does (the typed nack, then
+   * close 4002). `close` closes with 4002 before any nack is read. `nack-other` refuses for another reason (`malformed`).
+   * `nack-bare` is a nack without a code.
+   */
+  const srv = { upgraded: false, version: PROTOCOL_VERSION, refusal: 'nack' as 'nack' | 'close' | 'nack-other' | 'nack-bare', detail: undefined as string | undefined };
   class Fake implements SocketLike {
     readyState = 0;
     onopen: ((ev: unknown) => void) | null = null;
@@ -27,7 +32,12 @@ function fakeServer() {
       const m = JSON.parse(data) as { t: string; v?: number };
       if (m.t === 'hello') {
         // as server/app.ts: a hello of another version is refused and closed with 4002
-        if (srv.upgraded || m.v !== srv.version) { this.deliver({ t: 'nack', ref: 'hello', code: 'protocol' }); setTimeout(() => this.close(4002, 'protocol'), 5); }
+        if (srv.upgraded || m.v !== srv.version) {
+          if (srv.refusal === 'close') { this.close(CLOSE_PROTOCOL, 'protocol'); return; }
+          const code = srv.refusal === 'nack-other' ? { code: 'malformed' } : srv.refusal === 'nack-bare' ? {} : { code: 'protocol' };
+          this.deliver({ t: 'nack', ref: 'hello', ...code, ...(srv.detail ? { detail: srv.detail } : {}) });
+          setTimeout(() => this.close(srv.refusal === 'nack' ? CLOSE_PROTOCOL : 1008, 'refused'), 5);
+        }
         else this.deliver({ t: 'welcome', v: PROTOCOL_VERSION, server: 't', rules: 't', now: 0 });
       }
       if (m.t === 'resume' || m.t === 'join') {
@@ -89,6 +99,86 @@ describe('an outdated page (#67)', () => {
       expect(ends).toEqual(['outdated']);
       expect(sockets).toHaveLength(2);   // one attempt: retrying cannot succeed
       expect(s.conn).toBe('offline');
+    } finally { vi.useRealTimers(); }
+  });
+});
+
+describe('the outdated path branches on the typed hello nack code, not its message text (L2, #148)', () => {
+  it('session.ts no longer sniffs the error message to decide `protocol` / `outdated`', () => {
+    const src = readFileSync(new URL('../src/net/session.ts', import.meta.url), 'utf8');
+    expect(src).not.toMatch(/hello refused/);
+    expect(src).not.toMatch(/\.message\)?\.includes\(/);
+    expect(src.match(/isProtocolRefusal\(e\)/g)).toHaveLength(2);   // the first connect and the reconnect loop
+  });
+
+  it('connect() rejects with a typed HelloRefused carrying the nack code (and keeps the historic message)', async () => {
+    const { Ctor, srv } = fakeServer();
+    srv.upgraded = true; srv.detail = 'server speaks slotrush v99';
+    const e = await new OnlineClient('ws://x', Ctor).connect().catch((x: unknown) => x);
+    expect(e).toBeInstanceOf(HelloRefused);
+    expect(e).toMatchObject({ code: 'protocol', detail: 'server speaks slotrush v99', message: 'hello refused: protocol' });
+    expect(isProtocolRefusal(e)).toBe(true);
+  });
+
+  it('only a `protocol` refusal counts: other codes, plain errors and text that merely mentions protocol do not', async () => {
+    expect(isProtocolRefusal(new HelloRefused('malformed'))).toBe(false);
+    expect(isProtocolRefusal(new Error('hello refused: protocol'))).toBe(false);
+    expect(isProtocolRefusal(new Error('connect failed'))).toBe(false);
+    expect(isProtocolRefusal('protocol')).toBe(false);
+    for (const refusal of ['nack-other', 'nack-bare'] as const) {
+      const { Ctor, srv } = fakeServer();
+      srv.upgraded = true; srv.refusal = refusal;
+      const e = await new OnlineClient('ws://x', Ctor).connect().catch((x: unknown) => x);
+      expect(e, refusal).toBeInstanceOf(HelloRefused);
+      expect((e as HelloRefused).code, refusal).toBe(refusal === 'nack-other' ? 'malformed' : 'unknown');
+      // a session told something other than `protocol` is "unreachable", as before: never the Reload notice
+      const { Ctor: C2, srv: s2 } = fakeServer();
+      s2.upgraded = true; s2.refusal = refusal;
+      expect(await new NetSession('ws://x', C2).join('ABCDEF', 'Ann'), refusal).toEqual({ ok: false, code: 'unreachable' });
+    }
+  });
+
+  it('a server that closes with 4002 before its nack is read is still a protocol refusal', async () => {
+    const { Ctor, srv } = fakeServer();
+    srv.upgraded = true; srv.refusal = 'close';
+    const e = await new OnlineClient('ws://x', Ctor).connect().catch((x: unknown) => x);
+    expect(isProtocolRefusal(e)).toBe(true);
+    const { Ctor: C2, srv: s2 } = fakeServer();
+    s2.upgraded = true; s2.refusal = 'close';
+    expect(await new NetSession('ws://x', C2).join('ABCDEF', 'Ann')).toEqual({ ok: false, code: 'protocol' });
+  });
+
+  it('a reconnect refused by the bare 4002 close also ends `outdated` once', async () => {
+    vi.useFakeTimers();
+    try {
+      const { Ctor, sockets, srv } = fakeServer();
+      const ends: EndReason[] = [];
+      const s = new NetSession('ws://x', Ctor, { end: (why) => ends.push(why) });
+      const p = s.join('ABCDEF', 'Ann');
+      await vi.advanceTimersByTimeAsync(50);
+      expect(await p).toEqual({ ok: true });
+      srv.upgraded = true; srv.refusal = 'close';
+      sockets[0].close(1012, 'restart');
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(ends).toEqual(['outdated']);
+      expect(sockets).toHaveLength(2);
+    } finally { vi.useRealTimers(); }
+  });
+
+  it('a reconnect refused for another reason keeps retrying until the window passes (never `outdated`)', async () => {
+    vi.useFakeTimers();
+    try {
+      const { Ctor, sockets, srv } = fakeServer();
+      const ends: EndReason[] = [];
+      const s = new NetSession('ws://x', Ctor, { end: (why) => ends.push(why) });
+      const p = s.join('ABCDEF', 'Ann');
+      await vi.advanceTimersByTimeAsync(50);
+      expect(await p).toEqual({ ok: true });
+      srv.upgraded = true; srv.refusal = 'nack-other';
+      sockets[0].close(1012, 'restart');
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(ends).toEqual(['expired']);
+      expect(sockets.length).toBeGreaterThan(2);
     } finally { vi.useRealTimers(); }
   });
 });

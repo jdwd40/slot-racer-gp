@@ -5,7 +5,7 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import WebSocket from 'ws';
 import { PEN, type RaceSnapshot } from '../../src/race';
 import { LAPS } from '../helpers';
-import { OnlineClient, type SocketCtor } from '../../src/net/client';
+import { CLOSE_PROTOCOL, HelloRefused, OnlineClient, isProtocolRefusal, type SocketCtor } from '../../src/net/client';
 import { PROTOCOL_VERSION, type ServerMsg } from '../../src/net/protocol';
 import { createApp, type App } from '../../server/app';
 import type { Peer } from '../../server/room';
@@ -180,9 +180,14 @@ describe('protocol and access checks', () => {
       const c = new OnlineClient(base.replace('http', 'ws') + '/ws', Ctor, { headers: { origin: ORIGIN } });
       const got: ServerMsg[] = [];
       c.onMessage = (m) => got.push(m);
-      await expect(c.connect(v)).rejects.toThrow(/hello refused: protocol/);
+      const e = await c.connect(v).catch((x: unknown) => x);
+      // the real server's refusal is the typed nack the client branches on (#148), not message text
+      expect(e).toBeInstanceOf(HelloRefused);
+      expect(e).toMatchObject({ code: 'protocol', message: 'hello refused: protocol' });
+      expect(isProtocolRefusal(e)).toBe(true);
       await sleep(50);
       expect(c.closed?.code).toBe(4002);
+      expect(CLOSE_PROTOCOL).toBe(4002);
       // nothing of a room or a race ever reaches it
       expect(got.map((m) => m.t)).toEqual(['nack']);
     }
