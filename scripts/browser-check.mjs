@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Bounded browser validation of the real game. Procedure and results: docs/validation.md.
 //
-//   node scripts/browser-check.mjs [tracks race controlled routing practice championship touch responsive touchrace reverse service lastchance stall queue autosg autobay localslot online memory netbanner racelength carsetup debrief spectate qahook boot howto]   functional checks (default: all)
+//   node scripts/browser-check.mjs [tracks race controlled routing practice championship touch responsive touchrace reverse service lastchance stall queue autosg autobay localslot online memory netbanner racelength carsetup debrief spectate qahook boot howto titletype]   functional checks (default: all)
 //   node scripts/browser-check.mjs perf --label updated --machine "<name>"          frame-time capture
 //   node scripts/browser-check.mjs compare <baseline.json> <updated.json>           like-for-like comparison
 //
@@ -209,7 +209,7 @@ async function carsetup(run, c) {
   const titleState = (page) => read(page, () => ({
     opts: [...document.querySelectorAll('[data-rsetup]')].map((b) => ({ id: b.dataset.rsetup, on: b.getAttribute('aria-checked') === 'true', text: b.textContent.replace(/\s+/g, ' ').trim(), label: b.getAttribute('aria-label') })),
     group: document.querySelector('[data-rsetup]')?.closest('[role="radiogroup"]')?.getAttribute('aria-labelledby') ?? null,
-    desc: document.getElementById('o-rsetup-desc')?.textContent ?? '', live: document.getElementById('o-rsetup-desc')?.getAttribute('aria-live') ?? null,
+    desc: document.getElementById('o-rsetup-desc')?.textContent ?? '', live: document.getElementById('o-rsetup-desc')?.getAttribute('aria-live') ?? null, shown: (document.getElementById('o-rsetup-desc')?.getClientRects().length ?? 0) > 0,
     chosen: window.__game.carSetup, car: window.__game.race.car(window.__game.localId).setup.id, ai: window.__game.race.cars.filter((x) => !x.human).map((x) => x.setup.id).join(),
     stored: localStorage.getItem('srgp.setup'),
   }));
@@ -241,7 +241,10 @@ async function carsetup(run, c) {
     const { page, keys } = d;
     const t0 = await titleState(page);
     c.ok('Desktop title: a labelled Car setup group offers Balanced (chosen by default), Speed and Grip, each with its strength in a word', t0.group === 'o-rsetup' && t0.opts.map((o) => o.text).join('|') === ['balanced', 'speed', 'grip'].map((id) => `${name(id)} ${STRINGS[`setup.${id}.short`]}`).join('|') && selected(t0) === 'balanced' && t0.chosen === 'balanced' && t0.car === 'balanced' && t0.stored === null, t0);
-    c.ok('Desktop: the chosen setup\'s strength and cost are written out under the selector (a live region); every choice\'s label carries its own', t0.desc === STRINGS['setup.balanced.desc'] && t0.live === 'polite' && t0.opts.every((o) => o.label === STRINGS[`setup.${o.id}.desc`] && o.label.startsWith(`${name(o.id)}:`)) && /Cost/.test(STRINGS['setup.speed.desc']) && /Cost/.test(STRINGS['setup.grip.desc']), { desc: t0.desc, labels: t0.opts.map((o) => o.label) });
+    // #152: folded behind the "i" beside Car setup on first load, one click away
+    await page.click('[data-info="rsetup"]');
+    const shown = await titleState(page);
+    c.ok('Desktop: the chosen setup\'s strength and cost are behind the "i" (folded at first, one click opens them; a live region); every choice\'s label carries its own', !t0.shown && shown.shown && t0.desc === STRINGS['setup.balanced.desc'] && t0.live === 'polite' && t0.opts.every((o) => o.label === STRINGS[`setup.${o.id}.desc`] && o.label.startsWith(`${name(o.id)}:`)) && /Cost/.test(STRINGS['setup.speed.desc']) && /Cost/.test(STRINGS['setup.grip.desc']), { desc: t0.desc, labels: t0.opts.map((o) => o.label) });
     await page.click('[data-rsetup="speed"]');
     const t1 = await titleState(page);
     c.ok('Desktop: picking Speed shows its strength and cost, puts it on the grid behind the menu (rivals stay Balanced) and is remembered', selected(t1) === 'speed' && t1.desc === STRINGS['setup.speed.desc'] && t1.car === 'speed' && t1.ai === 'balanced,balanced,balanced' && t1.stored === '"speed"', t1);
@@ -422,9 +425,22 @@ async function open(run, { seed = SEED, fixtures = null, viewport = run.viewport
     await page.waitForFunction(booted);
     await page.evaluate(scriptedTime);
   }
-  const choice = page.locator(`[data-preset="${preset}"]`);
-  if (await choice.count()) await choice.click();
+  if (await page.locator(`[data-preset="${preset}"]`).count()) await pickSetting(page, `[data-preset="${preset}"]`);
   return { context, page, errors, keys: new Keys(page), load };
+}
+
+/**
+ * #152: the title keeps Graphics and Touch controls folded behind Settings (the race menu shows them as before). Make the
+ * choice `sel` by click (or tap), opening Settings first when the choice is folded away, and fold it again afterwards so the
+ * title is left as a player first sees it. A page without the Settings toggle (an older build) is clicked directly.
+ */
+async function pickSetting(page, sel, tap = false) {
+  const act = (l) => (tap ? l.tap() : l.click());
+  const toggle = page.locator('#o-settings');
+  const opened = !(await page.locator(sel).isVisible()) && await toggle.isVisible();
+  if (opened) await act(toggle);
+  await act(page.locator(sel));
+  if (opened && await toggle.getAttribute('aria-expanded') === 'true') await act(toggle);
 }
 
 const read = (page, fn, arg) => page.evaluate(fn, arg);
@@ -1054,6 +1070,7 @@ async function touch(run, c) {
     await page.keyboard.type('w p');
     const typed = await read(page, () => ({ value: document.getElementById('o-ini').value, screen: window.__game.screen }));
     c.ok('Typing W, Space and P in the initials box stays in the box', typed.screen === 'title' && typed.value === 'w p', typed);
+    await page.click('#o-settings');   // #152: Graphics and Touch controls are behind Settings on the title
     await page.focus('[data-touch="auto"]');
     for (const k of ['Space', 'Enter']) await keys.tap(k);
     c.ok('Space and Enter on the touch selector do not start a race', await read(page, () => window.__game.screen === 'title'));
@@ -1131,7 +1148,7 @@ async function touch(run, c) {
     if (!fixture) {
       await b.page.addInitScript(() => { const get = Storage.prototype.getItem, set = Storage.prototype.setItem; Storage.prototype.getItem = function g(k) { if (k === 'srgp.touch') throw new Error('blocked'); return get.call(this, k); }; Storage.prototype.setItem = function s(k, v) { if (k === 'srgp.touch') throw new Error('blocked'); set.call(this, k, v); }; });
       await b.load();
-      await b.page.click('[data-touch="on"]');
+      await pickSetting(b.page, '[data-touch="on"]');
       c.ok('Blocked storage: the title loads and a choice lasts the session', await radio(b.page) === 'on' && (await padShown(b.page)).body && b.errors.length === 0, b.errors.slice(0, 3));
     } else c.ok('Invalid stored value falls back to Auto', await radio(b.page) === 'auto' && b.errors.length === 0);
     await b.context.close();
@@ -1566,7 +1583,7 @@ async function lastchance(run, c) {
   for (const v of views) {
     const s = await open(run, { viewport: v.viewport, dpr: v.touch ? 2 : 1, device: v.touch ? PHONE : {} });
     const { page } = s;
-    if (v.touch) { s.keys = new PadKeys(new Fingers(page, await s.context.newCDPSession(page))); await page.click('[data-touch="on"]'); }
+    if (v.touch) { s.keys = new PadKeys(new Fingers(page, await s.context.newCDPSession(page))); await pickSetting(page, '[data-touch="on"]'); }
     await pickRaceSetup(page);
     await page.click('#o-start');
     await waitFor(page, () => window.__game.screen === 'race');
@@ -1676,7 +1693,7 @@ async function stall(run, c) {
     if (last) { await last.context.close(); last = null; }
     const s = await open(run, { viewport: v.viewport, dpr: v.touch ? 2 : 1, device: v.touch ? PHONE : {} });
     const { page } = s;
-    if (v.touch) { s.keys = new PadKeys(new Fingers(page, await s.context.newCDPSession(page))); await page.click('[data-touch="on"]'); }
+    if (v.touch) { s.keys = new PadKeys(new Fingers(page, await s.context.newCDPSession(page))); await pickSetting(page, '[data-touch="on"]'); }
     const shot = (name) => page.screenshot({ path: path.join(run.out, `stall-${v.tag}-${name}.png`) });
     const layout = async (what, a) => {
       if (!v.touch) return;
@@ -1785,6 +1802,7 @@ function measureMenu() {
   const row = card.querySelector(':scope > .row');
   out.actionsPinned = !!row && row.getBoundingClientRect().bottom <= r.bottom + 1;
   for (const e of card.querySelectorAll('button, input')) {
+    if (!e.getClientRects().length) continue;   // folded away (#152): not a control until its toggle opens it
     e.scrollIntoView({ block: 'center', inline: 'center' });
     const b = e.getBoundingClientRect();
     const top = document.elementFromPoint(b.x + b.width / 2, b.y + b.height / 2);
@@ -2149,16 +2167,16 @@ async function responsive(run, c) {
   await waitFor(page, () => window.__game.screen === 'title');
 
   // settings persist, and rotating does not touch an explicit choice
-  await page.locator('[data-preset="balanced"]').tap();
-  await page.locator('[data-touch="on"]').tap();
+  await pickSetting(page, '[data-preset="balanced"]', true);
+  await pickSetting(page, '[data-touch="on"]', true);
   await size(page, 640, 360);
   await frames(page, 2);
   await page.reload();
   await page.waitForFunction(booted);
   const kept = await read(page, () => ({ preset: window.__game.preset, touch: window.__game.touchMode, saved: localStorage.getItem('srgp.graphics') ?? null }));
   c.ok('Graphics and touch choices made by touch survive rotation and a reload', kept.preset === 'balanced' && kept.touch === 'on', kept);
-  await page.locator('[data-preset="low"]').tap();
-  await page.locator('[data-touch="auto"]').tap();
+  await pickSetting(page, '[data-preset="low"]', true);
+  await pickSetting(page, '[data-touch="auto"]', true);
 
   // initials with an on-screen keyboard. The keyboard itself is simulated: only the visual viewport shrinks, as on iOS Safari
   await size(page, 390, 844);
@@ -2201,7 +2219,7 @@ async function responsive(run, c) {
   c.evidence.response = [];
   for (const preset of ['low', 'balanced']) {
     await size(page, 844, 390);
-    await page.locator(`[data-preset="${preset}"]`).tap();
+    await pickSetting(page, `[data-preset="${preset}"]`, true);
     await page.locator('#o-start').tap();
     await waitFor(page, () => window.__game.screen === 'race');
     await read(page, () => { window.__game.advance(8); });
@@ -3823,7 +3841,7 @@ async function spectate(run, c) {
   const { page } = s;
   const cdp = await s.context.newCDPSession(page);
   const f = new Fingers(page, cdp);
-  await page.locator('[data-touch="on"]').tap();
+  await pickSetting(page, '[data-touch="on"]', true);
   await page.locator('[data-rlen="sprint"]').tap();
   await page.locator('#o-start').tap();
   await waitFor(page, () => window.__game.screen === 'race' && !document.getElementById('t-pad').hidden);
@@ -3911,6 +3929,128 @@ const HOW_FACTS = ['how.drive.throttle', 'how.drive.brake', 'how.drive.lane', 'h
   'ctl.throttle', 'ctl.brake', 'ctl.lane', 'ctl.pit', 'ctl.defer', 'ctl.view', 'ctl.zoom', 'ctl.pause', 'ctl.restart', 'ctl.ghost'];
 
 /** The title card's text and the sheet's state and geometry. Words are tokens with a letter or digit in them, of the rendered text (innerText). */
+/**
+ * Type and tap-target sizes on the title card and, when it is open, the How to play sheet (#152), as the 21 Nov audit measured
+ * them: every visible word's computed font size (uppercase section labels, which may be 12 px, by selector), any long text in
+ * <small>, and every visible control's box. Also where Start Race is with the card unscrolled.
+ */
+function measureTitleType() {
+  const LABELS = '.lbl2, .tag, .how-sec h3, .rival em';
+  const roots = [document.querySelector('.overlay.show .card.title'), document.getElementById('howto')].filter((e) => e && e.getClientRects().length);
+  const shown = (e) => e.getClientRects().length > 0 && getComputedStyle(e).visibility !== 'hidden';
+  const words = (s) => s.split(/\s+/).filter((x) => /[\p{L}\p{N}]/u.test(x)).length;
+  const sizes = {}, small = [], labelSmall = [];
+  let total = 0, under = 0;
+  for (const root of roots) {
+    const tw = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+    for (let n = tw.nextNode(); n; n = tw.nextNode()) {
+      const el = n.parentElement;
+      if (!el || !n.textContent.trim() || !shown(el)) continue;
+      const cs = getComputedStyle(el), px = parseFloat(cs.fontSize), wc = words(n.textContent);
+      if (!wc) continue;
+      const key = `${+px.toFixed(1)}`;
+      sizes[key] = (sizes[key] ?? 0) + wc;
+      total += wc;
+      const label = el.closest(LABELS);
+      if (label) { if (px < 12 || getComputedStyle(label).textTransform !== 'uppercase') labelSmall.push(`${n.textContent.trim().slice(0, 24)} ${px}px`); continue; }
+      if (px < 16) { under += wc; small.push(`${n.textContent.trim().slice(0, 24)} ${px}px`); }
+    }
+  }
+  const longSmall = roots.flatMap((r) => [...r.querySelectorAll('small')]).filter((e) => words(e.textContent) > 3).map((e) => e.textContent.trim().slice(0, 30));
+  const targets = [], tiny = [];
+  for (const root of roots) for (const e of root.querySelectorAll('button, input, select, summary, a[href], [role="radio"], [tabindex="0"]:not(.howto-body)')) {
+    if (!shown(e)) continue;
+    const b = e.getBoundingClientRect();
+    const t = `${e.id || e.dataset.rlen || e.dataset.rsetup || e.dataset.car || e.dataset.id || e.dataset.preset || e.dataset.touch || e.dataset.info || e.textContent.trim().slice(0, 12)} ${Math.round(b.width)}x${Math.round(b.height)}`;
+    targets.push(t);
+    if (b.width < 44 - 0.01 || b.height < 44 - 0.01) tiny.push(t);
+  }
+  const s = document.getElementById('o-start')?.getBoundingClientRect();
+  const start = s ? { y: Math.round(s.y), b: Math.round(s.bottom), inView: s.y >= 0 && s.bottom <= innerHeight + 0.5 && s.x >= 0 && s.right <= innerWidth + 0.5, onTop: document.elementFromPoint(s.x + s.width / 2, s.y + s.height / 2)?.closest('button')?.id ?? null } : null;
+  return { roots: roots.map((r) => r.id || r.className), total, under, sizes, small, labelSmall, longSmall, targets: targets.length, tiny, start, pageX: document.documentElement.scrollWidth - document.documentElement.clientWidth };
+}
+
+/** The title's folded panels (#152): each toggle, and the strings its panel holds once opened. */
+const TITLE_TIPS = [['rlen', ['len.note']], ['rsetup', ['setup.balanced.desc', 'setup.note']], ['rivals', ['persona.aggressive.desc', 'persona.consistent.desc', 'persona.tactical.desc']], ['modes', ['net.localNote']], ['settings', ['gfx.label', 'touch.label']]];
+
+/**
+ * #152: the title and How to play at phone, tablet and desktop sizes, with touch and with a mouse. Body copy 16 px or more
+ * (12 px uppercase labels), no long text in <small>, every control 44x44 px or more (on a desktop too), the notes, setup
+ * description, rival blurbs, play-mode notes and settings folded on first load and each one tap from open, settings still
+ * working, and Start Race on screen unscrolled on the phones.
+ */
+async function titletype(run, c) {
+  const VIEWS = [[360, 740], [390, 844], [768, 1024], [1280, 800], [1366, 768]];
+  const typeOk = (m) => m.under === 0 && m.small.length === 0 && m.labelSmall.length === 0 && m.longSmall.length === 0 && m.tiny.length === 0 && m.pageX <= 0;
+  const brief = (m) => ({ under: m.under, total: m.total, sizes: m.sizes, small: m.small.slice(0, 8), labelSmall: m.labelSmall.slice(0, 4), longSmall: m.longSmall.slice(0, 4), targets: m.targets, tiny: m.tiny, start: m.start });
+  const folded = TITLE_TIPS.flatMap(([, ids]) => ids).filter((id) => !['gfx.label', 'touch.label'].includes(id)).map((id) => STRINGS[id]);
+  c.evidence.titleType = {};
+  let last = null;
+  // one page per input type, resized through the sizes (a fresh page per size is minutes each on a software renderer)
+  for (const touch of [true, false]) {
+    if (last) { await last.context.close(); c.ok(`${last.kind}: no page or console errors`, last.errors.length === 0, last.errors.slice(0, 5)); }
+    const kind = touch ? 'Touch' : 'Mouse';
+    const s = await open(run, { viewport: { width: VIEWS[0][0], height: VIEWS[0][1] }, dpr: 1, device: touch ? PHONE : {}, fixtures: { 'srgp.track': TRACK } });
+    last = { ...s, kind };
+    const { page } = s;
+    const act = (sel) => (touch ? page.locator(sel).tap() : page.locator(sel).click());
+    // the first size goes through real taps / clicks; the others press the same buttons from the page (much faster on a
+    // software renderer), the geometry being what is measured there
+    const press = (sel, real) => (real ? act(sel) : read(page, (q) => document.querySelector(q).click(), sel));
+    c.ok(`${kind}: the page is in ${touch ? 'touch' : 'mouse'} mode`, touch === await read(page, () => document.body.classList.contains('touch')));
+    for (const [w, h] of VIEWS) {
+      const tag = `${kind} ${w}x${h}`;
+      const real = w === VIEWS[0][0];
+      await page.setViewportSize({ width: w, height: h });
+      await read(page, () => { document.querySelector('.overlay.show .card').scrollTop = 0; });
+      await frames(page, 2);
+      const m0 = await read(page, measureTitleType);
+      const onCard = await read(page, (texts) => { const txt = document.querySelector('.overlay.show .card').innerText; return texts.filter((x) => txt.includes(x)).map((x) => x.slice(0, 30)); }, folded);
+      const settingsShown = await page.locator('[data-preset], [data-touch]').evaluateAll((es) => es.filter((e) => e.getClientRects().length).length);
+      c.ok(`${tag}: title body text 16 px or more (labels 12 px uppercase), no long text in <small>, every control 44x44 px or more`, typeOk(m0), brief(m0));
+      c.ok(`${tag}: length note, setup description and note, rival blurbs and play-mode notes are folded; Graphics and Touch are behind Settings`, onCard.length === 0 && settingsShown === 0, { onCard, settingsShown });
+      if (w <= 390) c.ok(`${tag}: Start Race is fully on screen, and on top, with the card unscrolled`, !!m0.start && m0.start.inView && m0.start.onTop === 'o-start', m0.start);
+      if (touch === w < 1000) await page.screenshot({ path: path.join(run.out, `titletype-${w}x${h}.png`) });
+      // each toggle: one tap or click opens its panel with its text, and says so
+      const opened = [];
+      for (const [key, ids] of TITLE_TIPS) {
+        await press(`[data-info="${key}"]`, real);
+        const p = await read(page, (k) => { const ps = [...document.querySelectorAll(`[data-tip="${k}"]`)]; return { shown: ps.length > 0 && ps.every((e) => e.getClientRects().length > 0), text: ps.map((e) => e.textContent).join(' '), expanded: document.querySelector(`[data-info="${k}"]`).getAttribute('aria-expanded') }; }, key);
+        const missing = ids.filter((id) => !p.text.includes(STRINGS[id]));
+        if (!(p.shown && p.expanded === 'true' && missing.length === 0)) opened.push({ key, ...p, missing, text: p.text.slice(0, 60) });
+      }
+      c.ok(`${tag}: each fold opens with one ${real ? (touch ? 'tap' : 'click') : 'press'} and shows its text (notes, setup description, blurbs, local play, settings)`, opened.length === 0, opened);
+      const m1 = await read(page, measureTitleType);
+      c.ok(`${tag}: with every fold open, the same 16 px text and 44 px controls`, typeOk(m1), brief(m1));
+      if (w === 390 || w === 1280) await page.screenshot({ path: path.join(run.out, `titletype-${w}x${h}-open.png`) });
+      // fold them again with the same toggles
+      for (const [key] of TITLE_TIPS) await press(`[data-info="${key}"]`, real);
+      const still = await read(page, () => document.querySelectorAll('.card .tip:not([hidden])').length);
+      // How to play: its type and Close at the same floor
+      await press('#o-help', real);
+      await waitFor(page, () => document.getElementById('howto').open);
+      const m2 = await read(page, measureTitleType);
+      c.ok(`${tag}: every fold closes again; How to play (over the title) has body text 16 px or more and Close and every control 44x44 px or more`, still === 0 && typeOk(m2) && m2.roots.includes('howto'), { still, ...brief(m2) });
+      if (w === 360 || w === 1280) await page.screenshot({ path: path.join(run.out, `titletype-${w}x${h}-howto.png`) });
+      await press('#howto-close', real);
+      await waitFor(page, () => !document.getElementById('howto').open);
+      c.evidence.titleType[`${w}x${h}-${touch ? 'touch' : 'mouse'}`] = { first: brief(m0), open: brief(m1), howto: brief(m2) };
+    }
+    // the settings in their new place still choose and persist
+    await page.setViewportSize({ width: VIEWS[1][0], height: VIEWS[1][1] });
+    await act('[data-info="settings"]');
+    await act('[data-touch="off"]');
+    await act('[data-preset="balanced"]');
+    await act('[data-info="settings"]');
+    const folds = await read(page, () => document.querySelectorAll('[data-tip="settings"]:not([hidden])').length);
+    await page.reload();
+    await page.waitForFunction(booted);
+    const kept = await read(page, () => ({ touch: window.__game.touchMode, preset: window.__game.preset, body: document.body.classList.contains('touch'), open: document.querySelectorAll('.tip:not([hidden])').length }));
+    c.ok(`${kind}: Settings chooses Touch Off and Balanced graphics, folds again, and both persist across a reload (which starts with every fold closed)`, folds === 0 && kept.touch === 'off' && kept.preset === 'balanced' && !kept.body && kept.open === 0, { folds, kept });
+  }
+  return last;
+}
+
 function measureHowTo(facts) {
   const d = document.getElementById('howto');
   const words = (s) => s.split(/\s+/).filter((x) => /[\p{L}\p{N}]/u.test(x)).length;
@@ -4088,8 +4228,8 @@ async function howto(run, c) {
   return s;
 }
 
-const SCENARIOS = { tracks, race, controlled, routing, practice, championship, touch, responsive, touchrace, reverse, service, lastchance, stall, queue, autosg, autobay, localslot, online, memory, netbanner, racelength, carsetup, debrief, spectate, qahook, boot, howto };
-const USAGE = 'usage: browser-check.mjs [tracks|race|controlled|routing|practice|championship|touch|responsive|touchrace|reverse|service|lastchance|stall|queue|autosg|autobay|localslot|online|memory|netbanner|racelength|carsetup|debrief|spectate|qahook|boot|howto ...] | perf | compare <a.json> <b.json>\n'
+const SCENARIOS = { tracks, race, controlled, routing, practice, championship, touch, responsive, touchrace, reverse, service, lastchance, stall, queue, autosg, autobay, localslot, online, memory, netbanner, racelength, carsetup, debrief, spectate, qahook, boot, howto, titletype };
+const USAGE = 'usage: browser-check.mjs [tracks|race|controlled|routing|practice|championship|touch|responsive|touchrace|reverse|service|lastchance|stall|queue|autosg|autobay|localslot|online|memory|netbanner|racelength|carsetup|debrief|spectate|qahook|boot|howto|titletype ...] | perf | compare <a.json> <b.json>\n'
   + 'options: --dist <dir> --url <url> --commit <sha> --machine <name> --label <name> --viewport WxH --dpr N --preset low|balanced|high\n'
   + '         --seconds N --headed --channel <chrome|msedge> --out <dir> --max-minutes N';
 
@@ -4197,5 +4337,5 @@ async function main() {
 }
 
 // scripts/online-check.mjs reuses the driver, input helpers and checks; run directly, this file is the browser check
-export { withQa, booted, instrument, Keys, Checks, Fingers, PadKeys, PHONE, environment, capture, driveUntil, waitFor, read, sleep, LAPS, STRINGS };
+export { withQa, booted, instrument, Keys, Checks, Fingers, PadKeys, PHONE, environment, capture, driveUntil, waitFor, read, sleep, pickSetting, LAPS, STRINGS };
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) main().catch((e) => { console.error(e.message); process.exit(1); });

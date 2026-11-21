@@ -1,6 +1,6 @@
 # Graphics presets
 
-Low, Balanced and High change one thing: how many pixels the 3D scene draws. The selector is on the title and pause screens. The definitions are in `src/graphics.ts`.
+Low, Balanced and High change one thing: how many pixels the 3D scene draws. The selector is on the title (behind Settings, #152) and pause screens. The definitions are in `src/graphics.ts`.
 
 ## Policy
 
@@ -28,7 +28,7 @@ Why: the race clock discards any part of a frame over `MAX_GAP` (250 ms, `src/ti
 - **What counts:** only frames while the race screen is up and the page is visible, countdown included. Title, pause, results and other menus do not count. The gap into the first counted frame after any break (pause, a hidden or backgrounded tab, a new race) is dropped, so time the page was not drawing never reads as one slow frame.
 - **Compile and build stalls:** the median, plus the 10-gap floor, means a single shader-compile or scene-build stall cannot cause the switch, even one that fills the whole 5 s window by itself.
 - **Once, and the player wins:** it switches at most once per device and never switches back. Any pick in the selector, before or after a switch, is final: nothing is switched automatically from then on. Since #66 every pick also stores `manual`. A preset saved before #66 has no such record, and there is no timestamp to tell whether it was a deliberate pick, so as a one-time correction (#148) it stays eligible: a slow first race can still switch it to Low once, with the usual undo, and after that switch, an undo or any pick it never switches again. There is no oscillation because no rule ever raises the preset.
-- **Undo:** while the switch is in force and the preset is still Low, the graphics selector (title and pause screens) shows the notice with "Undo: back to <preset>", which restores the preset it replaced. The undo counts as the player's pick.
+- **Undo:** while the switch is in force and the preset is still Low, the graphics selector (title and pause screens) shows the notice; on the title, Settings opens by itself the first time it is shown with "Undo: back to <preset>", which restores the preset it replaced. The undo counts as the player's pick.
 - **Storage:** `srgp.gfxAuto` holds `switched:<replaced preset>` or `manual`. The preset itself is saved in `srgp.graphics` as usual. With storage unavailable every access is caught: the fallback still works, at most once per page load.
 - **Unaffected:** race simulation, timing, results, records and the server. Only the drawing buffer changes, exactly as when the player picks Low. No protocol or rules change.
 - **Browser validation:** `scripts/browser-check.mjs` clicks a preset when it opens the game, which counts as a pick, so scenarios and `perf` captures stay on the preset they ask for.

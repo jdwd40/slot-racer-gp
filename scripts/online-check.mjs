@@ -25,7 +25,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { build } from 'esbuild';
 import { chromium } from 'playwright-core';
 import { preview } from 'vite';
-import { withQa, booted, instrument, Keys, Checks, Fingers, PadKeys, PHONE, environment, driveUntil, waitFor, read, sleep, LAPS, STRINGS } from './browser-check.mjs';
+import { withQa, booted, instrument, Keys, Checks, Fingers, PadKeys, PHONE, environment, driveUntil, waitFor, read, sleep, LAPS, STRINGS, pickSetting } from './browser-check.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const OUT = path.join(ROOT, '.qa/online-check', new Date().toISOString().replace(/[:.]/g, '-'));
@@ -130,15 +130,14 @@ async function openPage(run, url, view = 'laptop', { touch = false, name = view,
   // ?qa=1 (#146): the full window.__game hook these checks read, on the local build and on a deployed (production) site alike
   await page.goto(withQa(url));
   await waitFor(page, booted, undefined, 120000);
-  const low = page.locator('[data-preset="low"]');
-  if (await low.count()) await low.click();
+  if (await page.locator('[data-preset="low"]').count()) await pickSetting(page, '[data-preset="low"]');
   let keys = new Keys(page);
   let fingers = null;
   if (touch) {
     const cdp = await context.newCDPSession(page);
     fingers = new Fingers(page, cdp);
     keys = new PadKeys(fingers);
-    await page.locator('[data-touch="on"]').click();
+    await pickSetting(page, '[data-touch="on"]');
   }
   return { name, context, page, errors, keys, fingers, view };
 }
@@ -205,7 +204,7 @@ async function gate(run, c) {
   await waitOnline(page);
   const st = await read(page, () => ({ online: window.__game.online, button: !!document.getElementById('o-online'), note: document.querySelector('.net-off')?.textContent ?? '' }));
   c.ok('Service down: health check fails, so online play is not offered (no Online button) and the page says so', st.online.state === 'unavailable' && !st.button && st.note.length > 0, st);
-  await page.click('[data-preset="balanced"]');
+  await pickSetting(page, '[data-preset="balanced"]');
   await page.click('#o-start');
   await waitFor(page, () => window.__game.screen === 'race' && window.__game.mode === 'race');
   await sleep(6000);
@@ -221,7 +220,7 @@ async function gate(run, c) {
   c.ok('Service down: the stored championship is offered to continue', champ);
   const kept = await read(page, (f) => Object.keys(f).filter((k) => localStorage.getItem(k) !== f[k]), fixtures);
   c.ok('Stored records and championship are byte-identical afterwards', kept.length === 0, kept);
-  await page.click('[data-preset="low"]');
+  await pickSetting(page, '[data-preset="low"]');
   return [s];
 }
 

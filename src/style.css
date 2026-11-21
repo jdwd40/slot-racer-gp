@@ -126,7 +126,8 @@ small { color: #9ca3af; font-weight: 500; }
 .how-keys { display: grid; gap: 8px; }
 .how-keys .krow { align-items: baseline; gap: 12px; }
 .how-keys .keys { min-width: 104px; flex: none; }
-.how-keys kbd { font-size: 14px; }
+.how-keys kbd { font-size: 16px; }
+.how-goal { margin: 14px 0 0; }
 /* a phone on its side: a slimmer header leaves more of the sheet for its text */
 @media (max-height: 500px) {
   .howto-head { padding-top: 4px; padding-bottom: 4px; }
@@ -196,6 +197,38 @@ small { color: #9ca3af; font-weight: 500; }
 .rchip.done { color: #4ade80; background: rgba(74,222,128,0.12); }
 .rchip.next { color: #ffe066; background: rgba(255,224,102,0.14); }
 
+/* the title card (#152): body copy 16 px, uppercase section labels 12 px, and every control at least 44 px with a mouse as
+   well as touch (body.touch raises them to 48 px). Notes, the setup description, the rival blurbs, the play-mode notes and the
+   graphics / touch settings are folded: each opens under its toggle (the "i" beside a label, or a text link) in body text */
+.tip[hidden] { display: none !important; }
+.card.title p { font-size: 16px; }
+.card.title .lbl2, .card.title .tag { font-size: 12px; }
+.card.title .tab, .card.title .car, .card.title .cta, .card.title .ini input, .card.title .track { min-width: 44px; min-height: 44px; }
+.card.title .tab, .card.title .car { font-size: 16px; }
+.card.title .tab { padding: 6px 12px; }
+.card.title .tab.len { min-width: 0; line-height: 1.2; }
+.card.title .tab.len .sub { font-weight: 600; opacity: 0.85; }
+.card.title .car { padding: 6px 12px; }
+.card.title .cta.small { font-size: 16px; }
+.card.title .cta .sub { font-size: 16px; font-weight: 600; }
+.lbl2.has-info { display: flex; align-items: center; justify-content: center; gap: 2px; margin: 0; }
+.info { flex: none; display: inline-flex; align-items: center; justify-content: center; width: 44px; height: 44px; padding: 0; border: 0; border-radius: 50%; background: none; color: #d1d5db; cursor: pointer; }
+.info > span { display: block; width: 24px; height: 24px; border: 2px solid currentColor; border-radius: 50%; font: italic 800 16px/20px Georgia, 'Times New Roman', serif; letter-spacing: 0; text-transform: none; }
+.info[aria-expanded="true"] { color: #ffd23f; }
+.info[aria-expanded="true"] > span { background: #ffd23f; color: #1a1205; border-color: #ffd23f; }
+.info:focus-visible { outline: 3px solid #ffd23f; outline-offset: 0; }
+.card.title .tip { color: #d1d5db; line-height: 1.4; }
+.card.title .tip p, .card.title .setup-desc { max-width: 360px; margin: 4px auto 6px; font-size: 16px; line-height: 1.4; color: #e5e7eb; }
+.card.title .tip .len-note { color: #d1d5db; }
+.card.title .rival b { font-size: 16px; }
+.card.title .rival em { display: block; margin: 1px 0 0; font-size: 12px; }
+.card.title .blurb { display: block; margin-top: 4px; font-size: 16px; line-height: 1.35; color: #d1d5db; }
+.card.title .track b, .card.title .track em { font-size: 16px; }
+.card.title .track-desc { max-width: 560px; margin: -4px auto 12px; color: #d1d5db; line-height: 1.4; }
+.card.title .help-link { flex-wrap: wrap; gap: 4px 12px; }
+.card.title [data-tip="settings"]:not([hidden]) { display: flex; flex-wrap: wrap; justify-content: center; gap: 0 28px; margin-bottom: 4px; }
+.card.title .modes, .card.title .auto-note { font-size: 16px; }
+
 /* penalty flags beside driver names */
 .flag { display: inline-block; margin-left: 5px; font-size: 11px; font-weight: 900; letter-spacing: 0; color: #ffd23f; vertical-align: baseline; }
 .flag.final { color: #fb923c; }
@@ -218,7 +251,7 @@ small { color: #9ca3af; font-weight: 500; }
 /* touch mode: body.touch. Gesture suppression stays on .tbtn and the HUD's buttons; menus and the track view keep scrolling and zoom */
 .touch-only, .touch-legend { display: none; }
 .touch { --eT: max(8px, var(--sat)); --gap: 14px; --hold: clamp(112px, 17vw, 168px); --thr: clamp(128px, 20vw, 190px); --tap-w: 84px; --tap-h: 56px; --mini-w: 138px; --mini-h: 120px; --tools-w: 112px; }
-.touch #b-view, .touch #b-pause, .touch .controls, .touch .cta small { display: none; }
+.touch #b-view, .touch #b-pause, .touch .controls, .touch .cta small, .touch .cta .sub { display: none; }
 .touch .btn.touch-only { display: inline-flex; align-items: center; justify-content: center; gap: 6px; }
 .touch .touch-legend { display: grid; }
 .touch .btn { height: 48px; min-width: 48px; }
@@ -339,6 +372,10 @@ small { color: #9ca3af; font-weight: 500; }
   .lineup { gap: 6px; margin-bottom: 8px; }
   .rival { flex: 1 1 140px; width: auto; padding: 5px 8px; }
   .rival small { display: none; }
+  .card.title .cta { font-size: 16px; }
+  /* three 16 px choices side by side down to 360 px: they share the row, and a long word wraps inside its button */
+  .card.title .tabs { flex-wrap: nowrap; }
+  .card.title .tab.len { flex: 0 1 auto; min-width: 44px; padding: 6px 5px; }
   .card > .row { position: sticky; bottom: 0; z-index: 1; gap: 8px; padding: 10px 0 12px; background: rgb(14,18,26); }
   .cta { padding: 10px 14px; font-size: 15px; }
   .results table { margin: 4px 0 8px; font-size: 13px; }
