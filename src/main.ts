@@ -162,6 +162,30 @@ const viewNote = document.createElement('div');
 viewNote.id = 'view-note';
 viewNote.hidden = true;
 app.appendChild(viewNote);
+/**
+ * The How to play sheet (#151): the controls, pit and service rules that used to fill the title card. A modal <dialog>, a
+ * bottom sheet on a phone and a centred card from 900 px wide (style.css), opened from the title and the race menu. Outside
+ * the overlay, so a card redrawn behind it (the online status arriving) leaves it open; changing screen closes it.
+ */
+const howTo = document.createElement('dialog');
+howTo.id = 'howto';
+howTo.className = 'howto';
+howTo.setAttribute('aria-labelledby', 'howto-h');
+app.appendChild(howTo);
+/** the control that opened the sheet: focus goes back to it, or to the redrawn card's How to play, when the sheet closes */
+let howToOpener: HTMLElement | null = null;
+/** false when a change of screen closed the sheet: the card it was opened from is gone, so focus is left to the new screen */
+let howToRestore = true;
+/** a press that starts on the dimmed backdrop: only a press and release both there closes the sheet, not a text selection */
+let howToBackdropDown = false;
+howTo.addEventListener('pointerdown', (e) => { howToBackdropDown = e.target === howTo; });
+howTo.addEventListener('click', (e) => { if (e.target === howTo && howToBackdropDown) closeHowTo(); howToBackdropDown = false; });
+howTo.addEventListener('close', () => {
+  const back = howToOpener?.isConnected ? howToOpener : overlay.querySelector<HTMLElement>('#o-help');
+  howToOpener = null;
+  if (howToRestore) back?.focus({ preventScroll: true });
+  howToRestore = true;
+});
 /** a race, practice or championship round asked for before the 3D view was ready, and the screen it was asked from */
 let pendingStart: { m: Mode; from: Screen } | null = null;
 
@@ -192,6 +216,8 @@ function enter(s: Screen): void {
   // the pending card's lost-contact timer lives only while that card shows, or while a finished driver watches the race
   // online: any other screen ends it (#43)
   if (s !== 'netwait' && !(watching && net)) netGuard.stop();
+  // the How to play sheet belongs to the screen it was opened on; the same screen redrawn keeps it open
+  if (s !== screen && howTo.open) { howToRestore = false; closeHowTo(); }
   screen = s;
   // leaving the screen a start was asked from cancels that start (a session starting goes to the race screen itself)
   if (pendingStart && s !== pendingStart.from) pendingStart = null;
@@ -201,9 +227,10 @@ function enter(s: Screen): void {
   syncPad();
 }
 
-function controlsHtml(): string {
+/** The keyboard grid: the How to play sheet's Keyboard section, and the compact legend on the race menu. */
+function keysHtml(cls: string): string {
   const row = (k: string, id: string): string => `<div class="krow"><span class="keys">${k}</span><span>${t(id)}</span></div>`;
-  return `<p class="touch-hint">${t('touch.hint')}</p><div class="controls">
+  return `<div class="${cls}">
     ${row('<kbd>W</kbd><kbd>↑</kbd>', 'ctl.throttle')}
     ${row('<kbd>S</kbd><kbd>↓</kbd>', 'ctl.brake')}
     ${row('<kbd>Space</kbd>', 'ctl.lane')}
@@ -214,7 +241,60 @@ function controlsHtml(): string {
     ${row('<kbd>Esc</kbd>', 'ctl.pause')}
     ${row('<kbd>R</kbd>', 'ctl.restart')}
     ${row('<kbd>G</kbd>', 'ctl.ghost')}
-  </div><p class="rules"><small>${t('ctl.rules')}</small></p>`;
+  </div>`;
+}
+
+/** The touch pad's buttons, each named as on the pad with what it does (#151): the sheet's Drive section and the touch legend. */
+function touchGridHtml(cls: string): string {
+  const row = (b: string, id: string): string => `<div><dt>${t(`touch.${b}`)}</dt><dd>${t(id)}</dd></div>`;
+  return `<dl class="${cls}">${row('throttle', 'how.drive.throttle')}${row('brake', 'how.drive.brake')}${row('lane', 'how.drive.lane')}${row('pit', 'how.drive.pit')}${row('defer', 'how.drive.defer')}</dl>`;
+}
+
+/** The How to play control on the title and the race menu (#151). */
+function howToButtonHtml(): string {
+  return `<div class="help-link"><button class="linkbtn" id="o-help" aria-haspopup="dialog">${t('how.open')}</button></div>`;
+}
+function bindHowTo(): void {
+  overlay.querySelector<HTMLElement>('#o-help')?.addEventListener('click', (e) => openHowTo(e.currentTarget as HTMLElement));
+}
+
+/**
+ * The race menu's legend: the keyboard grid, or on a touch screen what each pad button does, then How to play for the pit
+ * and service rules.
+ */
+function controlsHtml(): string {
+  return `${touchGridHtml('touch-legend')}${keysHtml('controls')}${howToButtonHtml()}`;
+}
+
+const HOW_PIT = ['how.pit.1', 'how.pit.2', 'how.pit.3', 'how.pit.4', 'how.pit.5'];
+const HOW_RULES = ['how.rules.1', 'how.rules.2', 'how.rules.3', 'how.rules.4', 'how.rules.5'];
+/** The sheet's sections: on a touch screen Drive comes first, otherwise Keyboard does. */
+function howToHtml(touch: boolean): string {
+  const list = (ids: string[]): string => `<ul>${ids.map((id) => `<li>${t(id)}</li>`).join('')}</ul>`;
+  const sec = (key: string, title: string, body: string): string => `<section class="how-sec" data-how="${key}" aria-labelledby="how-${key}"><h3 id="how-${key}">${title}</h3>${body}</section>`;
+  const drive = sec('drive', t('how.drive'), `${touch ? '' : `<p class="how-lead">${t('how.drive.touchLead')}</p>`}${touchGridHtml('how-touch')}`);
+  const pit = sec('pit', t('how.pit'), list(HOW_PIT));
+  const rules = sec('rules', t('how.rules'), list(HOW_RULES));
+  const keys = sec('keys', t('how.keys'), keysHtml('how-keys'));
+  return (touch ? [drive, pit, rules, keys] : [keys, pit, rules, drive]).join('');
+}
+
+function openHowTo(opener: HTMLElement | null): void {
+  if (howTo.open) return;
+  howToOpener = opener;
+  howToRestore = true;
+  howTo.innerHTML = `<div class="howto-head"><h2 id="howto-h">${t('how.title')}</h2><button type="button" class="howto-x" id="howto-close">${t('how.close')}</button></div>
+    <div class="howto-body" tabindex="0" aria-labelledby="howto-h">${howToHtml(document.body.classList.contains('touch'))}</div>`;
+  howTo.querySelector('#howto-close')!.addEventListener('click', closeHowTo);
+  releaseDriving();
+  if (typeof howTo.showModal === 'function') howTo.showModal(); else howTo.setAttribute('open', '');
+  howTo.querySelector<HTMLElement>('.howto-body')!.scrollTop = 0;
+  howTo.querySelector<HTMLElement>('#howto-close')!.focus({ preventScroll: true });
+}
+function closeHowTo(): void {
+  if (!howTo.open) return;
+  if (typeof howTo.close === 'function') howTo.close();
+  else { howTo.removeAttribute('open'); howTo.dispatchEvent(new Event('close')); }
 }
 
 /** Small SVG map of a circuit for the track picker. */
@@ -405,7 +485,7 @@ function showTitle(): void {
     ${lineupHtml()}
     <div class="lbl2">${t('title.track')}</div>
     <div class="tracks">${cards}</div>
-    ${controlsHtml()}
+    ${howToButtonHtml()}
     <div class="row wrap">
       <button class="cta" id="o-start">${t('title.start')}</button>
       <button class="cta alt" id="o-practice">${t('title.practice')}</button>
@@ -416,6 +496,7 @@ function showTitle(): void {
     ${onlineEntryHtml()}
   </div>`;
   syncRecheck();
+  bindHowTo();
   overlay.querySelector('#o-online')?.addEventListener('click', () => { sfx.init(); showOnline(); });
   overlay.querySelector('#o-reload')?.addEventListener('click', () => location.reload());
   overlay.querySelector<HTMLButtonElement>('#o-retry')?.addEventListener('click', (e) => {
@@ -469,6 +550,7 @@ function showPause(): void {
     <div class="row"><button class="cta" id="o-resume">${t('pause.resume')}</button><button class="cta alt" id="o-restart">${t('pause.restart')}</button><button class="cta alt" id="o-menu">${t('pause.menu')}</button></div>
   </div>`;
   bindSettings();
+  bindHowTo();
   overlay.querySelector('#o-resume')!.addEventListener('click', resume);
   overlay.querySelector('#o-restart')!.addEventListener('click', restartSession);
   overlay.querySelector('#o-menu')!.addEventListener('click', toMenu);
@@ -738,6 +820,8 @@ function ownedByWidget(target: EventTarget | null, code: string): boolean {
   return !!el?.closest('input, textarea, select, [contenteditable]') || ((code === 'Space' || code === 'Enter') && !!el?.closest('.overlay button, #view-note button'));
 }
 window.addEventListener('keydown', (e) => {
+  // the How to play sheet is modal: its own keys (Tab, the arrows to scroll it, Escape to close it) never reach the game
+  if (howTo.open) return;
   const k = e.code;
   if (ownedByWidget(e.target, k)) return;
   if (NON_SCROLL.includes(k)) e.preventDefault();
@@ -1718,6 +1802,7 @@ function showNetMenu(): void {
     <div class="row"><button class="cta" id="o-resume">${t('pause.resume')}</button><button class="cta alt" id="o-leave">${t('net.leaveRace')}</button></div>
   </div>`;
   bindSettings();
+  bindHowTo();
   overlay.querySelector('#o-resume')!.addEventListener('click', () => {
     if (netResult && netResult.raceId === netRaceId) showNetResults(netResult);
     else resume();   // a driver whose race is over goes back to spectating (#135)

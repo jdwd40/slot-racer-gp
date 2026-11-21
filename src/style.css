@@ -99,6 +99,43 @@ kbd { background: #f4f4f5; color: #111; border-radius: 5px; padding: 1px 6px; fo
 .place { font-size: 20px; font-weight: 800; color: #ffe066; margin-bottom: 6px; }
 small { color: #9ca3af; font-weight: 500; }
 
+/* How to play (#151): the control on the title and the race menu, and the sheet it opens. A bottom sheet on a phone or tablet,
+   a centred card from 900 px wide. Its body copy is 16 px; the close control and the link are at least 44 px */
+.help-link { display: flex; justify-content: center; margin: 0 0 12px; }
+.linkbtn { min-width: 44px; min-height: 44px; padding: 10px 16px; border: 0; border-radius: 10px; background: none; color: #ffd23f; font: inherit; font-size: 16px; font-weight: 700; text-decoration: underline; text-underline-offset: 3px; cursor: pointer; }
+.linkbtn:focus-visible, .howto-x:focus-visible, .howto-body:focus-visible { outline: 3px solid #ffd23f; outline-offset: 2px; }
+.touch-legend, .how-touch { grid-template-columns: max-content 1fr; gap: 6px 14px; margin: 10px auto 14px; max-width: 560px; text-align: left; color: #d1d5db; }
+.touch-legend { font-size: 14px; }
+.how-touch { display: grid; margin: 0 0 6px; color: inherit; }
+.touch-legend > div, .how-touch > div { display: contents; }
+.touch-legend dt, .how-touch dt { font-weight: 800; color: #f4f4f5; }
+.touch-legend dd, .how-touch dd { margin: 0; }
+.howto { position: fixed; inset: 0; box-sizing: border-box; width: min(100%, 680px); max-width: 100%; max-height: min(88%, calc(100% - 24px - var(--sat))); margin: auto auto 0; padding: 0; border: 1px solid rgba(255,255,255,0.14); border-bottom: 0; border-radius: 18px 18px 0 0; background: #0e121a; color: #f4f4f5; font-family: inherit; text-align: left; box-shadow: 0 -12px 40px rgba(0,0,0,0.5); }
+.howto[open] { display: flex; flex-direction: column; }
+.howto::backdrop { background: rgba(0,0,0,0.62); }
+.howto-head { flex: none; display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px max(12px, var(--sar)) 10px max(20px, var(--sal)); border-bottom: 1px solid rgba(255,255,255,0.1); }
+.howto-head h2 { margin: 0; font-size: 22px; }
+.howto-x { flex: none; min-width: 64px; min-height: 48px; padding: 8px 18px; border: 1px solid rgba(255,255,255,0.22); border-radius: 12px; background: rgba(255,255,255,0.08); color: #f4f4f5; font: inherit; font-size: 16px; font-weight: 800; cursor: pointer; }
+.howto-body { flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 0 max(20px, var(--sar)) calc(20px + var(--sab)) max(20px, var(--sal)); font-size: 16px; line-height: 1.5; color: #e5e7eb; }
+.how-sec { padding: 14px 0 6px; }
+.how-sec + .how-sec { border-top: 1px solid rgba(255,255,255,0.08); }
+.how-sec h3 { margin: 0 0 8px; font-size: 13px; letter-spacing: 1.5px; text-transform: uppercase; color: #ffd23f; }
+.how-sec ul { margin: 0; padding-left: 1.2em; }
+.how-sec li { margin: 4px 0; }
+.how-lead { margin: 0 0 8px; color: #9ca3af; }
+.how-keys { display: grid; gap: 8px; }
+.how-keys .krow { align-items: baseline; gap: 12px; }
+.how-keys .keys { min-width: 104px; flex: none; }
+.how-keys kbd { font-size: 14px; }
+/* a phone on its side: a slimmer header leaves more of the sheet for its text */
+@media (max-height: 500px) {
+  .howto-head { padding-top: 4px; padding-bottom: 4px; }
+  .howto-head h2 { font-size: 18px; }
+}
+@media (min-width: 900px) {
+  .howto { width: min(760px, calc(100% - 48px)); max-height: min(820px, calc(100% - 48px)); margin: auto; border-bottom: 1px solid rgba(255,255,255,0.14); border-radius: 18px; box-shadow: 0 20px 60px rgba(0,0,0,0.55); }
+}
+
 .lbl2 { font-size: 11px; letter-spacing: 2px; text-transform: uppercase; color: #9ca3af; font-weight: 700; margin: 4px 0 8px; }
 .tracks { display: flex; gap: 12px; justify-content: center; flex-wrap: wrap; margin-bottom: 14px; }
 .track { display: flex; flex-direction: column; align-items: center; gap: 4px; width: 164px; padding: 8px 8px 10px; background: rgba(255,255,255,0.04); border: 2px solid rgba(255,255,255,0.12); border-radius: 14px; color: #f4f4f5; cursor: pointer; font-family: inherit; transition: border-color 0.15s, background 0.15s, transform 0.15s; }
@@ -179,11 +216,11 @@ small { color: #9ca3af; font-weight: 500; }
 .fatal p { max-width: 36em; margin: 6px 0; font-size: 17px; line-height: 1.4; }
 
 /* touch mode: body.touch. Gesture suppression stays on .tbtn and the HUD's buttons; menus and the track view keep scrolling and zoom */
-.touch-only, .touch-hint { display: none; }
+.touch-only, .touch-legend { display: none; }
 .touch { --eT: max(8px, var(--sat)); --gap: 14px; --hold: clamp(112px, 17vw, 168px); --thr: clamp(128px, 20vw, 190px); --tap-w: 84px; --tap-h: 56px; --mini-w: 138px; --mini-h: 120px; --tools-w: 112px; }
 .touch #b-view, .touch #b-pause, .touch .controls, .touch .cta small { display: none; }
 .touch .btn.touch-only { display: inline-flex; align-items: center; justify-content: center; gap: 6px; }
-.touch .touch-hint { display: block; }
+.touch .touch-legend { display: grid; }
 .touch .btn { height: 48px; min-width: 48px; }
 .touch .btn.sq { width: 48px; }
 .touch .tr { gap: 8px; }
