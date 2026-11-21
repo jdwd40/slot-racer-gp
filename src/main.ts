@@ -1,7 +1,7 @@
 import { ONLINE_ENABLED, afterProtocolRefusal, afterRetry, behindHtml, outdatedHtml, probeOnline, startRecheck, type OnlineStatus } from './online';
 import * as T from './track';
 import { Race, Car, RaceEvent, DRIVERS, PEN, SOLO_ID, DriverId, RosterEntry } from './race';
-import { LENGTH_IDS, lengthOr, raceLength, type RaceLengthId } from './raceLength';
+import { lengthOr, type RaceLengthId } from './raceLength';
 import { DEFAULT_SETUP, SETUP_IDS, setupOr, type SetupId } from './carSetup';
 import { comparePb, readDebrief, type PbCompare } from './debrief';
 import { debriefHtml, debriefOpen } from './debriefView';
@@ -27,7 +27,9 @@ import { NetWaitGuard, type NetWaitView } from './net/netwait';
 import { bannerOnCard, reconnectTextId } from './net/banner';
 import { COARSE_QUERY, ControlsAnchor, DrivingInput, KEY_HOLDS, KEY_TAPS, PadButton, TouchMode, TouchPad, savedTouchMode, saveTouchMode, touchActive } from './input';
 import { hookLevel, installGameHook } from './qaHook';
-import { carName, colorDot, controlsHtml, createControls, howToButtonHtml, howToHtml, lengthName, lengthRadiosHtml, lengthTag, setupChip, setupName, setupRadiosHtml, setupTag, tipHtml, tipToggleHtml, titleOpen, trackSvg } from './menu/controls';
+import { colorDot, controlsHtml, createControls, howToHtml, lengthName, lengthRadiosHtml, lengthTag, setupChip, setupName, setupRadiosHtml, setupTag } from './menu/controls';
+import { createTitle } from './menu/title';
+import type { Mode, Screen } from './menu/types';
 
 const TRACK_KEY = 'srgp.track';
 function savedTrack(): string {
@@ -56,8 +58,6 @@ let viewState: 'loading' | 'ready' | 'failed' | 'nogl' = 'loading';
 let viewLoading: Promise<void> | null = null;
 
 // ------------------------------------------------------------ cars
-/** local race / practice / championship run on this device; 'online' is a server race (connected solo or multiplayer) */
-type Mode = 'race' | 'practice' | 'champ' | 'online';
 let mode: Mode = 'race';
 let carId = R.savedCar();
 /** The local driver: camera, marker, HUD, audio emphasis, personal messages, records and the ghost all follow this ID. */
@@ -192,7 +192,6 @@ let pendingStart: { m: Mode; from: Screen } | null = null;
 
 let online: OnlineStatus = ONLINE_ENABLED ? { state: 'checking' } : { state: 'off' };
 
-type Screen = 'title' | 'race' | 'pause' | 'results' | 'boards' | 'champ' | 'online' | 'lobby' | 'netwait' | 'netres' | 'account';
 let screen: Screen = 'title';
 let lbTrack = T.DEF.id;
 let lbKind: R.BoardKind = 'practice';
@@ -268,226 +267,8 @@ function applyTrack(id: string): void {
   curSpan = fullSpan();
 }
 
-/** pre-race lineup: the three rivals and their driving styles */
-function lineupHtml(): string {
-  return `<div class="lineup">${DRIVERS.slice(1).map((d, i) => `<div class="rival">${colorDot(d.color)}<div><b>${d.name}</b><em>${t(`persona.${d.persona}.name`)}</em>${tipHtml('rivals', `<span class="blurb">${t(`persona.${d.persona}.desc`)}</span>`, 'span', i)}</div></div>`).join('')}</div>`;
-}
-/** The title's rivals (#153): one short line, the three names and styles, their blurbs behind the "i" at its end. */
-function rivalsHtml(): string {
-  return `<div class="rivals"><div class="lbl2 has-info"><span>${t('title.rivals')}</span>${tipToggleHtml('rivals', t('info.rivals'), DRIVERS.length - 1)}</div>${lineupHtml()}</div>`;
-}
-
-/** the title has opened Settings by itself once for the automatic-Low notice */
-let autoNoteShown = false;
-
-/** The title's cars (#153): a colour and a name each; on a phone the name is read out but not shown, so the four fit beside the initials. */
-function carPickerHtml(): string {
-  return `<div class="cars" role="group" aria-labelledby="o-car-lbl">${R.LIVERIES.map((l) => `<button class="car ${l.id === carId ? 'sel' : ''}" data-car="${l.id}" title="${l.name}" aria-pressed="${l.id === carId}"><i style="background:#${l.color.toString(16).padStart(6, '0')}"></i><span class="cname">${l.name}</span></button>`).join('')}</div>`;
-}
-
-/**
- * The title's circuit picker (#153). On a desktop the five circuits sit in one compact row (map, name, lap length) with the
- * chosen one's description once under it. On a phone, or a phone on its side, the row is a snap-scrolling strip that shows
- * one circuit at a time, with Previous / Next either side and a dot per circuit: Previous, Next, a swipe or a tap on a card
- * chooses; a tap on the chosen card shows or hides its description, which starts hidden there.
- */
-let trackDescOpen = false;
-function trackPickerHtml(): string {
-  const cards = T.TRACKS.map((d) => `<button class="track ${d.id === T.DEF.id ? 'sel' : ''}" data-id="${d.id}" aria-pressed="${d.id === T.DEF.id}" aria-describedby="o-track-desc">
-      ${trackSvg(d)}
-      <span class="tname"><b>${t(`track.${d.id}.name`)}</b><em>${t('title.len', { n: Math.round(T.layout(d, 4).L) })}</em></span>
-    </button>`).join('');
-  const dots = T.TRACKS.map((d) => `<i class="${d.id === T.DEF.id ? 'sel' : ''}" data-dot="${d.id}"></i>`).join('');
-  return `<div class="picker" role="group" aria-labelledby="o-track-lbl">
-    <div class="lbl2" id="o-track-lbl">${t('title.track')}</div>
-    <div class="pick-row">
-      <button type="button" class="pick-nav" id="o-track-prev" aria-label="${t('title.trackPrev')}"><span aria-hidden="true">‹</span></button>
-      <div class="tracks" id="o-tracks">${cards}</div>
-      <button type="button" class="pick-nav" id="o-track-next" aria-label="${t('title.trackNext')}"><span aria-hidden="true">›</span></button>
-    </div>
-    <div class="dots" aria-hidden="true">${dots}</div>
-    <p class="track-desc" id="o-track-desc">${t(`track.${T.DEF.id}.desc`)}</p>
-  </div>`;
-}
-/** Centre the chosen circuit in the picker's strip (it only scrolls on a phone); `smooth` for Previous / Next. */
-function centreTrack(smooth = false): void {
-  const strip = overlay.querySelector<HTMLElement>('#o-tracks');
-  const card = strip?.querySelector<HTMLElement>('.track.sel');
-  if (!strip || !card || strip.scrollWidth <= strip.clientWidth + 1) return;
-  const left = card.offsetLeft - strip.offsetLeft - (strip.clientWidth - card.offsetWidth) / 2;
-  strip.scrollTo({ left, behavior: smooth ? 'smooth' : 'auto' });
-}
-/** Choose a circuit on the title: the world, the cards, the dots and the description follow. */
-function pickTrack(id: string, scroll: 'smooth' | 'jump' | false = false): void {
-  sfx.init();
-  applyTrack(id);
-  overlay.querySelectorAll<HTMLElement>('.track').forEach((x) => { const on = x.dataset.id === T.DEF.id; x.classList.toggle('sel', on); x.setAttribute('aria-pressed', String(on)); });
-  overlay.querySelectorAll<HTMLElement>('[data-dot]').forEach((x) => x.classList.toggle('sel', x.dataset.dot === T.DEF.id));
-  const desc = overlay.querySelector('#o-track-desc');
-  if (desc) desc.textContent = t(`track.${T.DEF.id}.desc`);
-  if (scroll) centreTrack(scroll === 'smooth');
-}
-function bindTrackPicker(): void {
-  const strip = overlay.querySelector<HTMLElement>('#o-tracks')!;
-  const card = overlay.querySelector<HTMLElement>('.card.title')!;
-  const step = (k: number): void => {
-    const i = T.TRACKS.findIndex((d) => d.id === T.DEF.id);
-    const j = i + k;
-    // a step past either end wraps round, at once rather than sliding across every circuit between
-    pickTrack(T.TRACKS[(j + T.TRACKS.length) % T.TRACKS.length].id, j >= 0 && j < T.TRACKS.length ? 'smooth' : 'jump');
-  };
-  overlay.querySelector('#o-track-prev')!.addEventListener('click', () => step(-1));
-  overlay.querySelector('#o-track-next')!.addEventListener('click', () => step(1));
-  overlay.querySelectorAll<HTMLElement>('.track').forEach((b) => b.addEventListener('click', () => {
-    if (b.dataset.id === T.DEF.id) { trackDescOpen = !trackDescOpen; card.classList.toggle('desc-open', trackDescOpen); return; }
-    pickTrack(b.dataset.id!);
-  }));
-  // a swipe chooses the circuit it comes to rest on. Only a scroll the player makes (a finger or the wheel on the strip) does:
-  // the strip re-centred after a resize, or scrolled to bring a card into view, leaves the choice alone
-  let down = false, lastUser = -1e9, settle = 0;
-  const user = (): void => { lastUser = performance.now(); };
-  strip.addEventListener('pointerdown', () => { down = true; user(); });
-  for (const ev of ['pointerup', 'pointercancel']) strip.addEventListener(ev, () => { down = false; user(); });
-  strip.addEventListener('wheel', user, { passive: true });
-  strip.addEventListener('touchmove', user, { passive: true });
-  strip.addEventListener('scroll', () => {
-    if (!down && performance.now() - lastUser > 700) return;
-    window.clearTimeout(settle);
-    const done = (): void => {
-      if (down) { settle = window.setTimeout(done, 120); return; }
-      const mid = strip.getBoundingClientRect().left + strip.clientWidth / 2;
-      let best: HTMLElement | null = null, gap = 1e9;
-      strip.querySelectorAll<HTMLElement>('.track').forEach((x) => { const r = x.getBoundingClientRect(), g = Math.abs(r.left + r.width / 2 - mid); if (g < gap) { gap = g; best = x; } });
-      const id = (best as HTMLElement | null)?.dataset.id;
-      if (id && id !== T.DEF.id && screen === 'title') pickTrack(id);
-    };
-    settle = window.setTimeout(done, 140);
-  }, { passive: true });
-}
 // a rotation or a resized window keeps the chosen circuit in the middle of the strip
 window.addEventListener('resize', () => { if (screen === 'title') requestAnimationFrame(() => centreTrack()); });
-
-function showTitle(): void {
-  enter('title');
-  camMode = 'full';
-  mode = 'race';
-  overlay.className = 'overlay show';
-  const nRounds = R.CHAMP_TRACKS.length;
-  let champBtns = `<button class="cta alt" id="o-champ">${t('title.champ')}</button>`;
-  // a championship in progress keeps its own length (#132), so the button says which one it is
-  // (a phone on its side shows the shorter label, so Practice, Continue and New share one row beside the circuit)
-  if (champ && !R.champDone(champ)) champBtns = `<button class="cta alt" id="o-champ-cont"><span class="cc-long">${t('title.champContinue', { n: champ.rounds.length + 1, m: nRounds })}</span><span class="cc-short">${t('title.champContinueShort', { n: champ.rounds.length + 1, m: nRounds })}</span> <span class="sub">${lengthTag(champ.length)} · ${setupTag(champ.setup)}</span></button><button class="cta alt small" id="o-champ">${t('title.champNew')}</button>`;
-  else if (champ) champBtns = `<button class="cta alt" id="o-champ-view">${t('title.champView')}</button><button class="cta alt small" id="o-champ">${t('title.champNew')}</button>`;
-  // the automatic switch to Low (#66) says so in the graphics group: Settings opens by itself the first time that notice is due
-  let autoOpened = false;
-  if (autoQuality.undoTarget(preset) && !autoNoteShown) { autoNoteShown = true; autoOpened = true; titleOpen.add('settings'); }
-  // #152: body copy is 16 px and every control 44 px; the notes, the setup description, the rival blurbs, the play-mode notes
-  // and the graphics / touch settings are folded behind a toggle each (one tap), still all on the card.
-  // #153: mobile first, in the order a player needs: the circuit, the race options, Start Race (full width, never under
-  // anything), Practice and Championship, then text links for the rest. No row of it is sticky, so nothing can cover Start.
-  // A phone on its side puts the logo, circuit and links in a column left of the options and Start (style.css)
-  overlay.innerHTML = `<div class="card title${trackDescOpen ? ' desc-open' : ''}">
-    <div class="t-side">
-      <div class="t-head">
-        <div class="logo">${t('title.name')}</div>
-        <div class="tag">${t('title.tag')}</div>
-        <p id="o-goal">${t('title.goalShort', { n: raceLength(raceLen).laps })}</p>
-      </div>
-      ${trackPickerHtml()}
-    </div>
-    <div class="t-main">
-      <div class="setup">
-        ${lengthRadiosHtml('rlen', raceLen, LENGTH_IDS, t('len.note'), true)}
-        ${setupRadiosHtml('rsetup', carSetupId, SETUP_IDS, t('setup.note'), SETUP_IDS, true)}
-        <div class="who">
-          <label class="ini"><span class="lbl2">${t('title.initials')}</span><input id="o-ini" maxlength="${R.MAX_INITIALS}" placeholder="${R.ANON}" value="${R.savedInitialsRaw().replace(/"/g, '')}" autocomplete="off" autocapitalize="characters" enterkeyhint="done" spellcheck="false"></label>
-          <div class="carpick"><span class="lbl2" id="o-car-lbl">${t('title.car')}<span class="car-now"> · <span id="o-car-name">${carName(carId)}</span></span></span>${carPickerHtml()}</div>
-        </div>
-      </div>
-      <div class="t-go">
-        <button class="cta" id="o-start">${t('title.start')}</button>
-        <div class="t-modes">
-          <button class="cta alt" id="o-practice">${t('title.practice')}</button>
-          ${champBtns}
-        </div>
-      </div>
-    </div>
-    <div class="t-more">
-      <div class="t-links">
-        <button class="linkbtn" id="o-boards">${t('title.boards')}</button>
-        ${onlineLinksHtml()}
-        ${howToButtonHtml(false)}
-        ${tipToggleHtml('settings', t('title.settings'), 1, 'linkbtn', 'o-settings')}
-        ${tipToggleHtml('modes', t('title.modesInfo'), 1, 'linkbtn', 'o-modes')}
-      </div>
-      ${onlineNoticeHtml()}
-      ${tipHtml('settings', settingsHtml())}
-      ${tipHtml('modes', `<p class="modes">${t('net.localNote')}</p>${online.state === 'available' ? `<p class="modes">${t('net.onlineNote')}</p>` : ''}`)}
-      ${rivalsHtml()}
-    </div>
-  </div>`;
-  syncRecheck();
-  bindHowTo();
-  bindTips();
-  bindTrackPicker();
-  centreTrack();
-  overlay.querySelector('#o-online')?.addEventListener('click', () => { sfx.init(); showOnline(); });
-  overlay.querySelector('#o-reload')?.addEventListener('click', () => location.reload());
-  overlay.querySelector<HTMLButtonElement>('#o-retry')?.addEventListener('click', (e) => {
-    const b = e.currentTarget as HTMLButtonElement;
-    b.disabled = true;
-    void probeHealth().then((st) => applyOnline(afterRetry(st), true));
-  });
-  overlay.querySelector('#o-account')?.addEventListener('click', () => { sfx.init(); showAccount(); });
-  overlay.querySelector('#o-rejoin')?.addEventListener('click', () => { sfx.init(); const st = loadSeat(seatStore()); if (st) void netBegin((n) => n.resume(st)); });
-  overlay.querySelectorAll<HTMLElement>('.car').forEach((b) => b.addEventListener('click', () => {
-    carId = b.dataset.car!; R.saveCar(carId);
-    overlay.querySelectorAll('.car').forEach((x) => { x.classList.toggle('sel', x === b); x.setAttribute('aria-pressed', String(x === b)); });
-    overlay.querySelector('#o-car-name')!.textContent = carName(carId);
-    setRace(newRace());
-  }));
-  bindSettings();
-  bindRadios('rlen', (id) => {
-    chooseLength(id);
-    overlay.querySelector('#o-goal')!.textContent = t('title.goalShort', { n: raceLength(raceLen).laps });
-    setRace(newRace());
-  });
-  // the setup is the next race's (#133): the grid shown behind the menu is rebuilt with it, nothing running is changed
-  bindRadios('rsetup', (id) => { chooseSetup(id); syncSetupDesc('rsetup', carSetupId); setRace(newRace()); });
-  const ini = overlay.querySelector<HTMLInputElement>('#o-ini')!;
-  ini.addEventListener('input', () => R.saveInitialsRaw(ini.value));
-  ini.addEventListener('keydown', (e) => { if (e.key === 'Enter') ini.blur(); e.stopPropagation(); });
-  overlay.querySelector('#o-start')!.addEventListener('click', () => { sfx.init(); startSession('race'); });
-  overlay.querySelector('#o-practice')!.addEventListener('click', () => { sfx.init(); startSession('practice'); });
-  // a new championship takes the length chosen now and keeps it for every round (#132)
-  // ...and the setup chosen now for its first round (#133); it can be changed between rounds
-  overlay.querySelector('#o-champ')!.addEventListener('click', () => { sfx.init(); champ = R.newChamp(carId, R.currentInitials(), raceLen, carSetupId); startChampRound(); });
-  overlay.querySelector('#o-champ-cont')?.addEventListener('click', () => { sfx.init(); startChampRound(); });
-  overlay.querySelector('#o-champ-view')?.addEventListener('click', () => { sfx.init(); showChamp(null); });
-  overlay.querySelector('#o-boards')!.addEventListener('click', () => { sfx.init(); lbSetup = carSetupId; showBoards(); });
-  // Settings opened by itself for the automatic-Low notice (#66, #152): the card scrolls just far enough to show it and its
-  // Undo, which on a short screen would otherwise sit below the fold (Start Race stays in view: it is near the top)
-  if (autoOpened) overlay.querySelector('#o-gfx-auto')?.scrollIntoView({ block: 'nearest' });
-}
-
-function showPause(): void {
-  if (net) { showNetMenu(); return; }
-  enter('pause');
-  overlay.className = 'overlay show';
-  const title = mode === 'practice' ? t('prac.title') : mode === 'champ' && champ ? t('champ.round', { n: champ.rounds.length + 1, m: R.CHAMP_TRACKS.length }) : t('pause.title');
-  overlay.innerHTML = `<div class="card">
-    <h2>${title}</h2>
-    ${mode === 'practice' ? `<p>${t('prac.hint')}</p>` : ''}
-    ${controlsHtml()}
-    ${settingsHtml()}
-    <div class="row"><button class="cta" id="o-resume">${t('pause.resume')}</button><button class="cta alt" id="o-restart">${t('pause.restart')}</button><button class="cta alt" id="o-menu">${t('pause.menu')}</button></div>
-  </div>`;
-  bindSettings();
-  bindHowTo();
-  overlay.querySelector('#o-resume')!.addEventListener('click', resume);
-  overlay.querySelector('#o-restart')!.addEventListener('click', restartSession);
-  overlay.querySelector('#o-menu')!.addEventListener('click', toMenu);
-}
 
 function resume(): void { enter('race'); overlay.className = 'overlay'; overlay.innerHTML = ''; stepper.rebase(); }
 
@@ -1990,6 +1771,27 @@ function tick(dt: number): void {
   noteDone();
   if (race.phase === 'done' && (screen === 'race' || screen === 'netwait')) showResults();
 }
+// ------------------------------------------------------------ client shell (#141, src/menu/*)
+// The screens live in their own modules. Each is built once, here, with the overlay, the state above (read and written
+// through accessors: it stays owned by this file) and the actions it calls; nothing runs until the title is shown below.
+const { centreTrack, showTitle, showPause } = createTitle({
+  overlay, sfx, autoQuality,
+  get screen() { return screen; },
+  get mode() { return mode; }, set mode(v) { mode = v; },
+  get camMode() { return camMode; }, set camMode(v) { camMode = v; },
+  get champ() { return champ; }, set champ(v) { champ = v; },
+  get carId() { return carId; }, set carId(v) { carId = v; },
+  get preset() { return preset; },
+  get raceLen() { return raceLen; },
+  get carSetupId() { return carSetupId; },
+  get online() { return online; },
+  get lbSetup() { return lbSetup; }, set lbSetup(v) { lbSetup = v; },
+  get net() { return net; },
+  enter, setRace, newRace, applyTrack, startSession, restartSession, resume, toMenu, startChampRound, showChamp, showBoards, showOnline, showAccount, showNetMenu,
+  onlineLinksHtml, onlineNoticeHtml, syncRecheck, probeHealth, applyOnline, seatStore, netBegin,
+  bindHowTo, bindTips, bindRadios, chooseLength, syncSetupDesc, chooseSetup, settingsHtml, bindSettings,
+});
+
 let last = performance.now();
 let time = 0;
 showTitle();
