@@ -4,7 +4,7 @@ import { describe, expect, it } from 'vitest';
 import { hookLevel, installGameHook, MINIMAL_KEYS, minimalHook } from '../src/qaHook';
 
 // #146: the full window.__game diagnostics hook only in a dev server, a VITE_QA build or with ?qa=1
-const FULL_ONLY = ['advance', 'startSession', 'showTitle', 'qaNetLobby', 'qaNetResult', 'netDrop', 'setLocalSlot', 'setView', 'zoom', 'race', 'net', 'input'];
+const FULL_ONLY = ['advance', 'startSession', 'showTitle', 'qaNetLobby', 'qaNetResult', 'qaOnline', 'netDrop', 'setLocalSlot', 'setView', 'zoom', 'race', 'net', 'input'];
 const fullHook = () => Object.fromEntries(FULL_ONLY.map((k) => [k, () => k]));
 const src = (state: { screen: string; online: { state: string; reason?: string }; preset: string; mode: string }) =>
   ({ screen: () => state.screen, online: () => state.online, preset: () => state.preset, mode: () => state.mode });
