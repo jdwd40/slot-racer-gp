@@ -90,8 +90,8 @@ describe('CI release gate (#55)', () => {
   const all = jobs();
   const deploy = all.get('deploy')!;
 
-  it('has the client check, server, lint and deploy jobs', () => {
-    expect([...all.keys()].sort()).toEqual(['check', 'deploy', 'lint', 'server']);
+  it('has the client check, server, lint, coverage and deploy jobs', () => {
+    expect([...all.keys()].sort()).toEqual(['check', 'coverage', 'deploy', 'lint', 'server']);
   });
 
   it('deploy needs both the client check job and the server/database/package/smoke job', () => {
@@ -163,7 +163,7 @@ describe('ESLint report job (#148)', () => {
     const deploy = all.get('deploy')!;
     expect(needsOf(deploy)).not.toContain('lint');
     expect(ifOf(deploy)).not.toMatch(/lint/);
-    for (const id of ['check', 'server']) expect(needsOf(all.get(id)!), `${id} does not wait for lint`).toEqual([]);
+    for (const id of ['check', 'server']) expect(needsOf(all.get(id)!), `${id} does not wait for lint or coverage`).toEqual([]);
   });
 
   it('holds no secrets, deploys nothing and keeps the workflow\'s read-only permissions', () => {
@@ -201,5 +201,117 @@ describe('database tests (#106)', () => {
     const selected = testFiles.filter((f) => f.includes(filter));
     expect(needDb.length).toBeGreaterThanOrEqual(5);
     expect(selected.sort()).toEqual(needDb.sort());
+  });
+});
+
+/** the `- name:` steps of a job, in order, each with its own lines (the step's `uses:`/`run:` and keys) */
+function steps(body: string[]): { name: string; lines: string[] }[] {
+  const out: { name: string; lines: string[] }[] = [];
+  for (const l of body) {
+    const m = /^ {6}- (?:name: (.*)|\S.*)$/.exec(l);
+    if (m) { out.push({ name: m[1] ?? '', lines: [l] }); continue; }
+    out.at(-1)?.lines.push(l);
+  }
+  return out;
+}
+const runOf = (s: { lines: string[] }) => s.lines.map((l) => /^ {8}run: (.*)$/.exec(l)?.[1]).find((r) => r !== undefined) ?? '';
+
+// The Playwright smoke (#145) runs inside the check job on the production build, after that build and before it is packaged
+// and retained: deploy downloads only check's artifact and needs check to succeed, so a failed or removed-but-still-green
+// smoke would have to show up here. It is client-only (no room server, no secrets) and stays short (a step timeout and the
+// script's own --max-minutes). The full browser-check matrix is not in CI.
+describe('Playwright smoke gate (#145)', () => {
+  const all = jobs();
+  const check = steps(all.get('check')!);
+  const names = check.map((s) => s.name);
+  const at = (re: RegExp) => check.findIndex((s) => re.test(runOf(s)));
+  const pkg = JSON.parse(readFileSync('package.json', 'utf8')) as { scripts: Record<string, string>; devDependencies: Record<string, string> };
+
+  it('check runs the smoke after the production build and before the artifact is packaged and retained', () => {
+    const build = at(/^npm run build$/), install = at(/^npx playwright-core install\b/), smoke = at(/^npm run check:smoke\b/);
+    const pack = at(/deploy\/artifact\.py pack /);
+    const retain = check.findIndex((s) => s.lines.some((l) => /uses: actions\/upload-artifact@/.test(l)));
+    expect(build, 'production build step').toBeGreaterThanOrEqual(0);
+    expect(check[build].lines.join('\n'), 'the smoke tests the VITE_ONLINE=1 build that ships').toMatch(/VITE_ONLINE: '1'/);
+    expect(install, 'browser install step').toBeGreaterThan(build);
+    expect(smoke, 'smoke step').toBeGreaterThan(install);
+    expect(pack, 'artifact packed after the smoke').toBeGreaterThan(smoke);
+    expect(retain, 'artifact retained after the smoke').toBeGreaterThan(pack);
+    expect(check.filter((s) => /check:smoke|browser-check/.test(runOf(s))).length, 'exactly one browser step').toBe(1);
+    expect(names.filter((n) => /smoke/i.test(n)).length).toBeGreaterThanOrEqual(1);
+  });
+
+  it('the smoke step is not skippable: no step-level if:, no continue-on-error, and a time box', () => {
+    for (const re of [/^npx playwright-core install\b/, /^npm run check:smoke\b/]) {
+      const s = check[at(re)];
+      const body = s.lines.join('\n');
+      expect(body, `${s.name}: no step-level if:`).not.toMatch(/^ {8}if:/m);
+      expect(body, `${s.name}: no continue-on-error`).not.toMatch(/continue-on-error/);
+      const t = /^ {8}timeout-minutes: (\d+)\s*$/m.exec(body);
+      expect(t, `${s.name}: has a step timeout`).not.toBeNull();
+      expect(Number(t![1])).toBeLessThanOrEqual(5);
+    }
+    expect(runOf(check[at(/^npx playwright-core install\b/)])).toBe('npx playwright-core install --with-deps --only-shell chromium');
+  });
+
+  it('deploy still needs check, so the smoke gates the static deploy', () => {
+    expect(needsOf(all.get('deploy')!)).toContain('check');
+    expect(ifOf(all.get('deploy')!)).toMatch(/needs\.check\.result == 'success'/);
+  });
+
+  it('check:smoke runs only the smoke scenario, time-boxed, on the built dist/ (no --url, so no live site)', () => {
+    const cmd = pkg.scripts['check:smoke'];
+    expect(cmd).toMatch(/^node scripts\/browser-check\.mjs smoke --max-minutes [1-4]$/);
+    const src = readFileSync('scripts/browser-check.mjs', 'utf8');
+    expect(src).toMatch(/^const SCENARIOS = \{[^}]*\bsmoke\b[^}]*\};$/m);
+    // the smoke uses the page as a visitor sees it: no ?qa=1 (withQa), no full-hook calls, and /api stubbed in the page
+    const body = /^async function smoke\(run, c\) \{\n([\s\S]*?)\n\}\n/m.exec(src)?.[1] ?? '';
+    expect(body, 'the smoke scenario').not.toBe('');
+    expect(body).not.toMatch(/withQa|startSession|advance\(|qaNet|qaOnline|netDrop|setLocalSlot/);
+    expect(body).toMatch(/route\.fulfill/);
+  });
+
+  it('the full browser-check matrix stays opt-in (npm run check:browser), never a CI step', () => {
+    expect(pkg.scripts['check:browser']).toBe('npm run build && node scripts/browser-check.mjs');
+    expect(text).not.toMatch(/check:browser|browser-check\.mjs|online-check/);
+  });
+
+  it('uses the locked playwright-core', () => {
+    expect(pkg.devDependencies['playwright-core']).toMatch(/^\d+\.\d+\.\d+$/);
+  });
+});
+
+// Coverage (#145) is measured on pull requests and reported, never enforced: no threshold anywhere, and like lint it is
+// outside deploy.needs, so it can neither block nor allow a deployment.
+describe('coverage report job (#145)', () => {
+  const all = jobs();
+  const cov = all.get('coverage')!;
+  const pkg = JSON.parse(readFileSync('package.json', 'utf8')) as { scripts: Record<string, string>; devDependencies: Record<string, string> };
+
+  it('runs npm run test:coverage after a lockfile install, on pull requests only', () => {
+    expect(cov, 'a coverage job').toBeDefined();
+    const body = cov.join('\n');
+    expect(body).toMatch(/run: npm ci\n/);
+    expect(body).toMatch(/run: npm run test:coverage\s*$/m);
+    expect(body.indexOf('run: npm ci')).toBeLessThan(body.indexOf('run: npm run test:coverage'));
+    expect(jobKey(cov, 'if')?.inline).toBe("github.event_name == 'pull_request'");
+    expect(pkg.scripts['test:coverage']).toMatch(/^vitest run --coverage\b/);
+  });
+
+  it('matches the installed vitest exactly and sets no coverage threshold', () => {
+    expect(pkg.devDependencies['@vitest/coverage-v8']).toMatch(/^\d+\.\d+\.\d+$/);
+    const vitest = JSON.parse(readFileSync('node_modules/vitest/package.json', 'utf8')) as { version: string };
+    expect(pkg.devDependencies['@vitest/coverage-v8']).toBe(vitest.version);
+    const config = readFileSync('vitest.config.ts', 'utf8').split('\n').filter((l) => !/^\s*\/\//.test(l)).join('\n');
+    expect(config).toMatch(/provider: 'v8'/);
+    expect(config, 'no coverage threshold (a floor is a later decision)').not.toMatch(/thresholds?|perFile|autoUpdate/);
+    expect(pkg.scripts['test:coverage']).not.toMatch(/threshold/);
+  });
+
+  it('is not a deploy gate and holds no secrets', () => {
+    expect(needsOf(all.get('deploy')!)).not.toContain('coverage');
+    expect(ifOf(all.get('deploy')!)).not.toMatch(/coverage/);
+    expect(cov.join('\n')).not.toMatch(/secrets\.|ssh|deploy\/run\.sh|upload-artifact/);
+    expect(cov.join('\n')).not.toMatch(/^ {4}permissions:/m);
   });
 });

@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Bounded browser validation of the real game. Procedure and results: docs/validation.md.
 //
-//   node scripts/browser-check.mjs [tracks race controlled routing practice championship touch responsive touchrace reverse service lastchance stall queue autosg autobay localslot online memory netbanner racelength carsetup debrief spectate qahook boot howto titletype titlelayout]   functional checks (default: all)
+//   node scripts/browser-check.mjs [tracks race controlled routing practice championship touch responsive touchrace reverse service lastchance stall queue autosg autobay localslot online memory netbanner racelength carsetup debrief spectate qahook boot howto titletype titlelayout smoke]   functional checks (default: all)
 //   node scripts/browser-check.mjs perf --label updated --machine "<name>"          frame-time capture
 //   node scripts/browser-check.mjs compare <baseline.json> <updated.json>           like-for-like comparison
 //
@@ -502,14 +502,16 @@ async function environment(run, page, extra = {}) {
       renderer: dbg ? gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL) : null,
       vendor: dbg ? gl.getParameter(dbg.UNMASKED_VENDOR_WEBGL) : null,
       viewport: { width: innerWidth, height: innerHeight },
-      drawingBuffer: { width: canvas.width, height: canvas.height },
+      drawingBuffer: canvas ? { width: canvas.width, height: canvas.height } : null,
       dpr: devicePixelRatio,
-      track: g.T.DEF.id,
-      car: g.R.savedCar(),
+      hook: g.hook ?? null,
+      // the minimal hook of a page opened without ?qa=1 (#146; the smoke scenario) has no track, car or renderer figures
+      track: g.T?.DEF.id ?? null,
+      car: g.R?.savedCar() ?? null,
       camera: g.view ?? 'follow',   // the baseline has no hook, but starting a session sets follow in every build
       preset: g.preset ?? 'none (build has no presets)',
-      drawCalls: g.info().calls,
-      triangles: g.info().tris,
+      drawCalls: g.info?.().calls ?? null,
+      triangles: g.info?.().tris ?? null,
     };
   });
   return { machine: run.machine, commit: run.commit, revision: run.revision, url: run.url, browser: `${run.browser.browserType().name()} ${run.browser.version()}`, headed: !!run.headed, os: `${os.type()} ${os.release()} ${os.arch()}`, ...e, acceleration: accelerationOf(e.renderer), ...extra };
@@ -3110,6 +3112,54 @@ async function boot(run, c) {
 }
 
 /**
+ * The CI smoke (#145): short and client-only, so it can gate the static deploy. The checked production build (the CI one is
+ * `VITE_ONLINE=1`) is opened as a visitor opens it, WITHOUT `?qa=1`, so only the minimal read-only `__game` (#146) is used and
+ * nothing is driven by script. Same-origin `/api/` requests are answered by a stub that says the service is not ok (no room
+ * server, no VPS): online play then reads as unavailable, quietly, the way the page handles a server that is down. The title
+ * must come up with Start Race on show, and a real click on Start Race must reach the race with the lazily loaded 3D view
+ * (#147) drawing to a canvas, all without a page or console error. CI runs it on the checked build before that build is packaged
+ * (`npm run check:smoke`, .github/workflows/ci.yml); the full matrix stays a manual command.
+ */
+async function smoke(run, c) {
+  // a laptop window, one of the sizes at which #153 keeps Start Race on screen unscrolled (not the 480x270 default here)
+  const context = await run.browser.newContext({ viewport: { width: 1280, height: 800 } });
+  const page = await context.newPage();
+  page.setDefaultTimeout(30000);
+  const errors = [];
+  page.on('pageerror', (e) => errors.push(`pageerror: ${e.message}`));
+  page.on('console', (m) => { if (m.type() === 'error') errors.push(`console: ${m.text()}`); });
+  const api = [];
+  const origin = new URL(run.url).origin;
+  await page.route((u) => u.origin === origin && u.pathname.startsWith('/api/'), (route) => {
+    api.push(new URL(route.request().url()).pathname);
+    return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ ok: false, stub: 'browser-check smoke' }) });
+  });
+  await page.addInitScript(instrument, { seed: SEED });
+  const plain = new URL(run.url); plain.searchParams.delete('qa');
+  const t0 = Date.now();
+  await page.goto(plain.href);
+  await waitFor(page, () => window.__game && window.__game.screen === 'title');
+  const title = await read(page, () => {
+    const start = document.querySelector('.card.title #o-start'), r = start?.getBoundingClientRect();
+    return { hook: window.__game.hook, screen: window.__game.screen, start: !!start, label: start?.textContent.trim() ?? '', onScreen: !!r && r.width > 0 && r.height > 0 && r.top >= 0 && r.bottom <= innerHeight, ms: 0 };
+  });
+  title.ms = Date.now() - t0;
+  c.ok('The production build opened without ?qa=1 reaches the title (minimal __game only)', title.screen === 'title' && ['minimal', 'build'].includes(title.hook), title);
+  c.ok('The title shows Start Race, on screen', title.start && title.label === STRINGS['title.start'] && title.onScreen && await page.locator('#o-start').isVisible(), title);
+  await page.click('#o-start');
+  await waitFor(page, () => window.__game.screen === 'race');
+  await waitFor(page, () => { const cv = document.querySelector('#app > canvas'); return !!cv && cv.width > 0 && cv.height > 0; });
+  await page.waitForTimeout(500);   // a few real frames of the race view, so a render-time error shows up below
+  const raceMs = Date.now() - t0;
+  const race = await read(page, () => ({ screen: window.__game.screen, mode: window.__game.mode, online: window.__game.online, canvas: !!document.querySelector('#app > canvas') }));
+  c.ok('A click on Start Race reaches the race, drawn by the lazily loaded 3D view', race.screen === 'race' && race.canvas, race);
+  // a VITE_ONLINE build asked the stub and says unavailable; a default build never contacts /api (online off)
+  c.ok('Online state is off (default build) or unavailable from the stubbed /api/health, with no room server', (race.online?.state === 'off' && api.length === 0) || (race.online?.state === 'unavailable' && api.includes('/api/health')), { online: race.online, api });
+  c.evidence.smoke = { titleMs: title.ms, raceMs, totalMs: Date.now() - t0 };
+  return { context, page, errors };
+}
+
+/**
  * Debug hook gate (#146). The build opened without `?qa=1` (the production page as a visitor sees it): `window.__game` is the
  * minimal read-only object (screen, online, preset, mode, hook) with no functions, no setters and no driving or network
  * keys, and neither it nor the window property can be changed. Then with `?qa=1`: the full hook, tagged `hook: 'url'`.
@@ -4422,8 +4472,8 @@ async function howto(run, c) {
   return s;
 }
 
-const SCENARIOS = { tracks, race, controlled, routing, practice, championship, touch, responsive, touchrace, reverse, service, lastchance, stall, queue, autosg, autobay, localslot, online, memory, netbanner, racelength, carsetup, debrief, spectate, qahook, boot, howto, titletype, titlelayout };
-const USAGE = 'usage: browser-check.mjs [tracks|race|controlled|routing|practice|championship|touch|responsive|touchrace|reverse|service|lastchance|stall|queue|autosg|autobay|localslot|online|memory|netbanner|racelength|carsetup|debrief|spectate|qahook|boot|howto|titletype|titlelayout ...] | perf | compare <a.json> <b.json>\n'
+const SCENARIOS = { tracks, race, controlled, routing, practice, championship, touch, responsive, touchrace, reverse, service, lastchance, stall, queue, autosg, autobay, localslot, online, memory, netbanner, racelength, carsetup, debrief, spectate, qahook, boot, howto, titletype, titlelayout, smoke };
+const USAGE = 'usage: browser-check.mjs [tracks|race|controlled|routing|practice|championship|touch|responsive|touchrace|reverse|service|lastchance|stall|queue|autosg|autobay|localslot|online|memory|netbanner|racelength|carsetup|debrief|spectate|qahook|boot|howto|titletype|titlelayout|smoke ...] | perf | compare <a.json> <b.json>\n'
   + 'options: --dist <dir> --url <url> --commit <sha> --machine <name> --label <name> --viewport WxH --dpr N --preset low|balanced|high\n'
   + '         --seconds N --headed --channel <chrome|msedge> --out <dir> --max-minutes N';
 
