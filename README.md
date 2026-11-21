@@ -36,6 +36,10 @@ The game tests cover the simulation and graphics preset logic (`src/race.ts`, `s
 
 The build output is plain HTML/JS/CSS; serve the `dist/` folder from any static host.
 
+### Where new code goes (hub-size budget)
+
+`src/main.ts` (the client hub) and `src/race.ts` (the `Race` class) are capped by line ceilings in `test/hubSize.test.ts`, which runs with `npm test` and so in CI (#141). New behaviour belongs in a subsystem module, wired in from the hub, not in the hub's body: client screens and menu HTML in `src/menu/` (created by the first extract), race rules in a module of their own beside `src/race.ts` with `Race` calling into it. A PR that only grows a hub is out of scope; one that moves code out of a hub ratchets that hub's ceiling down to its new line count plus 50 lines of slack, in the same PR.
+
 ## Layout
 
 - `index.html` — the page that boots the game.
