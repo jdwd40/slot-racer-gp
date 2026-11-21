@@ -61,7 +61,7 @@ export async function probeOnline(enabled: boolean, fetchFn: typeof fetch, origi
 
 /** The title screen's notice for an outdated page: the reason and a Reload button (`#o-reload`, wired by main.ts). */
 export function outdatedHtml(): string {
-  return `<div class="row net-outdated"><p class="modes net-off"><small>${t('net.outdated')}</small></p><button class="cta" id="o-reload">${t('net.reload')}</button></div>`;
+  return `<div class="row net-outdated"><p class="modes net-off">${t('net.outdated')}</p><button class="cta" id="o-reload">${t('net.reload')}</button></div>`;
 }
 
 /**
@@ -86,7 +86,7 @@ export function afterRetry(probed: OnlineStatus): OnlineStatus {
 
 /** The title screen's notice for an older game server: temporarily unavailable, and a Retry button (`#o-retry`, wired by main.ts). */
 export function behindHtml(): string {
-  return `<div class="row net-behind"><p class="modes net-off" role="status"><small>${t('net.behind')}</small></p><button class="cta alt" id="o-retry">${t('net.retry')}</button></div>`;
+  return `<div class="row net-behind"><p class="modes net-off" role="status">${t('net.behind')}</p><button class="cta alt" id="o-retry">${t('net.retry')}</button></div>`;
 }
 
 /** How often, and how many times, the title re-probes health while it shows the "temporarily unavailable" notice. */

@@ -251,8 +251,9 @@ function touchGridHtml(cls: string): string {
 }
 
 /** The How to play control on the title and the race menu (#151). */
-function howToButtonHtml(): string {
-  return `<div class="help-link"><button class="linkbtn" id="o-help" aria-haspopup="dialog">${t('how.open')}</button></div>`;
+function howToButtonHtml(wrap = true): string {
+  const b = `<button class="linkbtn" id="o-help" aria-haspopup="dialog">${t('how.open')}</button>`;
+  return wrap ? `<div class="help-link">${b}</div>` : b;
 }
 function bindHowTo(): void {
   overlay.querySelector<HTMLElement>('#o-help')?.addEventListener('click', (e) => openHowTo(e.currentTarget as HTMLElement));
@@ -284,7 +285,7 @@ function openHowTo(opener: HTMLElement | null): void {
   howToOpener = opener;
   howToRestore = true;
   howTo.innerHTML = `<div class="howto-head"><h2 id="howto-h">${t('how.title')}</h2><button type="button" class="howto-x" id="howto-close">${t('how.close')}</button></div>
-    <div class="howto-body" tabindex="0" aria-labelledby="howto-h">${howToHtml(document.body.classList.contains('touch'))}</div>`;
+    <div class="howto-body" role="region" tabindex="0" aria-labelledby="howto-h"><p class="how-goal">${t('how.goal')}</p>${howToHtml(document.body.classList.contains('touch'))}</div>`;
   howTo.querySelector('#howto-close')!.addEventListener('click', closeHowTo);
   releaseDriving();
   if (typeof howTo.showModal === 'function') howTo.showModal(); else howTo.setAttribute('open', '');
@@ -333,7 +334,35 @@ function applyTrack(id: string): void {
 
 /** pre-race lineup: the three rivals and their driving styles */
 function lineupHtml(): string {
-  return `<div class="lineup">${DRIVERS.slice(1).map((d) => `<div class="rival">${colorDot(d.color)}<div><b>${d.name}</b><em>${t(`persona.${d.persona}.name`)}</em><small>${t(`persona.${d.persona}.desc`)}</small></div></div>`).join('')}</div>`;
+  return `<div class="lineup">${DRIVERS.slice(1).map((d, i) => `<div class="rival">${colorDot(d.color)}<div><b>${d.name}</b><em>${t(`persona.${d.persona}.name`)}</em>${tipHtml('rivals', `<span class="blurb">${t(`persona.${d.persona}.desc`)}</span>`, 'span', i)}</div></div>`).join('')}</div>`;
+}
+
+/**
+ * The title's progressive disclosure (#152): a note, the setup description, the rival blurbs, the play-mode notes and the
+ * settings stay folded until their toggle is pressed, one tap each. Which ones are open is kept for this page load, so a title
+ * redrawn by the online status answering (or a touch-mode change) leaves them as the player left them.
+ */
+const titleOpen = new Set<string>();
+/** the title has opened Settings by itself once for the automatic-Low notice */
+let autoNoteShown = false;
+/** The panel (or one of several panels, `part`) a toggle shows; `tag` is the element it is. */
+function tipHtml(key: string, body: string, tag = 'div', part = 0): string {
+  return `<${tag} class="tip" data-tip="${key}" id="o-tip-${key}-${part}"${titleOpen.has(key) ? '' : ' hidden'}>${body}</${tag}>`;
+}
+/** A toggle for the panels `key` (`parts` of them): the round "i" beside a section label, named `label`, or with `link` a text link reading `label`. */
+function tipToggleHtml(key: string, label: string, parts = 1, link = '', id = ''): string {
+  const ctl = Array.from({ length: parts }, (_, i) => `o-tip-${key}-${i}`).join(' ');
+  const attrs = `type="button"${id ? ` id="${id}"` : ''} data-info="${key}" aria-expanded="${titleOpen.has(key)}" aria-controls="${ctl}"`;
+  return link ? `<button class="${link}" ${attrs}>${label}</button>` : `<button class="info" ${attrs} aria-label="${label}"><span aria-hidden="true">i</span></button>`;
+}
+function bindTips(): void {
+  overlay.querySelectorAll<HTMLButtonElement>('[data-info]').forEach((b) => b.addEventListener('click', () => {
+    const key = b.dataset.info!;
+    const on = !titleOpen.has(key);
+    if (on) titleOpen.add(key); else titleOpen.delete(key);
+    b.setAttribute('aria-expanded', String(on));
+    overlay.querySelectorAll<HTMLElement>(`[data-tip="${key}"]`).forEach((p) => { p.hidden = !on; });
+  }));
 }
 
 function carPickerHtml(): string {
@@ -382,11 +411,13 @@ const lengthTag = (id: RaceLengthId): string => t('len.tag', { name: lengthName(
  * The race-length selector (#132): a radio group like the settings ones (bindRadios wires it), each choice showing its name
  * over its lap count so the three stay short enough to sit side by side on a phone. `name` is the data attribute.
  */
-function lengthRadiosHtml(name: string, current: RaceLengthId, ids: readonly RaceLengthId[] = LENGTH_IDS, note = ''): string {
+function lengthRadiosHtml(name: string, current: RaceLengthId, ids: readonly RaceLengthId[] = LENGTH_IDS, note = '', fold = false): string {
   const btns = ids.map((id) => {
     const on = id === current;
-    return `<button class="tab len ${on ? 'sel' : ''}" role="radio" aria-checked="${on}" tabindex="${on ? 0 : -1}" data-${name}="${id}" aria-label="${lengthTag(id)}"><b>${lengthName(id)}</b> <small>${t('len.laps', { n: raceLength(id).laps })}</small></button>`;
+    return `<button class="tab len ${on ? 'sel' : ''}" role="radio" aria-checked="${on}" tabindex="${on ? 0 : -1}" data-${name}="${id}" aria-label="${lengthTag(id)}"><b>${lengthName(id)}</b> ${fold ? `<span class="sub">${t('len.laps', { n: raceLength(id).laps })}</span>` : `<small>${t('len.laps', { n: raceLength(id).laps })}</small>`}</button>`;
   }).join('');
+  // folded (the title, #152): the note sits behind the "i" beside the label, in body-size text
+  if (fold) return `<div class="gfx rlen"><div class="lbl2 has-info"><span id="o-${name}">${t('len.label')}</span>${note ? tipToggleHtml(name, t('info.len')) : ''}</div><div class="tabs" role="radiogroup" aria-labelledby="o-${name}">${btns}</div>${note ? tipHtml(name, `<p class="len-note">${note}</p>`) : ''}</div>`;
   return `<div class="gfx rlen"><div class="lbl2" id="o-${name}">${t('len.label')}</div><div class="tabs" role="radiogroup" aria-labelledby="o-${name}">${btns}</div>${note ? `<small class="len-note">${note}</small>` : ''}</div>`;
 }
 /** Remember a race length picked anywhere (title, online menu, a room the driver hosts) for the next setup. */
@@ -404,12 +435,14 @@ const setupTag = (id: SetupId): string => t('setup.tag', { name: setupName(id) }
  * so a screen reader hears the change). `allowed`: the setups that may be chosen now (a room locked to Balanced disables the
  * rest, which stay visible). `name` is the data attribute.
  */
-function setupRadiosHtml(name: string, current: SetupId, ids: readonly SetupId[] = SETUP_IDS, note = '', allowed: readonly SetupId[] = ids): string {
+function setupRadiosHtml(name: string, current: SetupId, ids: readonly SetupId[] = SETUP_IDS, note = '', allowed: readonly SetupId[] = ids, fold = false): string {
   const btns = ids.map((id) => {
     const on = id === current;
     const off = !allowed.includes(id) && !on;
-    return `<button class="tab len csetup ${on ? 'sel' : ''}" role="radio" aria-checked="${on}" tabindex="${on ? 0 : -1}" data-${name}="${id}" ${off ? 'disabled aria-disabled="true"' : ''} aria-label="${t(`setup.${id}.desc`)}"><b>${setupName(id)}</b> <small>${t(`setup.${id}.short`)}</small></button>`;
+    return `<button class="tab len csetup ${on ? 'sel' : ''}" role="radio" aria-checked="${on}" tabindex="${on ? 0 : -1}" data-${name}="${id}" ${off ? 'disabled aria-disabled="true"' : ''} aria-label="${t(`setup.${id}.desc`)}"><b>${setupName(id)}</b> ${fold ? `<span class="sub">${t(`setup.${id}.short`)}</span>` : `<small>${t(`setup.${id}.short`)}</small>`}</button>`;
   }).join('');
+  // folded (the title, #152): the chosen setup's strength and cost, and the note, behind the "i" (each choice's label still carries its own)
+  if (fold) return `<div class="gfx rsetup" data-for="${name}"><div class="lbl2 has-info"><span id="o-${name}">${t('setup.label')}</span>${tipToggleHtml(name, t('info.setup'))}</div><div class="tabs" role="radiogroup" aria-labelledby="o-${name}">${btns}</div>${tipHtml(name, `<p class="setup-desc" id="o-${name}-desc" aria-live="polite">${t(`setup.${current}.desc`)}</p>${note ? `<p class="len-note">${note}</p>` : ''}`)}</div>`;
   return `<div class="gfx rsetup" data-for="${name}"><div class="lbl2" id="o-${name}">${t('setup.label')}</div><div class="tabs" role="radiogroup" aria-labelledby="o-${name}">${btns}</div><small class="setup-desc" id="o-${name}-desc" aria-live="polite">${t(`setup.${current}.desc`)}</small>${note ? `<small class="len-note">${note}</small>` : ''}</div>`;
 }
 /** Show the chosen setup's strength and cost under its selector. */
@@ -429,7 +462,7 @@ function autoNoteHtml(): string {
   const to = autoQuality.undoTarget(preset);
   if (!to) return '';
   const name = t(PRESETS.find((p) => p.id === to)!.label);
-  return `<div class="gfx-auto" id="o-gfx-auto"><small>${t('gfx.autoLow')}</small> <button class="tab" id="o-gfx-undo">${t('gfx.autoUndo', { preset: name })}</button></div>`;
+  return `<div class="gfx-auto" id="o-gfx-auto"><span class="auto-note">${t('gfx.autoLow')}</span> <button class="tab" id="o-gfx-undo">${t('gfx.autoUndo', { preset: name })}</button></div>`;
 }
 function settingsHtml(): string {
   return radiosHtml('preset', 'gfx.label', PRESETS, preset, autoNoteHtml()) + radiosHtml('touch', 'touch.label', TOUCH_OPTS, touchMode);
@@ -459,44 +492,51 @@ function showTitle(): void {
   camMode = 'full';
   mode = 'race';
   overlay.className = 'overlay show';
-  const cards = T.TRACKS.map((d) => `<button class="track ${d.id === T.DEF.id ? 'sel' : ''}" data-id="${d.id}">
+  // each card is the map, name and lap length; the chosen circuit's description is written once under the row (#152)
+  const cards = T.TRACKS.map((d) => `<button class="track ${d.id === T.DEF.id ? 'sel' : ''}" data-id="${d.id}" aria-describedby="o-track-desc">
       ${trackSvg(d)}
       <b>${t(`track.${d.id}.name`)}</b>
-      <small>${t(`track.${d.id}.desc`)}</small>
       <em>${t('title.len', { n: Math.round(T.layout(d, 4).L) })}</em>
     </button>`).join('');
   const nRounds = R.CHAMP_TRACKS.length;
   let champBtns = `<button class="cta alt" id="o-champ">${t('title.champ')}</button>`;
   // a championship in progress keeps its own length (#132), so the button says which one it is
-  if (champ && !R.champDone(champ)) champBtns = `<button class="cta alt" id="o-champ-cont">${t('title.champContinue', { n: champ.rounds.length + 1, m: nRounds })} <small>${lengthTag(champ.length)} · ${setupTag(champ.setup)}</small></button><button class="cta alt small" id="o-champ">${t('title.champNew')}</button>`;
+  if (champ && !R.champDone(champ)) champBtns = `<button class="cta alt" id="o-champ-cont">${t('title.champContinue', { n: champ.rounds.length + 1, m: nRounds })} <span class="sub">${lengthTag(champ.length)} · ${setupTag(champ.setup)}</span></button><button class="cta alt small" id="o-champ">${t('title.champNew')}</button>`;
   else if (champ) champBtns = `<button class="cta alt" id="o-champ-view">${t('title.champView')}</button><button class="cta alt small" id="o-champ">${t('title.champNew')}</button>`;
+  // the automatic switch to Low (#66) says so in the graphics group: Settings opens by itself the first time that notice is due
+  if (autoQuality.undoTarget(preset) && !autoNoteShown) { autoNoteShown = true; titleOpen.add('settings'); }
+  // #152: body copy is 16 px and every control 44 px; the notes, the setup description, the rival blurbs, the play-mode notes
+  // and the graphics / touch settings are folded behind a toggle each (one tap), still all on the card
   overlay.innerHTML = `<div class="card title">
     <div class="logo">${t('title.name')}</div>
     <div class="tag">${t('title.tag')}</div>
-    <p id="o-goal">${t('title.goal', { n: raceLength(raceLen).laps })}</p>
+    <p id="o-goal">${t('title.goalShort', { n: raceLength(raceLen).laps })}</p>
     <div class="setup">
-      ${lengthRadiosHtml('rlen', raceLen, LENGTH_IDS, t('len.note'))}
-      ${setupRadiosHtml('rsetup', carSetupId, SETUP_IDS, t('setup.note'))}
+      ${lengthRadiosHtml('rlen', raceLen, LENGTH_IDS, t('len.note'), true)}
+      ${setupRadiosHtml('rsetup', carSetupId, SETUP_IDS, t('setup.note'), SETUP_IDS, true)}
       <label class="ini"><span class="lbl2">${t('title.initials')}</span><input id="o-ini" maxlength="${R.MAX_INITIALS}" placeholder="${R.ANON}" value="${R.savedInitialsRaw().replace(/"/g, '')}" autocomplete="off" autocapitalize="characters" enterkeyhint="done" spellcheck="false"></label>
       <div><span class="lbl2">${t('title.car')}</span>${carPickerHtml()}</div>
-      ${settingsHtml()}
     </div>
-    <div class="lbl2">${t('title.rivals')}</div>
+    <div class="lbl2 has-info"><span>${t('title.rivals')}</span>${tipToggleHtml('rivals', t('info.rivals'), DRIVERS.length - 1)}</div>
     ${lineupHtml()}
     <div class="lbl2">${t('title.track')}</div>
     <div class="tracks">${cards}</div>
-    ${howToButtonHtml()}
+    <p class="track-desc" id="o-track-desc">${t(`track.${T.DEF.id}.desc`)}</p>
+    <div class="help-link">${howToButtonHtml(false)}${tipToggleHtml('settings', t('title.settings'), 1, 'linkbtn', 'o-settings')}</div>
+    ${tipHtml('settings', settingsHtml())}
     <div class="row wrap">
       <button class="cta" id="o-start">${t('title.start')}</button>
       <button class="cta alt" id="o-practice">${t('title.practice')}</button>
       ${champBtns}
       <button class="cta alt" id="o-boards">${t('title.boards')}</button>
     </div>
-    <p class="modes"><small>${t('net.localNote')}</small></p>
+    <div class="help-link">${tipToggleHtml('modes', t('title.modesInfo'), 1, 'linkbtn', 'o-modes')}</div>
+    ${tipHtml('modes', `<p class="modes">${t('net.localNote')}</p>${online.state === 'available' ? `<p class="modes">${t('net.onlineNote')}</p>` : ''}`)}
     ${onlineEntryHtml()}
   </div>`;
   syncRecheck();
   bindHowTo();
+  bindTips();
   overlay.querySelector('#o-online')?.addEventListener('click', () => { sfx.init(); showOnline(); });
   overlay.querySelector('#o-reload')?.addEventListener('click', () => location.reload());
   overlay.querySelector<HTMLButtonElement>('#o-retry')?.addEventListener('click', (e) => {
@@ -510,6 +550,7 @@ function showTitle(): void {
     sfx.init();
     applyTrack(b.dataset.id!);
     overlay.querySelectorAll('.track').forEach((x) => x.classList.toggle('sel', x === b));
+    overlay.querySelector('#o-track-desc')!.textContent = t(`track.${T.DEF.id}.desc`);
   }));
   overlay.querySelectorAll<HTMLElement>('.car').forEach((b) => b.addEventListener('click', () => {
     carId = b.dataset.car!; R.saveCar(carId);
@@ -519,7 +560,7 @@ function showTitle(): void {
   bindSettings();
   bindRadios('rlen', (id) => {
     chooseLength(id);
-    overlay.querySelector('#o-goal')!.textContent = t('title.goal', { n: raceLength(raceLen).laps });
+    overlay.querySelector('#o-goal')!.textContent = t('title.goalShort', { n: raceLength(raceLen).laps });
     setRace(newRace());
   });
   // the setup is the next race's (#133): the grid shown behind the menu is rebuilt with it, nothing running is changed
@@ -1082,9 +1123,10 @@ const hexc = (c: number): string => '#' + c.toString(16).padStart(6, '0');
 function onlineEntryHtml(): string {
   if (online.state === 'available') {
     const seat = loadSeat(seatStore());
-    return `<div class="row net-entry"><button class="cta" id="o-online">${t('net.online')}</button>${seat ? `<button class="cta alt" id="o-rejoin">${t('net.rejoin', { code: esc(seat.code) })}</button>` : ''}${accountEntryHtml()}</div><p class="modes"><small>${t('net.onlineNote')}</small></p>`;
+    // its note is folded in with the local one, behind "Local or online?" on the title (#152)
+    return `<div class="row net-entry"><button class="cta" id="o-online">${t('net.online')}</button>${seat ? `<button class="cta alt" id="o-rejoin">${t('net.rejoin', { code: esc(seat.code) })}</button>` : ''}${accountEntryHtml()}</div>`;
   }
-  if (online.state === 'unavailable') return `<p class="modes net-off"><small>${t('net.unavailable')}</small></p>`;
+  if (online.state === 'unavailable') return `<p class="modes net-off">${t('net.unavailable')}</p>`;
   if (online.state === 'outdated') return outdatedHtml();
   if (online.state === 'behind') return behindHtml();
   return '';

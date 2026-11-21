@@ -1,6 +1,6 @@
 # Touch controls
 
-The game can be played without a keyboard. **Touch controls: Auto / On / Off** is on the title and pause screens. Phone and tablet layouts, the More tray and viewport changes are described in [responsive layouts](responsive.md).
+The game can be played without a keyboard. **Touch controls: Auto / On / Off** is on the title (behind Settings, #152) and pause screens. Phone and tablet layouts, the More tray and viewport changes are described in [responsive layouts](responsive.md).
 
 ## Setting
 
