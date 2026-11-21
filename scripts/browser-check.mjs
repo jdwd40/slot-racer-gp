@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Bounded browser validation of the real game. Procedure and results: docs/validation.md.
 //
-//   node scripts/browser-check.mjs [tracks race controlled routing practice championship touch responsive touchrace reverse service lastchance stall queue autosg autobay localslot online memory netbanner racelength carsetup debrief spectate qahook boot howto titletype]   functional checks (default: all)
+//   node scripts/browser-check.mjs [tracks race controlled routing practice championship touch responsive touchrace reverse service lastchance stall queue autosg autobay localslot online memory netbanner racelength carsetup debrief spectate qahook boot howto titletype titlelayout]   functional checks (default: all)
 //   node scripts/browser-check.mjs perf --label updated --machine "<name>"          frame-time capture
 //   node scripts/browser-check.mjs compare <baseline.json> <updated.json>           like-for-like comparison
 //
@@ -1799,6 +1799,8 @@ function measureMenu() {
   const box = document.getElementById('app').getBoundingClientRect();
   const out = { pageX: document.documentElement.scrollWidth - document.documentElement.clientWidth, cardX: card.scrollWidth - card.clientWidth, inside: r.x >= 0 && r.y >= 0 && r.right <= box.width + 0.5 && r.bottom <= box.height + 0.5, blocked: [], small: [], tableScroll: [...card.querySelectorAll('.tscroll')].map((t) => t.scrollWidth - t.clientWidth) };
   card.scrollTop = 0;
+  // a scrolling strip (the title's circuit picker, #153) is put back where it was once every control has been brought into view
+  const strips = [...card.querySelectorAll('.tracks')].map((e) => [e, e.scrollLeft]);
   const row = card.querySelector(':scope > .row');
   out.actionsPinned = !!row && row.getBoundingClientRect().bottom <= r.bottom + 1;
   for (const e of card.querySelectorAll('button, input')) {
@@ -1809,6 +1811,7 @@ function measureMenu() {
     if (top !== e && !e.contains(top)) out.blocked.push(e.id || e.dataset.id || e.dataset.car || e.textContent.trim().slice(0, 16));
     if (b.height < 44 || b.width < 44) out.small.push(`${e.id || e.textContent.trim().slice(0, 12)} ${Math.round(b.width)}x${Math.round(b.height)}`);
   }
+  for (const [e, x] of strips) e.scrollLeft = x;
   card.scrollTop = 0;
   return out;
 }
@@ -3113,7 +3116,7 @@ async function boot(run, c) {
  * A dev server or a VITE_QA build exposes the full hook without the flag, so the first half is unavailable there.
  */
 async function qahook(run, c) {
-  const FULL = ['advance', 'startSession', 'showTitle', 'qaNetLobby', 'qaNetResult', 'netDrop', 'setLocalSlot', 'setView', 'zoom', 'race', 'net', 'input', 'stepper'];
+  const FULL = ['advance', 'startSession', 'showTitle', 'qaNetLobby', 'qaNetResult', 'qaOnline', 'netDrop', 'setLocalSlot', 'setView', 'zoom', 'race', 'net', 'input', 'stepper'];
   const context = await run.browser.newContext({ viewport: run.viewport });
   const page = await context.newPage();
   page.setDefaultTimeout(30000);
@@ -3977,10 +3980,11 @@ const TITLE_TIPS = [['rlen', ['len.note']], ['rsetup', ['setup.balanced.desc', '
  * #152: the title and How to play at phone, tablet and desktop sizes, with touch and with a mouse. Body copy 16 px or more
  * (12 px uppercase labels), no long text in <small>, every control 44x44 px or more (on a desktop too), the notes, setup
  * description, rival blurbs, play-mode notes and settings folded on first load and each one tap from open, settings still
- * working, and Start Race on screen unscrolled on the phones.
+ * working, and Start Race on screen unscrolled at every size (#153).
  */
 async function titletype(run, c) {
-  const VIEWS = [[360, 740], [390, 844], [768, 1024], [1280, 800], [1366, 768]];
+  // #153: a phone on its side (740x360) too, and Start Race on screen unscrolled at every size
+  const VIEWS = [[360, 740], [390, 844], [740, 360], [768, 1024], [1280, 800], [1366, 768]];
   const typeOk = (m) => m.under === 0 && m.small.length === 0 && m.labelSmall.length === 0 && m.longSmall.length === 0 && m.tiny.length === 0 && m.pageX <= 0;
   const brief = (m) => ({ under: m.under, total: m.total, sizes: m.sizes, small: m.small.slice(0, 8), labelSmall: m.labelSmall.slice(0, 4), longSmall: m.longSmall.slice(0, 4), targets: m.targets, tiny: m.tiny, start: m.start });
   const folded = TITLE_TIPS.flatMap(([, ids]) => ids).filter((id) => !['gfx.label', 'touch.label'].includes(id)).map((id) => STRINGS[id]);
@@ -4009,7 +4013,7 @@ async function titletype(run, c) {
       const settingsShown = await page.locator('[data-preset], [data-touch]').evaluateAll((es) => es.filter((e) => e.getClientRects().length).length);
       c.ok(`${tag}: title body text 16 px or more (labels 12 px uppercase), no long text in <small>, every control 44x44 px or more`, typeOk(m0), brief(m0));
       c.ok(`${tag}: length note, setup description and note, rival blurbs and play-mode notes are folded; Graphics and Touch are behind Settings`, onCard.length === 0 && settingsShown === 0, { onCard, settingsShown });
-      if (w <= 390) c.ok(`${tag}: Start Race is fully on screen, and on top, with the card unscrolled`, !!m0.start && m0.start.inView && m0.start.onTop === 'o-start', m0.start);
+      c.ok(`${tag}: Start Race is fully on screen, and on top, with the card unscrolled`, !!m0.start && m0.start.inView && m0.start.onTop === 'o-start', m0.start);
       if (touch === w < 1000) await page.screenshot({ path: path.join(run.out, `titletype-${w}x${h}.png`) });
       // each toggle: one tap or click opens its panel with its text, and says so
       const opened = [];
@@ -4049,6 +4053,196 @@ async function titletype(run, c) {
     c.ok(`${kind}: Settings chooses Touch Off and Balanced graphics, folds again, and both persist across a reload (which starts with every fold closed)`, folds === 0 && kept.touch === 'off' && kept.preset === 'balanced' && !kept.body && kept.open === 0, { folds, kept });
   }
   return last;
+}
+
+/** Geometry of the title's actions (#153), with the card unscrolled: where each is, whether it is wholly on screen and inside the
+ *  card's visible box, what a finger at its centre lands on, and which of them (or the race options) overlap. */
+function measureTitleLayout() {
+  const card = document.querySelector('.overlay.show .card.title');
+  card.scrollTop = 0;
+  const cr = card.getBoundingClientRect();
+  const rect = (e) => { const r = e.getBoundingClientRect(); return { x: Math.round(r.x), y: Math.round(r.y), r: Math.round(r.right), b: Math.round(r.bottom), w: Math.round(r.width), h: Math.round(r.height) }; };
+  const hit = (a, b) => a.x < b.r - 0.5 && b.x < a.r - 0.5 && a.y < b.b - 0.5 && b.y < a.b - 0.5;
+  const ACTIONS = ['o-start', 'o-practice', 'o-champ', 'o-champ-cont', 'o-champ-view', 'o-boards', 'o-online', 'o-account', 'o-help', 'o-settings', 'o-modes'];
+  const acts = {};
+  for (const id of ACTIONS) {
+    const e = document.getElementById(id);
+    if (!e || !e.getClientRects().length) continue;
+    const r = rect(e);
+    const top = document.elementFromPoint(r.x + r.w / 2, r.y + r.h / 2)?.closest('button')?.id ?? null;
+    acts[id] = { ...r, onScreen: r.x >= 0 && r.y >= 0 && r.r <= innerWidth + 0.5 && r.b <= innerHeight + 0.5 && r.y >= cr.y - 0.5 && r.b <= cr.y + card.clientHeight + 0.5, top };
+  }
+  const opts = [...card.querySelectorAll('[data-rlen], [data-rsetup], .car, #o-ini')].filter((e) => e.getClientRects().length).map((e) => ({ id: e.id || e.dataset.rlen || e.dataset.rsetup || e.dataset.car, ...rect(e) }));
+  const overlaps = [];
+  const ids = Object.keys(acts);
+  for (const a of ids) {
+    for (const b of ids) if (a < b && hit(acts[a], acts[b])) overlaps.push(`${a}/${b}`);
+    for (const o of opts) if (hit(acts[a], o)) overlaps.push(`${a}/${o.id}`);
+  }
+  // every action shows its whole label (a squeezed button cuts its text off)
+  const clipped = ids.filter((id) => { const e = document.getElementById(id); return e.scrollWidth > e.clientWidth + 1; });
+  // nothing on the title sticks or floats over the rest (#153: two sticky rows used to share the bottom edge)
+  const pinned = [...card.querySelectorAll('*')].filter((e) => ['sticky', 'fixed'].includes(getComputedStyle(e).position)).map((e) => e.id || e.className);
+  // the circuit picker: which cards show inside the strip, the arrows, dots and description
+  const strip = card.querySelector('.tracks'), sr = strip.getBoundingClientRect();
+  const tracks = [...strip.querySelectorAll('.track')].map((e) => { const r = e.getBoundingClientRect(); return { id: e.dataset.id, sel: e.classList.contains('sel'), pressed: e.getAttribute('aria-pressed'), y: Math.round(r.y), shown: r.right > sr.left + 1 && r.left < sr.right - 1, whole: r.left >= sr.left - 1 && r.right <= sr.right + 1, w: Math.round(r.width) }; });
+  const vis = (q) => { const e = card.querySelector(q); return !!e && e.getClientRects().length > 0; };
+  const nav = ['#o-track-prev', '#o-track-next'].map((q) => { const e = card.querySelector(q); return e && e.getClientRects().length ? rect(e) : null; });
+  return { card: { scroll: card.scrollHeight, client: card.clientHeight, w: Math.round(cr.width) }, acts, overlaps, clipped, pinned, tracks, shown: tracks.filter((t) => t.shown).map((t) => t.id), nav, dots: card.querySelectorAll('.dots i').length, dotSel: card.querySelector('.dots i.sel')?.dataset.dot ?? null, desc: vis('#o-track-desc'), descText: card.querySelector('#o-track-desc')?.textContent ?? '', track: window.__game.T.DEF.id, pageX: document.documentElement.scrollWidth - document.documentElement.clientWidth };
+}
+
+/** The title viewports #153 names, and the other short landscape phones where the two sticky rows used to overlap. */
+const TITLE_VIEWS = [[360, 740], [390, 844], [740, 360], [844, 390], [768, 1024], [1280, 800], [1366, 768], [1920, 1080], [360, 640], [640, 360], [667, 375], [568, 320], [915, 412], [1024, 768]];
+/** a server with accounts, as the title sees one: Online and Sign in among its links (set through __game.qaOnline, no socket) */
+const QA_ONLINE = { state: 'available', version: 'qa', wsUrl: 'ws://127.0.0.1:9/ws', accounts: true, lengths: ['sprint', 'standard', 'endurance'], setups: ['balanced', 'speed', 'grip'] };
+
+/**
+ * #153: the mobile-first title. At every size in TITLE_VIEWS, by touch and by mouse, with a championship in progress (Continue
+ * and New) and the online links shown: Start Race wholly on screen and on top with the card unscrolled; on a phone on its side
+ * Start, Practice, Championship, Leaderboards, Online and Sign in each on top where a finger lands and overlapping neither each
+ * other nor the race options; nothing on the title sticky. The circuit picker: one circuit at a time on a phone with Previous /
+ * Next, dots and the description on a tap of the card, five in one row with the description on a desktop; every circuit still
+ * selectable; a swipe chooses. Other menu cards keep at most one sticky action row. The automatic-Low notice that opens Settings
+ * by itself is on screen at 1280x800 with Start Race. Screenshots of every size.
+ */
+async function titlelayout(run, c) {
+  const round = (track) => ({ track, order: [0, 1, 2, 3].map((idx, i) => ({ idx, dnf: false, time: 300 + i })) });
+  const champ = JSON.stringify({ v: 1, car: CAR, initials: 'QA', rounds: [round('circuit-1')], startedAt: 1 });
+  const ESSENTIAL = ['o-start', 'o-practice', 'o-champ-cont', 'o-champ', 'o-boards', 'o-online', 'o-account'];
+  c.evidence.titleLayout = {};
+  let last = null;
+  for (const touch of [true, false]) {
+    if (last) { await last.context.close(); c.ok(`${last.kind}: no page or console errors`, last.errors.length === 0, last.errors.slice(0, 5)); }
+    const kind = touch ? 'Touch' : 'Mouse';
+    const s = await open(run, { viewport: { width: 360, height: 740 }, dpr: 1, device: touch ? PHONE : {}, fixtures: { 'srgp.track': TRACK, 'srgp.champ': champ } });
+    last = { ...s, kind };
+    const { page } = s;
+    await read(page, (st) => window.__game.qaOnline(st), QA_ONLINE);
+    c.ok(`${kind}: the page is in ${touch ? 'touch' : 'mouse'} mode, coarse pointer ${touch}, with the online links and a championship in progress`, await read(page, (t) => document.body.classList.contains('touch') === t && matchMedia('(any-pointer: coarse)').matches === t && !!document.getElementById('o-online') && !!document.getElementById('o-account') && !!document.getElementById('o-champ-cont'), touch));
+    for (const [w, h] of TITLE_VIEWS) {
+      const tag = `${kind} ${w}x${h}`;
+      await page.setViewportSize({ width: w, height: h });
+      await frames(page, 2);
+      await sleep(150);
+      const m = await read(page, measureTitleLayout);
+      c.evidence.titleLayout[`${w}x${h}-${touch ? 'touch' : 'mouse'}`] = { card: m.card, start: m.acts['o-start'], acts: m.acts };
+      const st = m.acts['o-start'];
+      const short = h <= 500 && w > h;
+      const phone = w <= 700 || h <= 500;
+      if (!(w === 568 && h === 320)) c.ok(`${tag}: Start Race wholly on screen and on top with the card unscrolled`, !!st && st.onScreen && st.top === 'o-start', { start: st, card: m.card });
+      c.ok(`${tag}: nothing on the title is sticky or fixed, no sideways page, no action overlaps another action or a race option, and none cuts its label off`, m.pinned.length === 0 && m.pageX <= 0 && m.overlaps.length === 0 && m.clipped.length === 0, { pinned: m.pinned, overlaps: m.overlaps, clipped: m.clipped, pageX: m.pageX });
+      if (short) {
+        // a phone on its side: every essential action on top where a finger lands; those not on screen unscrolled are brought into view first
+        const res = await read(page, (ids) => {
+          const card = document.querySelector('.overlay.show .card.title');
+          return ids.map((id) => {
+            card.scrollTop = 0;
+            const e = document.getElementById(id);
+            let b = e.getBoundingClientRect();
+            const cr = card.getBoundingClientRect();
+            const unscrolled = b.y >= cr.y - 0.5 && b.bottom <= cr.y + card.clientHeight + 0.5 && b.bottom <= innerHeight;
+            if (!unscrolled) { e.scrollIntoView({ block: 'nearest' }); b = e.getBoundingClientRect(); }
+            const top = document.elementFromPoint(b.x + b.width / 2, b.y + b.height / 2)?.closest('button')?.id ?? null;
+            card.scrollTop = 0;
+            return { id, unscrolled, top, w: Math.round(b.width), h: Math.round(b.height) };
+          });
+        }, ESSENTIAL);
+        const bad = res.filter((r) => r.top !== r.id || r.w < 44 || r.h < 44);
+        c.ok(`${tag}: Start, Practice, Championship (Continue, New), Leaderboards, Online and Sign in each on top where a finger lands, 44 px or more`, bad.length === 0, { bad, unscrolled: res.filter((r) => r.unscrolled).map((r) => r.id) });
+        if (w >= 740) c.ok(`${tag}: Start, Practice, Continue, New, Leaderboards, Online and Sign in are all on screen with the card unscrolled`, res.every((r) => r.unscrolled), res.filter((r) => !r.unscrolled).map((r) => r.id));
+      }
+      // the circuit picker
+      if (phone) {
+        c.ok(`${tag}: the picker shows one circuit (the chosen one, whole) with Previous / Next 44 px, five dots, and no description until a tap`, m.shown.length === 1 && m.shown[0] === m.track && m.tracks.find((t) => t.sel).whole && m.nav.every((n) => n && n.w >= 44 && n.h >= 44) && m.dots === 5 && m.dotSel === m.track && !m.desc, { shown: m.shown, track: m.track, nav: m.nav, dots: m.dots, dotSel: m.dotSel, desc: m.desc });
+      } else {
+        const ys = new Set(m.tracks.map((t) => t.y));
+        c.ok(`${tag}: the five circuits in one row, all whole, no Previous / Next, and the chosen one's description once under them`, m.shown.length === 5 && m.tracks.every((t) => t.whole) && ys.size === 1 && m.nav.every((n) => n === null) && m.desc && m.descText === STRINGS[`track.${m.track}.desc`], { shown: m.shown, ys: [...ys], nav: m.nav, desc: m.desc });
+      }
+      await page.screenshot({ path: path.join(run.out, `titlelayout-${w}x${h}-${touch ? 'touch' : 'mouse'}.png`) });
+    }
+
+    // the picker on a phone, by real taps / clicks: the description on a tap of the card, Next / Previous, each circuit chosen
+    await page.setViewportSize({ width: 390, height: 844 });
+    await frames(page, 2);
+    const act = (sel) => (touch ? page.locator(sel).tap() : page.locator(sel).click());
+    const pick = () => read(page, measureTitleLayout);
+    await act(`.track[data-id="${TRACK}"]`);
+    const d1 = await pick();
+    await act(`.track[data-id="${TRACK}"]`);
+    const d2 = await pick();
+    c.ok(`${kind} 390x844: a ${touch ? 'tap' : 'click'} on the chosen circuit shows its description, another hides it, and the circuit stays chosen`, d1.desc && d1.descText === STRINGS[`track.${TRACK}.desc`] && !d2.desc && d2.track === TRACK, { d1: d1.desc, d2: d2.desc, track: d2.track });
+    const ids = await read(page, () => window.__game.T.TRACKS.map((t) => t.id));
+    // the strip slides to the circuit chosen (a step past either end jumps): wait until it alone shows
+    const settled = () => waitFor(page, () => { const s = document.getElementById('o-tracks'), r = s.getBoundingClientRect(); const on = [...s.querySelectorAll('.track')].filter((e) => { const b = e.getBoundingClientRect(); return b.right > r.left + 1 && b.left < r.right - 1; }); return on.length === 1 && on[0].classList.contains('sel'); }, undefined, 5000).catch(() => null);
+    await act('#o-track-next');
+    await settled();
+    const n1 = await pick();
+    await act('#o-track-prev');
+    await settled();
+    await act('#o-track-prev');
+    await settled();
+    const n2 = await pick();
+    const i0 = ids.indexOf(TRACK);
+    c.ok(`${kind} 390x844: Next chooses the next circuit and brings it to the middle; Previous twice goes back past the first (it wraps)`, n1.track === ids[(i0 + 1) % ids.length] && n1.shown.join() === n1.track && n1.dotSel === n1.track && n2.track === ids[(i0 - 1 + ids.length) % ids.length] && n2.shown.join() === n2.track, { n1: [n1.track, n1.shown], n2: [n2.track, n2.shown], ids });
+    const chosen = [];
+    for (const id of ids) { await act(`.track[data-id="${id}"]`); await sleep(300); const p = await pick(); chosen.push({ id, got: p.track, shown: p.shown.join(), pressed: p.tracks.find((t) => t.id === id).pressed }); }
+    c.ok(`${kind} 390x844: every circuit can be chosen from the strip, and is then the one shown`, chosen.every((x) => x.got === x.id && x.shown === x.id && x.pressed === 'true'), chosen);
+    if (touch) {
+      // a swipe right to left on the strip comes to rest on the next circuit and chooses it
+      await act(`.track[data-id="${TRACK}"]`);
+      await act(`.track[data-id="${TRACK}"]`);   // (the second tap folds the description away again)
+      await sleep(300);
+      const cdp = await s.context.newCDPSession(page);
+      const f = new Fingers(page, cdp);
+      const box = await page.locator('#o-tracks').boundingBox();
+      const y = box.y + box.height / 2;
+      const id = await f.put({ x: box.x + box.width * 0.85, y });
+      for (let k = 1; k <= 8; k++) { await f.slide(id, box.x + box.width * (0.85 - 0.08 * k), y); await sleep(16); }
+      await f.lift(id);
+      await waitFor(page, (want) => window.__game.T.DEF.id === want, ids[(i0 + 1) % ids.length], 5000).catch(() => null);
+      await sleep(400);
+      const sw = await pick();
+      c.ok('Touch 390x844: a swipe to the left chooses the next circuit, which comes to rest whole in the strip', sw.track === ids[(i0 + 1) % ids.length] && sw.shown.join() === sw.track && sw.tracks.find((t) => t.sel).whole, { track: sw.track, shown: sw.shown });
+    }
+    // back to the fixture circuit, and the existing title controls still do what they did
+    await act(`.track[data-id="${TRACK}"]`);
+    await act(`.car[data-car="${CAR}"]`);
+    const carNow = await read(page, () => ({ name: document.getElementById('o-car-name').textContent, pressed: document.querySelector('.car.sel')?.getAttribute('aria-pressed'), car: window.__game.R.savedCar() }));
+    c.ok(`${kind}: choosing a car marks it and names it above the colours`, carNow.car === CAR && carNow.pressed === 'true' && carNow.name.length > 0, carNow);
+  }
+  await last.context.close();
+  c.ok(`${last.kind}: no page or console errors`, last.errors.length === 0, last.errors.slice(0, 5));
+
+  // the automatic switch to Low opens Settings by itself: at 1280x800 its note and Undo are on screen with Start Race (#152 review)
+  const d = await open(run, { viewport: { width: 1280, height: 800 }, fixtures: { 'srgp.track': TRACK } });
+  {
+    const { page } = d;
+    await read(page, () => { localStorage.setItem('srgp.gfxAuto', 'switched:balanced'); localStorage.setItem('srgp.graphics', 'low'); });
+    await page.reload();
+    await page.waitForFunction(booted);
+    await frames(page, 2);
+    const a = await read(page, () => {
+      const on = (id) => { const e = document.getElementById(id); if (!e) return null; const b = e.getBoundingClientRect(); return { y: Math.round(b.y), b: Math.round(b.bottom), inView: b.y >= 0 && b.bottom <= innerHeight, top: document.elementFromPoint(b.x + b.width / 2, b.y + b.height / 2)?.closest('button')?.id ?? null }; };
+      return { open: document.getElementById('o-settings')?.getAttribute('aria-expanded'), undo: on('o-gfx-undo'), start: on('o-start'), note: document.querySelector('.auto-note')?.getClientRects().length > 0 };
+    });
+    await page.screenshot({ path: path.join(run.out, 'titlelayout-1280x800-autolow.png') });
+    c.ok('1280x800: the automatic-Low notice opens Settings, and its note, Undo and Start Race are all on screen and on top', a.open === 'true' && a.note && a.undo?.inView && a.undo.top === 'o-gfx-undo' && a.start?.inView && a.start.top === 'o-start', a);
+    // the other menu cards keep a single sticky action row at most, on a phone on its side (the lobby has two rows)
+    const room = { id: 'qa-room', code: 'S8AJ37', mode: 'multiplayer', state: 'lobby', rev: 1, hostId: 'p1', settings: { track: TRACK, aiFill: false }, championship: null, participants: [{ id: 'p1', name: 'Host', slot: 0, num: 1, bay: 0, livery: 'yellow', color: 0xffd23f, liveryRequested: null, ready: false, connected: true, host: true, guest: true, joinOrder: 1, left: false }], ai: [], raceId: null, maxHumans: 4, minHumans: 2, graceS: 20 };
+    await page.setViewportSize({ width: 740, height: 360 });
+    await read(page, (r) => window.__game.qaNetLobby(r, 'p1', 'connected'), room);
+    await waitFor(page, () => window.__game.screen === 'lobby');
+    await frames(page, 2);
+    const lob = await read(page, () => {
+      const card = document.querySelector('.overlay.show .card');
+      const rows = [...card.querySelectorAll(':scope > .row')].map((e) => getComputedStyle(e).position);
+      const res = ['l-copy', 'l-start', 'l-leave'].map((id) => { const e = document.getElementById(id); e.scrollIntoView({ block: 'nearest' }); const b = e.getBoundingClientRect(); return { id, top: document.elementFromPoint(b.x + b.width / 2, b.y + b.height / 2)?.closest('button')?.id ?? null }; });
+      card.scrollTop = 0;
+      return { rows, res };
+    });
+    c.ok('740x360 lobby: one sticky action row (the last), and Copy code, Start and Leave each on top where a finger lands', lob.rows.filter((p) => p === 'sticky').length === 1 && lob.rows[lob.rows.length - 1] === 'sticky' && lob.res.every((r) => r.top === r.id), lob);
+  }
+  return d;
 }
 
 function measureHowTo(facts) {
@@ -4228,8 +4422,8 @@ async function howto(run, c) {
   return s;
 }
 
-const SCENARIOS = { tracks, race, controlled, routing, practice, championship, touch, responsive, touchrace, reverse, service, lastchance, stall, queue, autosg, autobay, localslot, online, memory, netbanner, racelength, carsetup, debrief, spectate, qahook, boot, howto, titletype };
-const USAGE = 'usage: browser-check.mjs [tracks|race|controlled|routing|practice|championship|touch|responsive|touchrace|reverse|service|lastchance|stall|queue|autosg|autobay|localslot|online|memory|netbanner|racelength|carsetup|debrief|spectate|qahook|boot|howto|titletype ...] | perf | compare <a.json> <b.json>\n'
+const SCENARIOS = { tracks, race, controlled, routing, practice, championship, touch, responsive, touchrace, reverse, service, lastchance, stall, queue, autosg, autobay, localslot, online, memory, netbanner, racelength, carsetup, debrief, spectate, qahook, boot, howto, titletype, titlelayout };
+const USAGE = 'usage: browser-check.mjs [tracks|race|controlled|routing|practice|championship|touch|responsive|touchrace|reverse|service|lastchance|stall|queue|autosg|autobay|localslot|online|memory|netbanner|racelength|carsetup|debrief|spectate|qahook|boot|howto|titletype|titlelayout ...] | perf | compare <a.json> <b.json>\n'
   + 'options: --dist <dir> --url <url> --commit <sha> --machine <name> --label <name> --viewport WxH --dpr N --preset low|balanced|high\n'
   + '         --seconds N --headed --channel <chrome|msedge> --out <dir> --max-minutes N';
 

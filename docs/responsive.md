@@ -32,7 +32,8 @@ HUD buttons (More, zoom, sound, ghost) act on `touchstart` for a finger and on `
 ## Menus
 
 - Cards are no wider than the screen. Their minimum widths, and the 460 px leaderboard and championship table minimums, no longer apply on narrow screens. Every table sits in its own horizontal scroller.
-- On compact layouts the card's action row (Start, Resume, Menu, Again…) is pinned to the bottom of the card while the rest scrolls. Track cards form a grid, rival descriptions are dropped and spacing is tighter.
+- On compact layouts a card's last action row (Resume, Menu, Again…) is pinned to the bottom of the card while the rest scrolls. Only the last one: two pinned rows shared the bottom edge and the later covered the earlier (#153). Spacing is tighter.
+- The title has no pinned row (#153). It is laid out mobile first: the circuit, the race length and car setup, initials and car, then a full-width Start Race, Practice and Championship, then text links (Local Leaderboards, Online, Sign in, How to play, Settings, Local or online?) and the rivals line. On a phone the circuit picker shows one circuit at a time in a snap-scrolling strip with Previous / Next and dots, and its description on a tap of the card; the cars are colour chips, the chosen one named in the label. On a phone on its side the logo, circuit and links take a left column and the options, Start Race and the play modes a right one. On a tablet or desktop the card is about 840 px wide, with the five circuits in one row and the chosen one's description under them. Start Race is on screen without scrolling at every size checked (`titlelayout` in [validation.md](validation.md)).
 - Overlays sit above the HUD and the pad. The pad is hidden on every menu screen, so a tap on a menu cannot reach a driving control.
 
 ## Viewport lifecycle
@@ -82,7 +83,7 @@ Half-size WebP copies from the emulated runs are in [`responsive/`](responsive/)
 
 - `race-360x640.webp`, `race-640x360.webp`: the race HUD with every message shown at once (scripted worst case)
 - `race-tray-360x640.webp`: the More tray open
-- `title-360x640.webp`: the title card with its pinned actions
+- `title-360x640.webp`: the title card with its pinned actions (before #153; the title no longer pins any)
 - `touchrace-service.webp`: refuelling during the touch race at 844×390
 - `desktop-1440x900.webp`: the desktop HUD, for regression comparison
 

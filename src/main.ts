@@ -336,6 +336,10 @@ function applyTrack(id: string): void {
 function lineupHtml(): string {
   return `<div class="lineup">${DRIVERS.slice(1).map((d, i) => `<div class="rival">${colorDot(d.color)}<div><b>${d.name}</b><em>${t(`persona.${d.persona}.name`)}</em>${tipHtml('rivals', `<span class="blurb">${t(`persona.${d.persona}.desc`)}</span>`, 'span', i)}</div></div>`).join('')}</div>`;
 }
+/** The title's rivals (#153): one short line, the three names and styles, their blurbs behind the "i" at its end. */
+function rivalsHtml(): string {
+  return `<div class="rivals"><div class="lbl2 has-info"><span>${t('title.rivals')}</span>${tipToggleHtml('rivals', t('info.rivals'), DRIVERS.length - 1)}</div>${lineupHtml()}</div>`;
+}
 
 /**
  * The title's progressive disclosure (#152): a note, the setup description, the rival blurbs, the play-mode notes and the
@@ -365,9 +369,11 @@ function bindTips(): void {
   }));
 }
 
+/** The title's cars (#153): a colour and a name each; on a phone the name is read out but not shown, so the four fit beside the initials. */
 function carPickerHtml(): string {
-  return `<div class="cars">${R.LIVERIES.map((l) => `<button class="car ${l.id === carId ? 'sel' : ''}" data-car="${l.id}" title="${l.name}"><i style="background:#${l.color.toString(16).padStart(6, '0')}"></i>${l.name}</button>`).join('')}</div>`;
+  return `<div class="cars" role="group" aria-labelledby="o-car-lbl">${R.LIVERIES.map((l) => `<button class="car ${l.id === carId ? 'sel' : ''}" data-car="${l.id}" title="${l.name}" aria-pressed="${l.id === carId}"><i style="background:#${l.color.toString(16).padStart(6, '0')}"></i><span class="cname">${l.name}</span></button>`).join('')}</div>`;
 }
+const carName = (id: string): string => R.LIVERIES.find((l) => l.id === id)?.name ?? '';
 
 const ARROW_STEP: Record<string, number> = { ArrowLeft: -1, ArrowUp: -1, ArrowRight: 1, ArrowDown: 1 };
 /** A settings radio group for the title and pause cards, named by the data attribute its buttons carry; wire it up with bindRadios. */
@@ -417,6 +423,7 @@ function lengthRadiosHtml(name: string, current: RaceLengthId, ids: readonly Rac
     return `<button class="tab len ${on ? 'sel' : ''}" role="radio" aria-checked="${on}" tabindex="${on ? 0 : -1}" data-${name}="${id}" aria-label="${lengthTag(id)}"><b>${lengthName(id)}</b> ${fold ? `<span class="sub">${t('len.laps', { n: raceLength(id).laps })}</span>` : `<small>${t('len.laps', { n: raceLength(id).laps })}</small>`}</button>`;
   }).join('');
   // folded (the title, #152): the note sits behind the "i" beside the label, in body-size text
+  // (#153: the title lays the "i" at the end of the row of choices where that row has room, style.css)
   if (fold) return `<div class="gfx rlen"><div class="lbl2 has-info"><span id="o-${name}">${t('len.label')}</span>${note ? tipToggleHtml(name, t('info.len')) : ''}</div><div class="tabs" role="radiogroup" aria-labelledby="o-${name}">${btns}</div>${note ? tipHtml(name, `<p class="len-note">${note}</p>`) : ''}</div>`;
   return `<div class="gfx rlen"><div class="lbl2" id="o-${name}">${t('len.label')}</div><div class="tabs" role="radiogroup" aria-labelledby="o-${name}">${btns}</div>${note ? `<small class="len-note">${note}</small>` : ''}</div>`;
 }
@@ -487,56 +494,152 @@ function bindSettings(): void {
   });
 }
 
+/**
+ * The title's circuit picker (#153). On a desktop the five circuits sit in one compact row (map, name, lap length) with the
+ * chosen one's description once under it. On a phone, or a phone on its side, the row is a snap-scrolling strip that shows
+ * one circuit at a time, with Previous / Next either side and a dot per circuit: Previous, Next, a swipe or a tap on a card
+ * chooses; a tap on the chosen card shows or hides its description, which starts hidden there.
+ */
+let trackDescOpen = false;
+function trackPickerHtml(): string {
+  const cards = T.TRACKS.map((d) => `<button class="track ${d.id === T.DEF.id ? 'sel' : ''}" data-id="${d.id}" aria-pressed="${d.id === T.DEF.id}" aria-describedby="o-track-desc">
+      ${trackSvg(d)}
+      <span class="tname"><b>${t(`track.${d.id}.name`)}</b><em>${t('title.len', { n: Math.round(T.layout(d, 4).L) })}</em></span>
+    </button>`).join('');
+  const dots = T.TRACKS.map((d) => `<i class="${d.id === T.DEF.id ? 'sel' : ''}" data-dot="${d.id}"></i>`).join('');
+  return `<div class="picker" role="group" aria-labelledby="o-track-lbl">
+    <div class="lbl2" id="o-track-lbl">${t('title.track')}</div>
+    <div class="pick-row">
+      <button type="button" class="pick-nav" id="o-track-prev" aria-label="${t('title.trackPrev')}"><span aria-hidden="true">‹</span></button>
+      <div class="tracks" id="o-tracks">${cards}</div>
+      <button type="button" class="pick-nav" id="o-track-next" aria-label="${t('title.trackNext')}"><span aria-hidden="true">›</span></button>
+    </div>
+    <div class="dots" aria-hidden="true">${dots}</div>
+    <p class="track-desc" id="o-track-desc">${t(`track.${T.DEF.id}.desc`)}</p>
+  </div>`;
+}
+/** Centre the chosen circuit in the picker's strip (it only scrolls on a phone); `smooth` for Previous / Next. */
+function centreTrack(smooth = false): void {
+  const strip = overlay.querySelector<HTMLElement>('#o-tracks');
+  const card = strip?.querySelector<HTMLElement>('.track.sel');
+  if (!strip || !card || strip.scrollWidth <= strip.clientWidth + 1) return;
+  const left = card.offsetLeft - strip.offsetLeft - (strip.clientWidth - card.offsetWidth) / 2;
+  strip.scrollTo({ left, behavior: smooth ? 'smooth' : 'auto' });
+}
+/** Choose a circuit on the title: the world, the cards, the dots and the description follow. */
+function pickTrack(id: string, scroll: 'smooth' | 'jump' | false = false): void {
+  sfx.init();
+  applyTrack(id);
+  overlay.querySelectorAll<HTMLElement>('.track').forEach((x) => { const on = x.dataset.id === T.DEF.id; x.classList.toggle('sel', on); x.setAttribute('aria-pressed', String(on)); });
+  overlay.querySelectorAll<HTMLElement>('[data-dot]').forEach((x) => x.classList.toggle('sel', x.dataset.dot === T.DEF.id));
+  const desc = overlay.querySelector('#o-track-desc');
+  if (desc) desc.textContent = t(`track.${T.DEF.id}.desc`);
+  if (scroll) centreTrack(scroll === 'smooth');
+}
+function bindTrackPicker(): void {
+  const strip = overlay.querySelector<HTMLElement>('#o-tracks')!;
+  const card = overlay.querySelector<HTMLElement>('.card.title')!;
+  const step = (k: number): void => {
+    const i = T.TRACKS.findIndex((d) => d.id === T.DEF.id);
+    const j = i + k;
+    // a step past either end wraps round, at once rather than sliding across every circuit between
+    pickTrack(T.TRACKS[(j + T.TRACKS.length) % T.TRACKS.length].id, j >= 0 && j < T.TRACKS.length ? 'smooth' : 'jump');
+  };
+  overlay.querySelector('#o-track-prev')!.addEventListener('click', () => step(-1));
+  overlay.querySelector('#o-track-next')!.addEventListener('click', () => step(1));
+  overlay.querySelectorAll<HTMLElement>('.track').forEach((b) => b.addEventListener('click', () => {
+    if (b.dataset.id === T.DEF.id) { trackDescOpen = !trackDescOpen; card.classList.toggle('desc-open', trackDescOpen); return; }
+    pickTrack(b.dataset.id!);
+  }));
+  // a swipe chooses the circuit it comes to rest on. Only a scroll the player makes (a finger or the wheel on the strip) does:
+  // the strip re-centred after a resize, or scrolled to bring a card into view, leaves the choice alone
+  let down = false, lastUser = -1e9, settle = 0;
+  const user = (): void => { lastUser = performance.now(); };
+  strip.addEventListener('pointerdown', () => { down = true; user(); });
+  for (const ev of ['pointerup', 'pointercancel']) strip.addEventListener(ev, () => { down = false; user(); });
+  strip.addEventListener('wheel', user, { passive: true });
+  strip.addEventListener('touchmove', user, { passive: true });
+  strip.addEventListener('scroll', () => {
+    if (!down && performance.now() - lastUser > 700) return;
+    window.clearTimeout(settle);
+    const done = (): void => {
+      if (down) { settle = window.setTimeout(done, 120); return; }
+      const mid = strip.getBoundingClientRect().left + strip.clientWidth / 2;
+      let best: HTMLElement | null = null, gap = 1e9;
+      strip.querySelectorAll<HTMLElement>('.track').forEach((x) => { const r = x.getBoundingClientRect(), g = Math.abs(r.left + r.width / 2 - mid); if (g < gap) { gap = g; best = x; } });
+      const id = (best as HTMLElement | null)?.dataset.id;
+      if (id && id !== T.DEF.id && screen === 'title') pickTrack(id);
+    };
+    settle = window.setTimeout(done, 140);
+  }, { passive: true });
+}
+// a rotation or a resized window keeps the chosen circuit in the middle of the strip
+window.addEventListener('resize', () => { if (screen === 'title') requestAnimationFrame(() => centreTrack()); });
+
 function showTitle(): void {
   enter('title');
   camMode = 'full';
   mode = 'race';
   overlay.className = 'overlay show';
-  // each card is the map, name and lap length; the chosen circuit's description is written once under the row (#152)
-  const cards = T.TRACKS.map((d) => `<button class="track ${d.id === T.DEF.id ? 'sel' : ''}" data-id="${d.id}" aria-describedby="o-track-desc">
-      ${trackSvg(d)}
-      <b>${t(`track.${d.id}.name`)}</b>
-      <em>${t('title.len', { n: Math.round(T.layout(d, 4).L) })}</em>
-    </button>`).join('');
   const nRounds = R.CHAMP_TRACKS.length;
   let champBtns = `<button class="cta alt" id="o-champ">${t('title.champ')}</button>`;
   // a championship in progress keeps its own length (#132), so the button says which one it is
-  if (champ && !R.champDone(champ)) champBtns = `<button class="cta alt" id="o-champ-cont">${t('title.champContinue', { n: champ.rounds.length + 1, m: nRounds })} <span class="sub">${lengthTag(champ.length)} · ${setupTag(champ.setup)}</span></button><button class="cta alt small" id="o-champ">${t('title.champNew')}</button>`;
+  // (a phone on its side shows the shorter label, so Practice, Continue and New share one row beside the circuit)
+  if (champ && !R.champDone(champ)) champBtns = `<button class="cta alt" id="o-champ-cont"><span class="cc-long">${t('title.champContinue', { n: champ.rounds.length + 1, m: nRounds })}</span><span class="cc-short">${t('title.champContinueShort', { n: champ.rounds.length + 1, m: nRounds })}</span> <span class="sub">${lengthTag(champ.length)} · ${setupTag(champ.setup)}</span></button><button class="cta alt small" id="o-champ">${t('title.champNew')}</button>`;
   else if (champ) champBtns = `<button class="cta alt" id="o-champ-view">${t('title.champView')}</button><button class="cta alt small" id="o-champ">${t('title.champNew')}</button>`;
   // the automatic switch to Low (#66) says so in the graphics group: Settings opens by itself the first time that notice is due
-  if (autoQuality.undoTarget(preset) && !autoNoteShown) { autoNoteShown = true; titleOpen.add('settings'); }
+  let autoOpened = false;
+  if (autoQuality.undoTarget(preset) && !autoNoteShown) { autoNoteShown = true; autoOpened = true; titleOpen.add('settings'); }
   // #152: body copy is 16 px and every control 44 px; the notes, the setup description, the rival blurbs, the play-mode notes
-  // and the graphics / touch settings are folded behind a toggle each (one tap), still all on the card
-  overlay.innerHTML = `<div class="card title">
-    <div class="logo">${t('title.name')}</div>
-    <div class="tag">${t('title.tag')}</div>
-    <p id="o-goal">${t('title.goalShort', { n: raceLength(raceLen).laps })}</p>
-    <div class="setup">
-      ${lengthRadiosHtml('rlen', raceLen, LENGTH_IDS, t('len.note'), true)}
-      ${setupRadiosHtml('rsetup', carSetupId, SETUP_IDS, t('setup.note'), SETUP_IDS, true)}
-      <label class="ini"><span class="lbl2">${t('title.initials')}</span><input id="o-ini" maxlength="${R.MAX_INITIALS}" placeholder="${R.ANON}" value="${R.savedInitialsRaw().replace(/"/g, '')}" autocomplete="off" autocapitalize="characters" enterkeyhint="done" spellcheck="false"></label>
-      <div><span class="lbl2">${t('title.car')}</span>${carPickerHtml()}</div>
+  // and the graphics / touch settings are folded behind a toggle each (one tap), still all on the card.
+  // #153: mobile first, in the order a player needs: the circuit, the race options, Start Race (full width, never under
+  // anything), Practice and Championship, then text links for the rest. No row of it is sticky, so nothing can cover Start.
+  // A phone on its side puts the logo, circuit and links in a column left of the options and Start (style.css)
+  overlay.innerHTML = `<div class="card title${trackDescOpen ? ' desc-open' : ''}">
+    <div class="t-side">
+      <div class="t-head">
+        <div class="logo">${t('title.name')}</div>
+        <div class="tag">${t('title.tag')}</div>
+        <p id="o-goal">${t('title.goalShort', { n: raceLength(raceLen).laps })}</p>
+      </div>
+      ${trackPickerHtml()}
     </div>
-    <div class="lbl2 has-info"><span>${t('title.rivals')}</span>${tipToggleHtml('rivals', t('info.rivals'), DRIVERS.length - 1)}</div>
-    ${lineupHtml()}
-    <div class="lbl2">${t('title.track')}</div>
-    <div class="tracks">${cards}</div>
-    <p class="track-desc" id="o-track-desc">${t(`track.${T.DEF.id}.desc`)}</p>
-    <div class="help-link">${howToButtonHtml(false)}${tipToggleHtml('settings', t('title.settings'), 1, 'linkbtn', 'o-settings')}</div>
-    ${tipHtml('settings', settingsHtml())}
-    <div class="row wrap">
-      <button class="cta" id="o-start">${t('title.start')}</button>
-      <button class="cta alt" id="o-practice">${t('title.practice')}</button>
-      ${champBtns}
-      <button class="cta alt" id="o-boards">${t('title.boards')}</button>
+    <div class="t-main">
+      <div class="setup">
+        ${lengthRadiosHtml('rlen', raceLen, LENGTH_IDS, t('len.note'), true)}
+        ${setupRadiosHtml('rsetup', carSetupId, SETUP_IDS, t('setup.note'), SETUP_IDS, true)}
+        <div class="who">
+          <label class="ini"><span class="lbl2">${t('title.initials')}</span><input id="o-ini" maxlength="${R.MAX_INITIALS}" placeholder="${R.ANON}" value="${R.savedInitialsRaw().replace(/"/g, '')}" autocomplete="off" autocapitalize="characters" enterkeyhint="done" spellcheck="false"></label>
+          <div class="carpick"><span class="lbl2" id="o-car-lbl">${t('title.car')}<span class="car-now"> · <span id="o-car-name">${carName(carId)}</span></span></span>${carPickerHtml()}</div>
+        </div>
+      </div>
+      <div class="t-go">
+        <button class="cta" id="o-start">${t('title.start')}</button>
+        <div class="t-modes">
+          <button class="cta alt" id="o-practice">${t('title.practice')}</button>
+          ${champBtns}
+        </div>
+      </div>
     </div>
-    <div class="help-link">${tipToggleHtml('modes', t('title.modesInfo'), 1, 'linkbtn', 'o-modes')}</div>
-    ${tipHtml('modes', `<p class="modes">${t('net.localNote')}</p>${online.state === 'available' ? `<p class="modes">${t('net.onlineNote')}</p>` : ''}`)}
-    ${onlineEntryHtml()}
+    <div class="t-more">
+      <div class="t-links">
+        <button class="linkbtn" id="o-boards">${t('title.boards')}</button>
+        ${onlineLinksHtml()}
+        ${howToButtonHtml(false)}
+        ${tipToggleHtml('settings', t('title.settings'), 1, 'linkbtn', 'o-settings')}
+        ${tipToggleHtml('modes', t('title.modesInfo'), 1, 'linkbtn', 'o-modes')}
+      </div>
+      ${onlineNoticeHtml()}
+      ${tipHtml('settings', settingsHtml())}
+      ${tipHtml('modes', `<p class="modes">${t('net.localNote')}</p>${online.state === 'available' ? `<p class="modes">${t('net.onlineNote')}</p>` : ''}`)}
+      ${rivalsHtml()}
+    </div>
   </div>`;
   syncRecheck();
   bindHowTo();
   bindTips();
+  bindTrackPicker();
+  centreTrack();
   overlay.querySelector('#o-online')?.addEventListener('click', () => { sfx.init(); showOnline(); });
   overlay.querySelector('#o-reload')?.addEventListener('click', () => location.reload());
   overlay.querySelector<HTMLButtonElement>('#o-retry')?.addEventListener('click', (e) => {
@@ -546,15 +649,10 @@ function showTitle(): void {
   });
   overlay.querySelector('#o-account')?.addEventListener('click', () => { sfx.init(); showAccount(); });
   overlay.querySelector('#o-rejoin')?.addEventListener('click', () => { sfx.init(); const st = loadSeat(seatStore()); if (st) void netBegin((n) => n.resume(st)); });
-  overlay.querySelectorAll<HTMLElement>('.track').forEach((b) => b.addEventListener('click', () => {
-    sfx.init();
-    applyTrack(b.dataset.id!);
-    overlay.querySelectorAll('.track').forEach((x) => x.classList.toggle('sel', x === b));
-    overlay.querySelector('#o-track-desc')!.textContent = t(`track.${T.DEF.id}.desc`);
-  }));
   overlay.querySelectorAll<HTMLElement>('.car').forEach((b) => b.addEventListener('click', () => {
     carId = b.dataset.car!; R.saveCar(carId);
-    overlay.querySelectorAll('.car').forEach((x) => x.classList.toggle('sel', x === b));
+    overlay.querySelectorAll('.car').forEach((x) => { x.classList.toggle('sel', x === b); x.setAttribute('aria-pressed', String(x === b)); });
+    overlay.querySelector('#o-car-name')!.textContent = carName(carId);
     setRace(newRace());
   }));
   bindSettings();
@@ -576,6 +674,9 @@ function showTitle(): void {
   overlay.querySelector('#o-champ-cont')?.addEventListener('click', () => { sfx.init(); startChampRound(); });
   overlay.querySelector('#o-champ-view')?.addEventListener('click', () => { sfx.init(); showChamp(null); });
   overlay.querySelector('#o-boards')!.addEventListener('click', () => { sfx.init(); lbSetup = carSetupId; showBoards(); });
+  // Settings opened by itself for the automatic-Low notice (#66, #152): the card scrolls just far enough to show it and its
+  // Undo, which on a short screen would otherwise sit below the fold (Start Race stays in view: it is near the top)
+  if (autoOpened) overlay.querySelector('#o-gfx-auto')?.scrollIntoView({ block: 'nearest' });
 }
 
 function showPause(): void {
@@ -1120,12 +1221,15 @@ const hashCode = (): string => /^#room=([A-Za-z0-9]{6})$/.exec(location.hash)?.[
 const modeLabel = (m: string): string => t(m === 'multiplayer' ? 'net.modeMulti' : m === 'solo' ? 'net.modeSolo' : m === 'championship' ? 'net.modeChamp' : m === 'practice' ? 'career.mode.practice' : 'net.modeOther');
 const hexc = (c: number): string => '#' + c.toString(16).padStart(6, '0');
 
-function onlineEntryHtml(): string {
-  if (online.state === 'available') {
-    const seat = loadSeat(seatStore());
-    // its note is folded in with the local one, behind "Local or online?" on the title (#152)
-    return `<div class="row net-entry"><button class="cta" id="o-online">${t('net.online')}</button>${seat ? `<button class="cta alt" id="o-rejoin">${t('net.rejoin', { code: esc(seat.code) })}</button>` : ''}${accountEntryHtml()}</div>`;
-  }
+/** The title's online links (#153): Online, Rejoin a held seat and Sign in (or the driver's profile), among the text links. */
+function onlineLinksHtml(): string {
+  if (online.state !== 'available') return '';
+  const seat = loadSeat(seatStore());
+  // its note is folded in with the local one, behind "Local or online?" on the title (#152)
+  return `<button class="linkbtn" id="o-online">${t('net.online')}</button>${seat ? `<button class="linkbtn" id="o-rejoin">${t('net.rejoin', { code: esc(seat.code) })}</button>` : ''}${accountEntryHtml()}`;
+}
+/** Under the title's links: why online play is not offered, with Reload or Retry where one helps. */
+function onlineNoticeHtml(): string {
   if (online.state === 'unavailable') return `<p class="modes net-off">${t('net.unavailable')}</p>`;
   if (online.state === 'outdated') return outdatedHtml();
   if (online.state === 'behind') return behindHtml();
@@ -1299,11 +1403,11 @@ window.addEventListener('storage', (e) => {
 function accountEntryHtml(): string {
   if (!accountsOn()) return '';
   const a = accounts.auth;
-  if (a.state === 'loading') return `<button class="cta alt" id="o-account" disabled aria-busy="true">${t('acct.loading')}</button>`;
-  if (a.state === 'unavailable') return `<button class="cta alt" id="o-account">${t('acct.unavailableShort')}</button>`;
+  if (a.state === 'loading') return `<button class="linkbtn" id="o-account" disabled aria-busy="true">${t('acct.loading')}</button>`;
+  if (a.state === 'unavailable') return `<button class="linkbtn" id="o-account">${t('acct.unavailableShort')}</button>`;
   // the display name is the driver's own public name; other people's text is always escaped
-  if (a.state === 'signed-in') return `<button class="cta alt" id="o-account" aria-label="${t('acct.profile')}">👤 <span class="nm">${esc(a.account.displayName)}</span></button>`;
-  return `<button class="cta alt" id="o-account">${t('acct.signIn')}</button>`;
+  if (a.state === 'signed-in') return `<button class="linkbtn" id="o-account" aria-label="${t('acct.profile')}">👤 <span class="nm">${esc(a.account.displayName)}</span></button>`;
+  return `<button class="linkbtn" id="o-account">${t('acct.signIn')}</button>`;
 }
 
 function acctErrorText(e: AuthError, detail?: string): string {
@@ -2233,6 +2337,11 @@ if (ONLINE_ENABLED) {
  * without a server, so the banner layout can be checked in the default build, where online play is off. The session has no
  * socket and never opens one (its constructor throws); calling again with another state re-renders the same room.
  */
+/** QA (#153): show the title as a given online status would, without a server (the Online and Sign in links, or a notice). */
+function qaOnline(st: OnlineStatus): void {
+  online = st;
+  if (screen === 'title') showTitle();
+}
 function qaNetLobby(room: PublicRoom, meId: string, conn: Conn, lengths?: RaceLengthId[], setups?: SetupId[]): void {
   if (!net) {
     const NoSocket = function () { throw new Error('qa lobby: no socket'); } as unknown as SocketCtor;
@@ -2268,4 +2377,4 @@ function qaNetResult(r: ResultView, meId: string, pbBests?: CareerStats['bests']
 }
 
 // the full hook only in a dev server, a VITE_QA build or with ?qa=1; a default (production) build gets a minimal read-only one (#146)
-installGameHook(window, hookLevel(import.meta.env, location.search), () => ({ get online() { return online; }, get auth() { return { state: accounts.auth.state, busy: accounts.busy, displayName: accounts.account?.displayName ?? null }; }, get net() { return net && { conn: net.conn, me: net.me, room: net.room, result: net.result, reconnects: net.reconnects, tick: netTick, lagMs: netLag, buf: netBuf.stats, raceId: netRaceId, held: net.client.held, ctlSeq: net.client.ctlSeq, actSeq: net.client.actSeq }; }, netDrop: () => net?.client.ws?.close(4000, 'qa drop'), qaNetLobby, qaNetResult, get race() { return race; }, T, R, applyTrack, startSession, showTitle, get mode() { return mode; }, get preset() { return preset; }, get touchMode() { return touchMode; }, setTouchMode, input, get audio() { return sfx.ctx?.state ?? null; }, get muted() { return sfx.muted; }, suspendAudio: () => sfx.ctx?.suspend(), get champ() { return champ; }, get raceLen() { return raceLen; }, get carSetup() { return carSetupId; }, get bays() { return bayPaint; }, get ghost() { return ghost; }, get pbMs() { return pbMs; }, get screen() { return screen; }, get view() { return camMode; }, get aspect() { return view ? view.camera.aspect : vp.w / vp.h; }, get mini() { return { w: hud.mW, h: hud.mH }; }, stepper, advance: (sec: number) => { for (let t = 0; t < sec && simulating(); t += STEP) tick(STEP); }, setView: (m: 'follow' | 'full') => { camMode = m; }, zoom: (span: number) => { camMode = 'follow'; followSpan = span; curSpan = span; }, snapCam: () => { const p = me(); camLead.set(0, 0); camTarget.set(p.x, 0, -p.y); }, get marker() { return view?.marker ?? null; }, get localId() { return localId; }, get spec() { return { active: spec.active, target: spec.target, whole: spec.whole, doneT: myDoneT }; }, setLocalSlot: (n: number) => { localSlot = Math.max(0, Math.min(DRIVERS.length - 1, Math.floor(n))); }, get camTarget() { return { x: camTarget.x, z: camTarget.z }; }, get motorMix() { return motorMix; }, get arrows() { return view && { lane: view.laneArrow, pit: view.pitArrow }; }, info: () => view?.info() ?? null, get view3d() { return viewState; }, loadView }), { screen: () => screen, online: () => online, preset: () => preset, mode: () => mode });
+installGameHook(window, hookLevel(import.meta.env, location.search), () => ({ get online() { return online; }, get auth() { return { state: accounts.auth.state, busy: accounts.busy, displayName: accounts.account?.displayName ?? null }; }, get net() { return net && { conn: net.conn, me: net.me, room: net.room, result: net.result, reconnects: net.reconnects, tick: netTick, lagMs: netLag, buf: netBuf.stats, raceId: netRaceId, held: net.client.held, ctlSeq: net.client.ctlSeq, actSeq: net.client.actSeq }; }, netDrop: () => net?.client.ws?.close(4000, 'qa drop'), qaNetLobby, qaNetResult, qaOnline, get race() { return race; }, T, R, applyTrack, startSession, showTitle, get mode() { return mode; }, get preset() { return preset; }, get touchMode() { return touchMode; }, setTouchMode, input, get audio() { return sfx.ctx?.state ?? null; }, get muted() { return sfx.muted; }, suspendAudio: () => sfx.ctx?.suspend(), get champ() { return champ; }, get raceLen() { return raceLen; }, get carSetup() { return carSetupId; }, get bays() { return bayPaint; }, get ghost() { return ghost; }, get pbMs() { return pbMs; }, get screen() { return screen; }, get view() { return camMode; }, get aspect() { return view ? view.camera.aspect : vp.w / vp.h; }, get mini() { return { w: hud.mW, h: hud.mH }; }, stepper, advance: (sec: number) => { for (let t = 0; t < sec && simulating(); t += STEP) tick(STEP); }, setView: (m: 'follow' | 'full') => { camMode = m; }, zoom: (span: number) => { camMode = 'follow'; followSpan = span; curSpan = span; }, snapCam: () => { const p = me(); camLead.set(0, 0); camTarget.set(p.x, 0, -p.y); }, get marker() { return view?.marker ?? null; }, get localId() { return localId; }, get spec() { return { active: spec.active, target: spec.target, whole: spec.whole, doneT: myDoneT }; }, setLocalSlot: (n: number) => { localSlot = Math.max(0, Math.min(DRIVERS.length - 1, Math.floor(n))); }, get camTarget() { return { x: camTarget.x, z: camTarget.z }; }, get motorMix() { return motorMix; }, get arrows() { return view && { lane: view.laneArrow, pit: view.pitArrow }; }, info: () => view?.info() ?? null, get view3d() { return viewState; }, loadView }), { screen: () => screen, online: () => online, preset: () => preset, mode: () => mode });
