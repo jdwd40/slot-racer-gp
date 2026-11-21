@@ -1,32 +1,36 @@
 import { ONLINE_ENABLED, afterProtocolRefusal, afterRetry, behindHtml, outdatedHtml, probeOnline, startRecheck, type OnlineStatus } from './online';
 import * as T from './track';
 import { Race, Car, RaceEvent, DRIVERS, PEN, SOLO_ID, DriverId, RosterEntry } from './race';
-import { LENGTH_IDS, lengthOr, raceLength, type RaceLengthId } from './raceLength';
-import { DEFAULT_SETUP, SETUP_IDS, setupOr, type SetupId } from './carSetup';
-import { comparePb, readDebrief, type PbCompare } from './debrief';
-import { debriefHtml, debriefOpen } from './debriefView';
+import { lengthOr, type RaceLengthId } from './raceLength';
+import { DEFAULT_SETUP, setupOr, type SetupId } from './carSetup';
 import { bayPaints, type BayPaint } from './bays';
 // the 3D view and Three.js are a separate chunk (#147): type-only here, loaded with import() by loadView below
 import type { View3D } from './view3d';
-import { Hud, fmt, carLabel, flags, escHtml, type SpecView } from './hud';
+import { Hud, fmt, carLabel, escHtml, type SpecView } from './hud';
 import { Spectator, shouldSpectate } from './spectate';
 import { Sfx } from './audio';
 import { t } from './i18n';
 import * as R from './records';
 import { GhostRecorder, GhostPlayer } from './ghost';
 import { FixedStepper, STEP, MAX_GAP, Pose, blendPose } from './timing';
-import { PRESETS, PresetId, pixelRatioFor, savedPreset, savePreset } from './graphics';
+import { PresetId, pixelRatioFor, savedPreset, savePreset } from './graphics';
 import { AutoQuality } from './autoQuality';
 import { NetSession, loadSeat, refusalText, type Conn, type ResultView, type EndReason } from './net/session';
-import { AccountClient, accountKey, type AuthError, type AuthState } from './net/account';
+import { AccountClient, accountKey, type AuthState } from './net/account';
 import { SnapBuffer, applySnapshot, localEvent, mirrorRace } from './net/mirror';
-import { LIVERIES as NET_LIVERIES, LIMITS, cleanName, type AwardsView, type CareerStats, type ChampionshipTag, type LiveryId, type PublicRoom, type ServerMsg } from './net/protocol';
+import { LIVERIES as NET_LIVERIES, type AwardsView, type CareerStats, type ChampionshipTag, type LiveryId, type PublicRoom, type ServerMsg } from './net/protocol';
 import type { RaceSnapshot, WireEvent } from './race';
 import type { SocketCtor } from './net/client';
-import { NetWaitGuard, type NetWaitView } from './net/netwait';
+import { NetWaitGuard } from './net/netwait';
 import { bannerOnCard, reconnectTextId } from './net/banner';
-import { COARSE_QUERY, ControlsAnchor, DrivingInput, KEY_HOLDS, KEY_TAPS, PadButton, TOUCH_MODES, TouchMode, TouchPad, savedTouchMode, saveTouchMode, touchActive } from './input';
+import { COARSE_QUERY, ControlsAnchor, DrivingInput, KEY_HOLDS, KEY_TAPS, PadButton, TouchMode, TouchPad, savedTouchMode, saveTouchMode, touchActive } from './input';
 import { hookLevel, installGameHook } from './qaHook';
+import { createControls, howToHtml } from './menu/controls';
+import { createAccount } from './menu/account';
+import { createOnline } from './menu/online';
+import { createResults } from './menu/results';
+import { createTitle } from './menu/title';
+import type { Mode, Screen } from './menu/types';
 
 const TRACK_KEY = 'srgp.track';
 function savedTrack(): string {
@@ -55,8 +59,6 @@ let viewState: 'loading' | 'ready' | 'failed' | 'nogl' = 'loading';
 let viewLoading: Promise<void> | null = null;
 
 // ------------------------------------------------------------ cars
-/** local race / practice / championship run on this device; 'online' is a server race (connected solo or multiplayer) */
-type Mode = 'race' | 'practice' | 'champ' | 'online';
 let mode: Mode = 'race';
 let carId = R.savedCar();
 /** The local driver: camera, marker, HUD, audio emphasis, personal messages, records and the ghost all follow this ID. */
@@ -191,7 +193,6 @@ let pendingStart: { m: Mode; from: Screen } | null = null;
 
 let online: OnlineStatus = ONLINE_ENABLED ? { state: 'checking' } : { state: 'off' };
 
-type Screen = 'title' | 'race' | 'pause' | 'results' | 'boards' | 'champ' | 'online' | 'lobby' | 'netwait' | 'netres' | 'account';
 let screen: Screen = 'title';
 let lbTrack = T.DEF.id;
 let lbKind: R.BoardKind = 'practice';
@@ -227,59 +228,6 @@ function enter(s: Screen): void {
   syncPad();
 }
 
-/** The keyboard grid: the How to play sheet's Keyboard section, and the compact legend on the race menu. */
-function keysHtml(cls: string): string {
-  const row = (k: string, id: string): string => `<div class="krow"><span class="keys">${k}</span><span>${t(id)}</span></div>`;
-  return `<div class="${cls}">
-    ${row('<kbd>W</kbd><kbd>↑</kbd>', 'ctl.throttle')}
-    ${row('<kbd>S</kbd><kbd>↓</kbd>', 'ctl.brake')}
-    ${row('<kbd>Space</kbd>', 'ctl.lane')}
-    ${row('<kbd>P</kbd>', 'ctl.pit')}
-    ${row('<kbd>N</kbd>', 'ctl.defer')}
-    ${row('<kbd>C</kbd>', 'ctl.view')}
-    ${row('<kbd>+</kbd><kbd>−</kbd> / 🖱', 'ctl.zoom')}
-    ${row('<kbd>Esc</kbd>', 'ctl.pause')}
-    ${row('<kbd>R</kbd>', 'ctl.restart')}
-    ${row('<kbd>G</kbd>', 'ctl.ghost')}
-  </div>`;
-}
-
-/** The touch pad's buttons, each named as on the pad with what it does (#151): the sheet's Drive section and the touch legend. */
-function touchGridHtml(cls: string): string {
-  const row = (b: string, id: string): string => `<div><dt>${t(`touch.${b}`)}</dt><dd>${t(id)}</dd></div>`;
-  return `<dl class="${cls}">${row('throttle', 'how.drive.throttle')}${row('brake', 'how.drive.brake')}${row('lane', 'how.drive.lane')}${row('pit', 'how.drive.pit')}${row('defer', 'how.drive.defer')}</dl>`;
-}
-
-/** The How to play control on the title and the race menu (#151). */
-function howToButtonHtml(wrap = true): string {
-  const b = `<button class="linkbtn" id="o-help" aria-haspopup="dialog">${t('how.open')}</button>`;
-  return wrap ? `<div class="help-link">${b}</div>` : b;
-}
-function bindHowTo(): void {
-  overlay.querySelector<HTMLElement>('#o-help')?.addEventListener('click', (e) => openHowTo(e.currentTarget as HTMLElement));
-}
-
-/**
- * The race menu's legend: the keyboard grid, or on a touch screen what each pad button does, then How to play for the pit
- * and service rules.
- */
-function controlsHtml(): string {
-  return `${touchGridHtml('touch-legend')}${keysHtml('controls')}${howToButtonHtml()}`;
-}
-
-const HOW_PIT = ['how.pit.1', 'how.pit.2', 'how.pit.3', 'how.pit.4', 'how.pit.5'];
-const HOW_RULES = ['how.rules.1', 'how.rules.2', 'how.rules.3', 'how.rules.4', 'how.rules.5'];
-/** The sheet's sections: on a touch screen Drive comes first, otherwise Keyboard does. */
-function howToHtml(touch: boolean): string {
-  const list = (ids: string[]): string => `<ul>${ids.map((id) => `<li>${t(id)}</li>`).join('')}</ul>`;
-  const sec = (key: string, title: string, body: string): string => `<section class="how-sec" data-how="${key}" aria-labelledby="how-${key}"><h3 id="how-${key}">${title}</h3>${body}</section>`;
-  const drive = sec('drive', t('how.drive'), `${touch ? '' : `<p class="how-lead">${t('how.drive.touchLead')}</p>`}${touchGridHtml('how-touch')}`);
-  const pit = sec('pit', t('how.pit'), list(HOW_PIT));
-  const rules = sec('rules', t('how.rules'), list(HOW_RULES));
-  const keys = sec('keys', t('how.keys'), keysHtml('how-keys'));
-  return (touch ? [drive, pit, rules, keys] : [keys, pit, rules, drive]).join('');
-}
-
 function openHowTo(opener: HTMLElement | null): void {
   if (howTo.open) return;
   howToOpener = opener;
@@ -298,27 +246,15 @@ function closeHowTo(): void {
   else { howTo.removeAttribute('open'); howTo.dispatchEvent(new Event('close')); }
 }
 
-/** Small SVG map of a circuit for the track picker. */
-function trackSvg(def: T.TrackDef): string {
-  const lay = T.layout(def, 1);
-  const W = 150, H = 96, pad = 10;
-  const sc = Math.min((W - pad * 2) / lay.bounds.w, (H - pad * 2) / lay.bounds.h);
-  const px = (p: { x: number; y: number }): string => `${(W / 2 + (p.x - lay.bounds.cx) * sc).toFixed(1)},${(H / 2 - (p.y - lay.bounds.cy) * sc).toFixed(1)}`;
-  const d = lay.pts.map((p, i) => (i ? 'L' : 'M') + px(p)).join('') + 'Z';
-  // raised stretches (bridges) drawn on top so the crossing reads correctly
-  let bridges = '';
-  let run: string[] = [];
-  const flush = (): void => { if (run.length > 1) bridges += `<path d="M${run.join('L')}" fill="none" stroke="#1b1e24" stroke-width="9" stroke-linecap="round"/><path d="M${run.join('L')}" fill="none" stroke="#8b94a3" stroke-width="5" stroke-linecap="round"/>`; run = []; };
-  for (const p of lay.pts) { if (p.z > 0.05) run.push(px(p)); else flush(); }
-  flush();
-  const fin = px({ x: T.FINISH_S, y: 0 });
-  return `<svg viewBox="0 0 ${W} ${H}" width="${W}" height="${H}">
-    <path d="${d}" fill="none" stroke="#5b6270" stroke-width="7" stroke-linejoin="round"/>
-    <path d="${d}" fill="none" stroke="#2a2e36" stroke-width="4" stroke-linejoin="round"/>
-    ${bridges}
-    <circle cx="${fin.split(',')[0]}" cy="${fin.split(',')[1]}" r="3" fill="#fff"/>
-  </svg>`;
-}
+// the menu controls (#141, src/menu/controls.ts): bound to this overlay and to the settings state below
+const { bindHowTo, bindTips, bindRadios, chooseLength, syncSetupDesc, chooseSetup, settingsHtml, bindSettings } = createControls({
+  overlay, autoQuality,
+  get preset() { return preset; },
+  get touchMode() { return touchMode; },
+  get raceLen() { return raceLen; }, set raceLen(v) { raceLen = v; },
+  get carSetupId() { return carSetupId; }, set carSetupId(v) { carSetupId = v; },
+  setPreset, setTouchMode, openHowTo,
+});
 
 /** Switch the active circuit: rebuild the world, arrows, minimap and a fresh race. */
 function applyTrack(id: string): void {
@@ -332,513 +268,13 @@ function applyTrack(id: string): void {
   curSpan = fullSpan();
 }
 
-/** pre-race lineup: the three rivals and their driving styles */
-function lineupHtml(): string {
-  return `<div class="lineup">${DRIVERS.slice(1).map((d, i) => `<div class="rival">${colorDot(d.color)}<div><b>${d.name}</b><em>${t(`persona.${d.persona}.name`)}</em>${tipHtml('rivals', `<span class="blurb">${t(`persona.${d.persona}.desc`)}</span>`, 'span', i)}</div></div>`).join('')}</div>`;
-}
-/** The title's rivals (#153): one short line, the three names and styles, their blurbs behind the "i" at its end. */
-function rivalsHtml(): string {
-  return `<div class="rivals"><div class="lbl2 has-info"><span>${t('title.rivals')}</span>${tipToggleHtml('rivals', t('info.rivals'), DRIVERS.length - 1)}</div>${lineupHtml()}</div>`;
-}
-
-/**
- * The title's progressive disclosure (#152): a note, the setup description, the rival blurbs, the play-mode notes and the
- * settings stay folded until their toggle is pressed, one tap each. Which ones are open is kept for this page load, so a title
- * redrawn by the online status answering (or a touch-mode change) leaves them as the player left them.
- */
-const titleOpen = new Set<string>();
-/** the title has opened Settings by itself once for the automatic-Low notice */
-let autoNoteShown = false;
-/** The panel (or one of several panels, `part`) a toggle shows; `tag` is the element it is. */
-function tipHtml(key: string, body: string, tag = 'div', part = 0): string {
-  return `<${tag} class="tip" data-tip="${key}" id="o-tip-${key}-${part}"${titleOpen.has(key) ? '' : ' hidden'}>${body}</${tag}>`;
-}
-/** A toggle for the panels `key` (`parts` of them): the round "i" beside a section label, named `label`, or with `link` a text link reading `label`. */
-function tipToggleHtml(key: string, label: string, parts = 1, link = '', id = ''): string {
-  const ctl = Array.from({ length: parts }, (_, i) => `o-tip-${key}-${i}`).join(' ');
-  const attrs = `type="button"${id ? ` id="${id}"` : ''} data-info="${key}" aria-expanded="${titleOpen.has(key)}" aria-controls="${ctl}"`;
-  return link ? `<button class="${link}" ${attrs}>${label}</button>` : `<button class="info" ${attrs} aria-label="${label}"><span aria-hidden="true">i</span></button>`;
-}
-function bindTips(): void {
-  overlay.querySelectorAll<HTMLButtonElement>('[data-info]').forEach((b) => b.addEventListener('click', () => {
-    const key = b.dataset.info!;
-    const on = !titleOpen.has(key);
-    if (on) titleOpen.add(key); else titleOpen.delete(key);
-    b.setAttribute('aria-expanded', String(on));
-    overlay.querySelectorAll<HTMLElement>(`[data-tip="${key}"]`).forEach((p) => { p.hidden = !on; });
-  }));
-}
-
-/** The title's cars (#153): a colour and a name each; on a phone the name is read out but not shown, so the four fit beside the initials. */
-function carPickerHtml(): string {
-  return `<div class="cars" role="group" aria-labelledby="o-car-lbl">${R.LIVERIES.map((l) => `<button class="car ${l.id === carId ? 'sel' : ''}" data-car="${l.id}" title="${l.name}" aria-pressed="${l.id === carId}"><i style="background:#${l.color.toString(16).padStart(6, '0')}"></i><span class="cname">${l.name}</span></button>`).join('')}</div>`;
-}
-const carName = (id: string): string => R.LIVERIES.find((l) => l.id === id)?.name ?? '';
-
-const ARROW_STEP: Record<string, number> = { ArrowLeft: -1, ArrowUp: -1, ArrowRight: 1, ArrowDown: 1 };
-/** A settings radio group for the title and pause cards, named by the data attribute its buttons carry; wire it up with bindRadios. */
-function radiosHtml(name: string, label: string, opts: readonly { id: string; label: string }[], current: string, extra = ''): string {
-  const btns = opts.map((o) => {
-    const on = o.id === current;
-    return `<button class="tab ${on ? 'sel' : ''}" role="radio" aria-checked="${on}" tabindex="${on ? 0 : -1}" data-${name}="${o.id}">${t(o.label)}</button>`;
-  }).join('');
-  return `<div class="gfx"><div class="lbl2" id="o-${name}">${t(label)}</div><div class="tabs" role="radiogroup" aria-labelledby="o-${name}">${btns}</div>${extra}</div>`;
-}
-
-function bindRadios(name: string, choose: (id: string) => void): void {
-  const btns = [...overlay.querySelectorAll<HTMLButtonElement>(`[data-${name}]`)];
-  const pick = (b: HTMLButtonElement): void => {
-    choose(b.dataset[name]!);
-    btns.forEach((x) => {
-      x.classList.toggle('sel', x === b);
-      x.setAttribute('aria-checked', String(x === b));
-      x.tabIndex = x === b ? 0 : -1;
-    });
-  };
-  btns.forEach((b, i) => {
-    b.addEventListener('click', () => pick(b));
-    b.addEventListener('keydown', (e) => {
-      const step = ARROW_STEP[e.code];
-      // these keys belong to the selector here, not to the game; everything else (Esc, R…) still reaches it
-      if (step || e.code === 'Space' || e.code === 'Enter') e.stopPropagation();
-      if (!step) return;
-      e.preventDefault();
-      const next = btns[(i + step + btns.length) % btns.length];
-      pick(next);
-      next.focus();
-    });
-  });
-}
-
-/** A race-length preset's name, and its name with its lap count ("Endurance · 26 laps"), from the one preset table. */
-const lengthName = (id: RaceLengthId): string => t(`len.${id}`);
-const lengthTag = (id: RaceLengthId): string => t('len.tag', { name: lengthName(id), n: raceLength(id).laps });
-/**
- * The race-length selector (#132): a radio group like the settings ones (bindRadios wires it), each choice showing its name
- * over its lap count so the three stay short enough to sit side by side on a phone. `name` is the data attribute.
- */
-function lengthRadiosHtml(name: string, current: RaceLengthId, ids: readonly RaceLengthId[] = LENGTH_IDS, note = '', fold = false): string {
-  const btns = ids.map((id) => {
-    const on = id === current;
-    return `<button class="tab len ${on ? 'sel' : ''}" role="radio" aria-checked="${on}" tabindex="${on ? 0 : -1}" data-${name}="${id}" aria-label="${lengthTag(id)}"><b>${lengthName(id)}</b> ${fold ? `<span class="sub">${t('len.laps', { n: raceLength(id).laps })}</span>` : `<small>${t('len.laps', { n: raceLength(id).laps })}</small>`}</button>`;
-  }).join('');
-  // folded (the title, #152): the note sits behind the "i" beside the label, in body-size text
-  // (#153: the title lays the "i" at the end of the row of choices where that row has room, style.css)
-  if (fold) return `<div class="gfx rlen"><div class="lbl2 has-info"><span id="o-${name}">${t('len.label')}</span>${note ? tipToggleHtml(name, t('info.len')) : ''}</div><div class="tabs" role="radiogroup" aria-labelledby="o-${name}">${btns}</div>${note ? tipHtml(name, `<p class="len-note">${note}</p>`) : ''}</div>`;
-  return `<div class="gfx rlen"><div class="lbl2" id="o-${name}">${t('len.label')}</div><div class="tabs" role="radiogroup" aria-labelledby="o-${name}">${btns}</div>${note ? `<small class="len-note">${note}</small>` : ''}</div>`;
-}
-/** Remember a race length picked anywhere (title, online menu, a room the driver hosts) for the next setup. */
-function chooseLength(id: string): void {
-  raceLen = lengthOr(id);
-  R.saveLength(raceLen);
-}
-
-/** A car setup's name ("Speed") and its tag ("Speed setup"), from the one preset table (#133). */
-const setupName = (id: SetupId): string => t(`setup.${id}`);
-const setupTag = (id: SetupId): string => t('setup.tag', { name: setupName(id) });
-/**
- * The car-setup selector (#133): a radio group like the length one (bindRadios wires it: click, tap or the arrow keys), each
- * choice its name over a one-word strength, and under it the chosen setup's strength and cost in plain words (a live region,
- * so a screen reader hears the change). `allowed`: the setups that may be chosen now (a room locked to Balanced disables the
- * rest, which stay visible). `name` is the data attribute.
- */
-function setupRadiosHtml(name: string, current: SetupId, ids: readonly SetupId[] = SETUP_IDS, note = '', allowed: readonly SetupId[] = ids, fold = false): string {
-  const btns = ids.map((id) => {
-    const on = id === current;
-    const off = !allowed.includes(id) && !on;
-    return `<button class="tab len csetup ${on ? 'sel' : ''}" role="radio" aria-checked="${on}" tabindex="${on ? 0 : -1}" data-${name}="${id}" ${off ? 'disabled aria-disabled="true"' : ''} aria-label="${t(`setup.${id}.desc`)}"><b>${setupName(id)}</b> ${fold ? `<span class="sub">${t(`setup.${id}.short`)}</span>` : `<small>${t(`setup.${id}.short`)}</small>`}</button>`;
-  }).join('');
-  // folded (the title, #152): the chosen setup's strength and cost, and the note, behind the "i" (each choice's label still carries its own)
-  if (fold) return `<div class="gfx rsetup" data-for="${name}"><div class="lbl2 has-info"><span id="o-${name}">${t('setup.label')}</span>${tipToggleHtml(name, t('info.setup'))}</div><div class="tabs" role="radiogroup" aria-labelledby="o-${name}">${btns}</div>${tipHtml(name, `<p class="setup-desc" id="o-${name}-desc" aria-live="polite">${t(`setup.${current}.desc`)}</p>${note ? `<p class="len-note">${note}</p>` : ''}`)}</div>`;
-  return `<div class="gfx rsetup" data-for="${name}"><div class="lbl2" id="o-${name}">${t('setup.label')}</div><div class="tabs" role="radiogroup" aria-labelledby="o-${name}">${btns}</div><small class="setup-desc" id="o-${name}-desc" aria-live="polite">${t(`setup.${current}.desc`)}</small>${note ? `<small class="len-note">${note}</small>` : ''}</div>`;
-}
-/** Show the chosen setup's strength and cost under its selector. */
-function syncSetupDesc(name: string, id: SetupId): void {
-  const el = overlay.querySelector(`#o-${name}-desc`);
-  if (el) el.textContent = t(`setup.${id}.desc`);
-}
-/** Remember a car setup picked anywhere (title, online menu, own lobby seat) for the next race, practice or seat. */
-function chooseSetup(id: string): void {
-  carSetupId = setupOr(id);
-  R.saveSetup(carSetupId);
-}
-
-const TOUCH_OPTS = TOUCH_MODES.map((id) => ({ id, label: `touch.${id}` }));
-/** Under the graphics selector while the automatic switch to Low is in force: says why, and offers the way back. */
-function autoNoteHtml(): string {
-  const to = autoQuality.undoTarget(preset);
-  if (!to) return '';
-  const name = t(PRESETS.find((p) => p.id === to)!.label);
-  return `<div class="gfx-auto" id="o-gfx-auto"><span class="auto-note">${t('gfx.autoLow')}</span> <button class="tab" id="o-gfx-undo">${t('gfx.autoUndo', { preset: name })}</button></div>`;
-}
-function settingsHtml(): string {
-  return radiosHtml('preset', 'gfx.label', PRESETS, preset, autoNoteHtml()) + radiosHtml('touch', 'touch.label', TOUCH_OPTS, touchMode);
-}
-/** Re-mark the graphics selector after a change made outside it (undo), and drop the auto-switch note once it no longer applies. */
-function syncPresetRadios(): void {
-  overlay.querySelectorAll<HTMLButtonElement>('[data-preset]').forEach((x) => {
-    const on = x.dataset.preset === preset;
-    x.classList.toggle('sel', on); x.setAttribute('aria-checked', String(on)); x.tabIndex = on ? 0 : -1;
-  });
-  if (!autoQuality.undoTarget(preset)) overlay.querySelector('#o-gfx-auto')?.remove();
-}
-function bindSettings(): void {
-  // a pick in the selector is the player's own choice, which the automatic fallback never overrides afterwards
-  bindRadios('preset', (id) => { autoQuality.playerChose(); setPreset(id as PresetId); syncPresetRadios(); });
-  bindRadios('touch', (id) => setTouchMode(id as TouchMode));
-  overlay.querySelector('#o-gfx-undo')?.addEventListener('click', (e) => {
-    e.stopPropagation();
-    const to = autoQuality.undo(preset);
-    if (to) setPreset(to);
-    syncPresetRadios();
-  });
-}
-
-/**
- * The title's circuit picker (#153). On a desktop the five circuits sit in one compact row (map, name, lap length) with the
- * chosen one's description once under it. On a phone, or a phone on its side, the row is a snap-scrolling strip that shows
- * one circuit at a time, with Previous / Next either side and a dot per circuit: Previous, Next, a swipe or a tap on a card
- * chooses; a tap on the chosen card shows or hides its description, which starts hidden there.
- */
-let trackDescOpen = false;
-function trackPickerHtml(): string {
-  const cards = T.TRACKS.map((d) => `<button class="track ${d.id === T.DEF.id ? 'sel' : ''}" data-id="${d.id}" aria-pressed="${d.id === T.DEF.id}" aria-describedby="o-track-desc">
-      ${trackSvg(d)}
-      <span class="tname"><b>${t(`track.${d.id}.name`)}</b><em>${t('title.len', { n: Math.round(T.layout(d, 4).L) })}</em></span>
-    </button>`).join('');
-  const dots = T.TRACKS.map((d) => `<i class="${d.id === T.DEF.id ? 'sel' : ''}" data-dot="${d.id}"></i>`).join('');
-  return `<div class="picker" role="group" aria-labelledby="o-track-lbl">
-    <div class="lbl2" id="o-track-lbl">${t('title.track')}</div>
-    <div class="pick-row">
-      <button type="button" class="pick-nav" id="o-track-prev" aria-label="${t('title.trackPrev')}"><span aria-hidden="true">‹</span></button>
-      <div class="tracks" id="o-tracks">${cards}</div>
-      <button type="button" class="pick-nav" id="o-track-next" aria-label="${t('title.trackNext')}"><span aria-hidden="true">›</span></button>
-    </div>
-    <div class="dots" aria-hidden="true">${dots}</div>
-    <p class="track-desc" id="o-track-desc">${t(`track.${T.DEF.id}.desc`)}</p>
-  </div>`;
-}
-/** Centre the chosen circuit in the picker's strip (it only scrolls on a phone); `smooth` for Previous / Next. */
-function centreTrack(smooth = false): void {
-  const strip = overlay.querySelector<HTMLElement>('#o-tracks');
-  const card = strip?.querySelector<HTMLElement>('.track.sel');
-  if (!strip || !card || strip.scrollWidth <= strip.clientWidth + 1) return;
-  const left = card.offsetLeft - strip.offsetLeft - (strip.clientWidth - card.offsetWidth) / 2;
-  strip.scrollTo({ left, behavior: smooth ? 'smooth' : 'auto' });
-}
-/** Choose a circuit on the title: the world, the cards, the dots and the description follow. */
-function pickTrack(id: string, scroll: 'smooth' | 'jump' | false = false): void {
-  sfx.init();
-  applyTrack(id);
-  overlay.querySelectorAll<HTMLElement>('.track').forEach((x) => { const on = x.dataset.id === T.DEF.id; x.classList.toggle('sel', on); x.setAttribute('aria-pressed', String(on)); });
-  overlay.querySelectorAll<HTMLElement>('[data-dot]').forEach((x) => x.classList.toggle('sel', x.dataset.dot === T.DEF.id));
-  const desc = overlay.querySelector('#o-track-desc');
-  if (desc) desc.textContent = t(`track.${T.DEF.id}.desc`);
-  if (scroll) centreTrack(scroll === 'smooth');
-}
-function bindTrackPicker(): void {
-  const strip = overlay.querySelector<HTMLElement>('#o-tracks')!;
-  const card = overlay.querySelector<HTMLElement>('.card.title')!;
-  const step = (k: number): void => {
-    const i = T.TRACKS.findIndex((d) => d.id === T.DEF.id);
-    const j = i + k;
-    // a step past either end wraps round, at once rather than sliding across every circuit between
-    pickTrack(T.TRACKS[(j + T.TRACKS.length) % T.TRACKS.length].id, j >= 0 && j < T.TRACKS.length ? 'smooth' : 'jump');
-  };
-  overlay.querySelector('#o-track-prev')!.addEventListener('click', () => step(-1));
-  overlay.querySelector('#o-track-next')!.addEventListener('click', () => step(1));
-  overlay.querySelectorAll<HTMLElement>('.track').forEach((b) => b.addEventListener('click', () => {
-    if (b.dataset.id === T.DEF.id) { trackDescOpen = !trackDescOpen; card.classList.toggle('desc-open', trackDescOpen); return; }
-    pickTrack(b.dataset.id!);
-  }));
-  // a swipe chooses the circuit it comes to rest on. Only a scroll the player makes (a finger or the wheel on the strip) does:
-  // the strip re-centred after a resize, or scrolled to bring a card into view, leaves the choice alone
-  let down = false, lastUser = -1e9, settle = 0;
-  const user = (): void => { lastUser = performance.now(); };
-  strip.addEventListener('pointerdown', () => { down = true; user(); });
-  for (const ev of ['pointerup', 'pointercancel']) strip.addEventListener(ev, () => { down = false; user(); });
-  strip.addEventListener('wheel', user, { passive: true });
-  strip.addEventListener('touchmove', user, { passive: true });
-  strip.addEventListener('scroll', () => {
-    if (!down && performance.now() - lastUser > 700) return;
-    window.clearTimeout(settle);
-    const done = (): void => {
-      if (down) { settle = window.setTimeout(done, 120); return; }
-      const mid = strip.getBoundingClientRect().left + strip.clientWidth / 2;
-      let best: HTMLElement | null = null, gap = 1e9;
-      strip.querySelectorAll<HTMLElement>('.track').forEach((x) => { const r = x.getBoundingClientRect(), g = Math.abs(r.left + r.width / 2 - mid); if (g < gap) { gap = g; best = x; } });
-      const id = (best as HTMLElement | null)?.dataset.id;
-      if (id && id !== T.DEF.id && screen === 'title') pickTrack(id);
-    };
-    settle = window.setTimeout(done, 140);
-  }, { passive: true });
-}
 // a rotation or a resized window keeps the chosen circuit in the middle of the strip
 window.addEventListener('resize', () => { if (screen === 'title') requestAnimationFrame(() => centreTrack()); });
-
-function showTitle(): void {
-  enter('title');
-  camMode = 'full';
-  mode = 'race';
-  overlay.className = 'overlay show';
-  const nRounds = R.CHAMP_TRACKS.length;
-  let champBtns = `<button class="cta alt" id="o-champ">${t('title.champ')}</button>`;
-  // a championship in progress keeps its own length (#132), so the button says which one it is
-  // (a phone on its side shows the shorter label, so Practice, Continue and New share one row beside the circuit)
-  if (champ && !R.champDone(champ)) champBtns = `<button class="cta alt" id="o-champ-cont"><span class="cc-long">${t('title.champContinue', { n: champ.rounds.length + 1, m: nRounds })}</span><span class="cc-short">${t('title.champContinueShort', { n: champ.rounds.length + 1, m: nRounds })}</span> <span class="sub">${lengthTag(champ.length)} · ${setupTag(champ.setup)}</span></button><button class="cta alt small" id="o-champ">${t('title.champNew')}</button>`;
-  else if (champ) champBtns = `<button class="cta alt" id="o-champ-view">${t('title.champView')}</button><button class="cta alt small" id="o-champ">${t('title.champNew')}</button>`;
-  // the automatic switch to Low (#66) says so in the graphics group: Settings opens by itself the first time that notice is due
-  let autoOpened = false;
-  if (autoQuality.undoTarget(preset) && !autoNoteShown) { autoNoteShown = true; autoOpened = true; titleOpen.add('settings'); }
-  // #152: body copy is 16 px and every control 44 px; the notes, the setup description, the rival blurbs, the play-mode notes
-  // and the graphics / touch settings are folded behind a toggle each (one tap), still all on the card.
-  // #153: mobile first, in the order a player needs: the circuit, the race options, Start Race (full width, never under
-  // anything), Practice and Championship, then text links for the rest. No row of it is sticky, so nothing can cover Start.
-  // A phone on its side puts the logo, circuit and links in a column left of the options and Start (style.css)
-  overlay.innerHTML = `<div class="card title${trackDescOpen ? ' desc-open' : ''}">
-    <div class="t-side">
-      <div class="t-head">
-        <div class="logo">${t('title.name')}</div>
-        <div class="tag">${t('title.tag')}</div>
-        <p id="o-goal">${t('title.goalShort', { n: raceLength(raceLen).laps })}</p>
-      </div>
-      ${trackPickerHtml()}
-    </div>
-    <div class="t-main">
-      <div class="setup">
-        ${lengthRadiosHtml('rlen', raceLen, LENGTH_IDS, t('len.note'), true)}
-        ${setupRadiosHtml('rsetup', carSetupId, SETUP_IDS, t('setup.note'), SETUP_IDS, true)}
-        <div class="who">
-          <label class="ini"><span class="lbl2">${t('title.initials')}</span><input id="o-ini" maxlength="${R.MAX_INITIALS}" placeholder="${R.ANON}" value="${R.savedInitialsRaw().replace(/"/g, '')}" autocomplete="off" autocapitalize="characters" enterkeyhint="done" spellcheck="false"></label>
-          <div class="carpick"><span class="lbl2" id="o-car-lbl">${t('title.car')}<span class="car-now"> · <span id="o-car-name">${carName(carId)}</span></span></span>${carPickerHtml()}</div>
-        </div>
-      </div>
-      <div class="t-go">
-        <button class="cta" id="o-start">${t('title.start')}</button>
-        <div class="t-modes">
-          <button class="cta alt" id="o-practice">${t('title.practice')}</button>
-          ${champBtns}
-        </div>
-      </div>
-    </div>
-    <div class="t-more">
-      <div class="t-links">
-        <button class="linkbtn" id="o-boards">${t('title.boards')}</button>
-        ${onlineLinksHtml()}
-        ${howToButtonHtml(false)}
-        ${tipToggleHtml('settings', t('title.settings'), 1, 'linkbtn', 'o-settings')}
-        ${tipToggleHtml('modes', t('title.modesInfo'), 1, 'linkbtn', 'o-modes')}
-      </div>
-      ${onlineNoticeHtml()}
-      ${tipHtml('settings', settingsHtml())}
-      ${tipHtml('modes', `<p class="modes">${t('net.localNote')}</p>${online.state === 'available' ? `<p class="modes">${t('net.onlineNote')}</p>` : ''}`)}
-      ${rivalsHtml()}
-    </div>
-  </div>`;
-  syncRecheck();
-  bindHowTo();
-  bindTips();
-  bindTrackPicker();
-  centreTrack();
-  overlay.querySelector('#o-online')?.addEventListener('click', () => { sfx.init(); showOnline(); });
-  overlay.querySelector('#o-reload')?.addEventListener('click', () => location.reload());
-  overlay.querySelector<HTMLButtonElement>('#o-retry')?.addEventListener('click', (e) => {
-    const b = e.currentTarget as HTMLButtonElement;
-    b.disabled = true;
-    void probeHealth().then((st) => applyOnline(afterRetry(st), true));
-  });
-  overlay.querySelector('#o-account')?.addEventListener('click', () => { sfx.init(); showAccount(); });
-  overlay.querySelector('#o-rejoin')?.addEventListener('click', () => { sfx.init(); const st = loadSeat(seatStore()); if (st) void netBegin((n) => n.resume(st)); });
-  overlay.querySelectorAll<HTMLElement>('.car').forEach((b) => b.addEventListener('click', () => {
-    carId = b.dataset.car!; R.saveCar(carId);
-    overlay.querySelectorAll('.car').forEach((x) => { x.classList.toggle('sel', x === b); x.setAttribute('aria-pressed', String(x === b)); });
-    overlay.querySelector('#o-car-name')!.textContent = carName(carId);
-    setRace(newRace());
-  }));
-  bindSettings();
-  bindRadios('rlen', (id) => {
-    chooseLength(id);
-    overlay.querySelector('#o-goal')!.textContent = t('title.goalShort', { n: raceLength(raceLen).laps });
-    setRace(newRace());
-  });
-  // the setup is the next race's (#133): the grid shown behind the menu is rebuilt with it, nothing running is changed
-  bindRadios('rsetup', (id) => { chooseSetup(id); syncSetupDesc('rsetup', carSetupId); setRace(newRace()); });
-  const ini = overlay.querySelector<HTMLInputElement>('#o-ini')!;
-  ini.addEventListener('input', () => R.saveInitialsRaw(ini.value));
-  ini.addEventListener('keydown', (e) => { if (e.key === 'Enter') ini.blur(); e.stopPropagation(); });
-  overlay.querySelector('#o-start')!.addEventListener('click', () => { sfx.init(); startSession('race'); });
-  overlay.querySelector('#o-practice')!.addEventListener('click', () => { sfx.init(); startSession('practice'); });
-  // a new championship takes the length chosen now and keeps it for every round (#132)
-  // ...and the setup chosen now for its first round (#133); it can be changed between rounds
-  overlay.querySelector('#o-champ')!.addEventListener('click', () => { sfx.init(); champ = R.newChamp(carId, R.currentInitials(), raceLen, carSetupId); startChampRound(); });
-  overlay.querySelector('#o-champ-cont')?.addEventListener('click', () => { sfx.init(); startChampRound(); });
-  overlay.querySelector('#o-champ-view')?.addEventListener('click', () => { sfx.init(); showChamp(null); });
-  overlay.querySelector('#o-boards')!.addEventListener('click', () => { sfx.init(); lbSetup = carSetupId; showBoards(); });
-  // Settings opened by itself for the automatic-Low notice (#66, #152): the card scrolls just far enough to show it and its
-  // Undo, which on a short screen would otherwise sit below the fold (Start Race stays in view: it is near the top)
-  if (autoOpened) overlay.querySelector('#o-gfx-auto')?.scrollIntoView({ block: 'nearest' });
-}
-
-function showPause(): void {
-  if (net) { showNetMenu(); return; }
-  enter('pause');
-  overlay.className = 'overlay show';
-  const title = mode === 'practice' ? t('prac.title') : mode === 'champ' && champ ? t('champ.round', { n: champ.rounds.length + 1, m: R.CHAMP_TRACKS.length }) : t('pause.title');
-  overlay.innerHTML = `<div class="card">
-    <h2>${title}</h2>
-    ${mode === 'practice' ? `<p>${t('prac.hint')}</p>` : ''}
-    ${controlsHtml()}
-    ${settingsHtml()}
-    <div class="row"><button class="cta" id="o-resume">${t('pause.resume')}</button><button class="cta alt" id="o-restart">${t('pause.restart')}</button><button class="cta alt" id="o-menu">${t('pause.menu')}</button></div>
-  </div>`;
-  bindSettings();
-  bindHowTo();
-  overlay.querySelector('#o-resume')!.addEventListener('click', resume);
-  overlay.querySelector('#o-restart')!.addEventListener('click', restartSession);
-  overlay.querySelector('#o-menu')!.addEventListener('click', toMenu);
-}
 
 function resume(): void { enter('race'); overlay.className = 'overlay'; overlay.innerHTML = ''; stepper.rebase(); }
 
 /** Text from other people (driver names, room codes) is always escaped before it goes into markup. */
 const esc = escHtml;
-
-function colorDot(c: number): string { return `<i style="background:#${c.toString(16).padStart(6, '0')}"></i>`; }
-
-function showResults(): void {
-  if (mode === 'champ') { recordChampRound(); showChamp(race); return; }
-  enter('results');
-  const res = race.results();
-  const mine = me();
-  const pos = res.findIndex((r) => isMe(r.car)) + 1;
-  // classified rows only get a position and a time; DQ and DNF rows say so instead and never inherit a place
-  const winner = res[0].status === 'finished' ? res[0].time : NaN;
-  const timeCell = (r: (typeof res)[number], i: number): string => {
-    if (r.status === 'dq') return `<td class="mono dq">${t('res.dq')}</td>`;
-    if (r.status === 'dnf') return `<td class="mono">${t('res.dnf')}</td>`;
-    return `<td class="mono">${i === 0 ? fmt(r.time) : '+' + (r.time - winner).toFixed(1) + 's'}${r.est ? ` <small>(${t('res.est')})</small>` : ''}</td>`;
-  };
-  const rows = res.map((r, i) => `<tr class="${isMe(r.car) ? 'me' : ''}"><td>${r.status === 'finished' ? i + 1 : '–'}</td><td>${colorDot(r.car.color)}${esc(carLabel(r.car, localId))} ${setupChip(r.car.setup.id)}</td>
-    ${timeCell(r, i)}
-    <td class="mono">${fmt(r.car.bestLap)}</td><td>${r.car.pitStops}</td><td>${flags(r.car) || '–'}${r.status === 'dq' ? ` <small>${t(`res.dqReason.${r.car.dqReason}`)}</small>` : ''}</td></tr>`).join('');
-  const place = mine.status === 'dq' ? `${t('res.youDq')} · ${t(`res.dqReason.${mine.dqReason}`)}` : mine.status === 'finished' ? t('res.youPlace', { n: pos }) : t('res.youDnf');
-  overlay.className = 'overlay show';
-  overlay.innerHTML = `<div class="card results">
-    <div class="lbl2 res-len">${t(`track.${T.DEF.id}.name`)} · ${lengthTag(race.length.id)} · <span class="res-setup">${setupTag(mine.setup.id)}</span></div>
-    <h2>${pos === 1 && mine.status === 'finished' ? '🏆 ' + t('res.win') : t('res.title')}</h2>
-    <div class="place">${place}</div>
-    <div class="tscroll"><table><thead><tr><th>#</th><th>${t('res.driver')}</th><th>${t('res.time')}</th><th>${t('res.best')}</th><th>${t('res.pits')}</th><th>${t('res.pen')}</th></tr></thead><tbody>${rows}</tbody></table></div>
-    ${localDebrief(mine.status === 'finished' ? pos : null)}
-    ${localCareerNote()}
-    <div class="row"><button class="cta" id="o-again">${t('res.again')} <small>(R)</small></button><button class="cta alt" id="o-menu">${t('pause.menu')}</button></div>
-  </div>`;
-  overlay.querySelector('#o-again')!.addEventListener('click', restartSession);
-  overlay.querySelector('#o-menu')!.addEventListener('click', toMenu);
-}
-
-/**
- * The local driver's debrief (#134) from this device's own race: frozen at the driver's finish, DQ or DNF, so the AI run-on
- * and the cool-down lap add nothing, and computed again identically however often the card is drawn.
- */
-function localDebrief(pos: number | null): string {
-  const p = me();
-  if (race.phase !== 'done') return '';
-  const d = race.debrief(p.id);
-  return debriefHtml({
-    d, pb: comparePb(pbBefore, p.bestLap > 0 ? p.bestLap : null), open: debriefOpen(),
-    facts: { status: p.status, dqReason: p.dqReason, dnfReason: p.dnfReason, timePen: p.timePen, pos },
-    where: `${t(`track.${race.T.DEF.id}.name`)} · ${lengthTag(race.length.id)} · ${setupTag(p.setup.id)}`,
-  });
-}
-
-// ---- championship
-const driverName = (idx: number): string => (idx === 0 ? t('hud.you') : ['', 'Red Comet', 'Blue Arrow', 'Green Viper'][idx]);
-const driverColor = (idx: number): number => (idx === 0 ? R.livery(champ?.car ?? carId).color : [0, 0xe8322a, 0x2a6df0, 0x22b04b][idx]);
-
-/** Store the finished round's result once (points are never awarded twice). */
-function recordChampRound(): void {
-  // only the race's final standings (every car terminal) are recorded: never a live or estimated order
-  if (!champ || champRoundSaved || R.champDone(champ) || race.phase !== 'done' || !race.final) return;
-  champ.rounds.push(R.roundRecord(T.DEF.id, race.final.map((x) => ({ car: { idx: x.slot }, status: x.status, time: x.time ?? 0 })), me().setup.id));
-  R.saveChamp(champ);
-  champRoundSaved = true;
-}
-
-function startChampRound(): void {
-  if (!champ || R.champDone(champ)) { showTitle(); return; }
-  carId = champ.car;
-  applyTrack(R.CHAMP_TRACKS[champ.rounds.length]);
-  champRoundSaved = false;
-  startSession('champ');
-}
-
-/** Round results + cumulative standings (after a race), or the final table. */
-function showChamp(finished: Race | null): void {
-  if (!champ) { showTitle(); return; }
-  enter('champ');
-  camMode = 'full';
-  const c = champ;
-  const nR = R.CHAMP_TRACKS.length;
-  const done = R.champDone(c);
-  const last = c.rounds[c.rounds.length - 1];
-  let roundHtml = '';
-  if (finished && last) {
-    const rows = last.order.map((o, i) => `<tr class="${o.idx === 0 ? 'me' : ''}"><td>${o.dq || o.dnf ? '–' : i + 1}</td><td>${colorDot(driverColor(o.idx))}${driverName(o.idx)}</td><td class="mono">${o.dq ? t('champ.dq') : o.dnf ? t('champ.dnf') : fmt(o.time)}</td><td class="mono">${R.roundPoints(last, i)}</td></tr>`).join('');
-    roundHtml = `<h3>${t('champ.roundResults')} · ${t(`track.${last.track}.name`)}</h3>
-      <div class="tscroll"><table><thead><tr><th>#</th><th>${t('res.driver')}</th><th>${t('res.time')}</th><th>${t('champ.points')}</th></tr></thead><tbody>${rows}</tbody></table></div>`;
-    // the round's own race (#134): the player's debrief under the round's classification (slot 0 is the player in a championship)
-    if (finished === race && race.final) {
-      const i = last.order.findIndex((o) => o.idx === 0);
-      roundHtml += localDebrief(i >= 0 && !last.order[i].dnf && !last.order[i].dq ? i + 1 : null);
-    }
-  }
-  const st = R.standings(c, 4);
-  const stRows = st.map((x, i) => `<tr class="${x.idx === 0 ? 'me' : ''}"><td>${i + 1}</td><td>${colorDot(driverColor(x.idx))}${driverName(x.idx)}</td><td class="mono">${x.points}</td><td class="mono">${x.wins}</td><td class="mono">${x.seconds}</td></tr>`).join('');
-  const roundsLine = R.CHAMP_TRACKS.map((id, i) => `<span class="rchip ${i < c.rounds.length ? 'done' : ''} ${i === c.rounds.length && !done ? 'next' : ''}">${i + 1}. ${t(`track.${id}.name`)}</span>`).join('');
-  const champion = st[0];
-  const head = done ? `<h2>🏆 ${t('champ.final')}</h2><div class="place">${champion.idx === 0 ? t('champ.youChampion') : t('champ.champion', { name: driverName(champion.idx) })}</div>` : `<h2>${t('champ.title')}</h2><div class="place">${t('champ.round', { n: c.rounds.length, m: nR })}</div>`;
-  overlay.className = 'overlay show';
-  overlay.innerHTML = `<div class="card results champ">
-    <div class="lbl2 res-len">${lengthTag(c.length)}</div>
-    ${head}
-    <div class="rounds">${roundsLine}</div>
-    ${roundHtml}
-    <h3>${done ? t('champ.final') : t('champ.standings')}</h3>
-    <div class="tscroll"><table><thead><tr><th>#</th><th>${t('res.driver')}</th><th>${t('champ.points')}</th><th>${t('champ.wins')}</th><th>${t('champ.seconds')}</th></tr></thead><tbody>${stRows}</tbody></table></div>
-    ${localCareerNote()}
-    ${done ? '' : setupRadiosHtml('csetup', c.setup, SETUP_IDS, t('setup.champNote'))}
-    <div class="row">${done ? '' : `<button class="cta" id="o-next">${t('champ.continue', { n: c.rounds.length + 1 })}</button>`}<button class="cta alt" id="o-menu">${t('champ.menu')}</button></div>
-  </div>`;
-  // between rounds only (#133): the next round races the setup chosen here; a round under way never changes
-  bindRadios('csetup', (id) => { c.setup = setupOr(id); R.saveChamp(c); chooseSetup(id); syncSetupDesc('csetup', c.setup); });
-  overlay.querySelector('#o-next')?.addEventListener('click', () => { sfx.init(); startChampRound(); });
-  overlay.querySelector('#o-menu')!.addEventListener('click', toMenu);
-}
-
-// ---- leaderboards
-function showBoards(): void {
-  enter('boards');
-  overlay.className = 'overlay show';
-  const tabs = T.TRACKS.map((d) => `<button class="tab ${d.id === lbTrack ? 'sel' : ''}" data-id="${d.id}">${t(`track.${d.id}.name`)}</button>`).join('');
-  const kinds = (['practice', 'race'] as R.BoardKind[]).map((k) => `<button class="tab kind ${k === lbKind ? 'sel' : ''}" data-kind="${k}">${t(`boards.${k}`)}</button>`).join('');
-  const rows = R.board(lbKind, lbTrack, lbSetup);
-  const body = rows.length ? rows.map((r, i) => `<tr class="${freshIds.has(r.id) ? 'fresh' : ''}"><td>${i + 1}</td><td>${r.initials}</td><td>${colorDot(R.livery(r.car).color)}${R.livery(r.car).name}</td><td class="mono">${R.fmtMs(r.ms)}</td><td>${freshIds.has(r.id) ? `<span class="chip yel">${t('boards.new')}</span>` : ''}</td></tr>`).join('')
-    : `<tr><td colspan="5" class="empty">${t('boards.empty')}</td></tr>`;
-  overlay.innerHTML = `<div class="card results boards">
-    <h2>${t('boards.title')}</h2>
-    <p>${t('boards.hint')} ${t('boards.setupHint')}</p>
-    <div class="tabs">${tabs}</div>
-    <div class="tabs">${kinds}</div>
-    <div class="tabs" role="radiogroup" aria-label="${t('setup.label')}">${SETUP_IDS.map((id) => `<button class="tab setupf ${id === lbSetup ? 'sel' : ''}" role="radio" aria-checked="${id === lbSetup}" data-lbsetup="${id}">${setupName(id)}</button>`).join('')}</div>
-    <div class="lbl2 lb-setup">${t(`track.${lbTrack}.name`)} · ${t(`boards.${lbKind}`)} · ${setupTag(lbSetup)}</div>
-    <div class="tscroll"><table><thead><tr><th>${t('boards.rank')}</th><th>${t('boards.initials')}</th><th>${t('boards.car')}</th><th>${t('boards.time')}</th><th></th></tr></thead><tbody>${body}</tbody></table></div>
-    <div class="row"><button class="cta alt" id="o-back">${t('boards.back')}</button></div>
-  </div>`;
-  overlay.querySelectorAll<HTMLElement>('.tab[data-id]').forEach((b) => b.addEventListener('click', () => { lbTrack = b.dataset.id!; showBoards(); }));
-  overlay.querySelectorAll<HTMLElement>('.tab[data-kind]').forEach((b) => b.addEventListener('click', () => { lbKind = b.dataset.kind as R.BoardKind; showBoards(); }));
-  overlay.querySelectorAll<HTMLElement>('.tab[data-lbsetup]').forEach((b) => b.addEventListener('click', () => { lbSetup = setupOr(b.dataset.lbsetup); showBoards(); (overlay.querySelector(`[data-lbsetup="${lbSetup}"]`) as HTMLElement | null)?.focus(); }));
-  overlay.querySelector('#o-back')!.addEventListener('click', showTitle);
-}
 
 /** Back to the title screen with a fresh grid on the current circuit. */
 function toMenu(): void {
@@ -1217,9 +653,6 @@ const LOCAL_TO_NET: Record<string, LiveryId> = { sunburst: 'yellow', blaze: 'ora
 const netName = (): string => { try { return localStorage.getItem(NAME_KEY) ?? ''; } catch { return ''; } };
 const netLivery = (): LiveryId => { let v: string | null = null; try { v = localStorage.getItem(NLIV_KEY); } catch { /* ignore */ } return NET_LIVERIES.find((l) => l.id === v)?.id ?? LOCAL_TO_NET[carId] ?? 'yellow'; };
 const seatStore = (): Storage | null => { try { return window.sessionStorage; } catch { return null; } };
-const hashCode = (): string => /^#room=([A-Za-z0-9]{6})$/.exec(location.hash)?.[1]?.toUpperCase() ?? '';
-const modeLabel = (m: string): string => t(m === 'multiplayer' ? 'net.modeMulti' : m === 'solo' ? 'net.modeSolo' : m === 'championship' ? 'net.modeChamp' : m === 'practice' ? 'career.mode.practice' : 'net.modeOther');
-const hexc = (c: number): string => '#' + c.toString(16).padStart(6, '0');
 
 /** The title's online links (#153): Online, Rejoin a held seat and Sign in (or the driver's profile), among the text links. */
 function onlineLinksHtml(): string {
@@ -1269,100 +702,6 @@ function onProtocolRefused(): void {
   void probeHealth().then((st) => applyOnline(afterProtocolRefusal(st), true));
 }
 
-/** The online menu: create a multiplayer room, join one by code, or start a connected solo race with AI. */
-function showOnline(): void {
-  if (online.state !== 'available') { showTitle(); return; }
-  // a re-render of this menu (the sign-in check answered, another tab switched identity) keeps a room code being typed
-  const typedCode = screen === 'online' ? overlay.querySelector<HTMLInputElement>('#n-code')?.value : undefined;
-  enter('online');
-  overlay.className = 'overlay show';
-  const liv = netLivery();
-  const livs = NET_LIVERIES.map((l) => `<button class="car ${l.id === liv ? 'sel' : ''}" data-nlivery="${l.id}" aria-label="${l.id}"><i style="background:${hexc(l.color)}"></i>${t(`net.liv.${l.id}`)}</button>`).join('');
-  overlay.innerHTML = `<div class="card online">
-    <h2>${t('net.online')}</h2>
-    <div class="setup">
-      <label class="ini nm"><span class="lbl2">${t('net.name')}</span><input id="n-name" maxlength="${LIMITS.nameMax}" placeholder="${t('net.namePh')}" autocomplete="nickname" enterkeyhint="done" spellcheck="false"></label>
-      <div><span class="lbl2">${t('net.livery')}</span><div class="cars">${livs}</div></div>
-    </div>
-    <p><small>${t('net.trackNote', { track: t(`track.${T.DEF.id}.name`) })}</small></p>
-    ${netLengths().length > 1 ? lengthRadiosHtml('nrlen', netLength(), netLengths(), t('net.lengthNote', { len: lengthTag(netLength()) })) : `<p class="len-old"><small>${t('net.lengthOld')}</small></p>`}
-    ${netSetups().length > 1 ? setupRadiosHtml('nrsetup', netSetup(), netSetups()) : `<p class="setup-old"><small>${t('setup.oldServer')}</small></p>`}
-    <div class="modes-grid">
-      <div class="mode-box"><b>${t('net.modeMulti')}</b><small>${t('net.multiDesc')}</small>
-        <label class="chk"><input type="checkbox" id="n-ai"> ${t('net.aiFill')}</label>
-        <button class="cta" id="n-create">${t('net.create')}</button>
-        <div class="join"><input id="n-code" maxlength="${LIMITS.codeLength}" placeholder="${t('net.codePh')}" autocomplete="off" autocapitalize="characters" spellcheck="false" enterkeyhint="go"><button class="cta alt" id="n-join">${t('net.join')}</button></div>
-      </div>
-      <div class="mode-box"><b>${t('net.modeSolo')}</b><small>${t('net.soloDesc')}</small><button class="cta alt" id="n-solo">${t('net.startSolo')}</button></div>
-      ${accounts.account ? (() => { const c = connectedChamp(); return `<div class="mode-box"><b>${t('net.modeChamp')}</b><small>${t('net.champDesc', { n: c.round, m: R.CHAMP_TRACKS.length, track: t(`track.${R.CHAMP_TRACKS[c.round - 1]}.name`) })}</small><small class="champ-len" id="n-champ-len">${lengthTag(connectedChampLength() ?? netLength())}${connectedChampLength() ? '' : ` · ${t('len.champNote')}`}</small><button class="cta alt" id="n-champ">${t('net.startChamp', { n: c.round })}</button></div>`; })() : ''}
-    </div>
-    <p><small>${t(accounts.account ? 'career.onlineNote' : accountsOn() ? 'career.guestNote' : 'career.noAccounts')}</small></p>
-    <p id="n-msg" class="net-msg" role="status" aria-live="polite"></p>
-    <div class="row"><button class="cta alt" id="n-back">${t('boards.back')}</button></div>
-  </div>`;
-  const name = overlay.querySelector<HTMLInputElement>('#n-name')!;
-  const signed = accounts.account;
-  if (signed) {
-    // a signed-in driver races under the saved profile name (the server uses it whatever is sent); it is edited in Account
-    name.value = signed.displayName; name.readOnly = true;
-    name.closest('label')!.insertAdjacentHTML('beforeend', `<small class="acct-note">${t('acct.nameFromProfile')}</small>`);
-  } else {
-    name.value = netName() || (R.currentInitials() === R.ANON ? '' : R.currentInitials());
-    name.addEventListener('input', () => { try { localStorage.setItem(NAME_KEY, name.value); } catch { /* ignore */ } });
-  }
-  const code = overlay.querySelector<HTMLInputElement>('#n-code')!;
-  code.value = typedCode ?? hashCode();
-  for (const f of [name, code]) f.addEventListener('keydown', (e) => { e.stopPropagation(); if (e.key === 'Enter') { f.blur(); if (f === code) join(); } });
-  overlay.querySelector('#n-msg')!.textContent = netNotice;
-  // until the sign-in check answers, the page cannot say who would take the seat: room entry waits for it
-  onlinePending = entryIdentity() === null;
-  if (onlinePending) {
-    for (const id of ['#n-create', '#n-join', '#n-solo', '#n-champ']) { const b = overlay.querySelector<HTMLButtonElement>(id); if (b) b.disabled = true; }
-    if (!netNotice) overlay.querySelector('#n-msg')!.textContent = t('acct.loading');
-  }
-  overlay.querySelectorAll<HTMLElement>('[data-nlivery]').forEach((b) => b.addEventListener('click', () => {
-    try { localStorage.setItem(NLIV_KEY, b.dataset.nlivery!); } catch { /* ignore */ }
-    overlay.querySelectorAll('[data-nlivery]').forEach((x) => x.classList.toggle('sel', x === b));
-  }));
-  /** The name and identity a room is entered under, both as the page shows them now; null when entry must wait. */
-  const who = (): { n: string; expect: string | undefined } | null => {
-    const expect = entryIdentity();
-    if (expect === null) { say(t('acct.loading')); return null; }
-    if (accounts.account) return { n: accounts.account.displayName, expect };
-    // the server's guest-name rule (cleanName): a name with nothing left after it (blank, invisible-only, "(AI)") is asked for again
-    const n = cleanName(name.value);
-    if (!n) { say(t('net.err.name')); name.focus(); return null; }
-    return { n, expect };
-  };
-  const join = (): void => {
-    const w = who(); if (!w) return;
-    const c = code.value.trim().toUpperCase();
-    if (c.length !== LIMITS.codeLength) { say(t('net.err.code')); code.focus(); return; }
-    void netBegin((s) => s.join(c, w.n, netLivery(), w.expect, netSetup()));
-  };
-  // the setup goes only to a server that runs setups (NetSession drops it otherwise): every car there is Balanced (#133)
-  bindRadios('nrsetup', (id) => { chooseSetup(id); syncSetupDesc('nrsetup', netSetup()); });
-  // the length goes only to a server that runs presets (NetSession drops it otherwise): such a room is Standard
-  bindRadios('nrlen', (id) => {
-    chooseLength(id);
-    const note = overlay.querySelector('.rlen .len-note');
-    if (note) note.textContent = t('net.lengthNote', { len: lengthTag(netLength()) });
-    const cl = overlay.querySelector('#n-champ-len');
-    if (cl && !connectedChampLength()) cl.textContent = `${lengthTag(netLength())} · ${t('len.champNote')}`;
-  });
-  overlay.querySelector('#n-create')!.addEventListener('click', () => { const w = who(); if (w) void netBegin((s) => s.create(w.n, 'multiplayer', { track: T.DEF.id, aiFill: overlay.querySelector<HTMLInputElement>('#n-ai')!.checked, length: netLength() }, netLivery(), w.expect, undefined, netSetup())); });
-  overlay.querySelector('#n-join')!.addEventListener('click', join);
-  overlay.querySelector('#n-solo')!.addEventListener('click', () => { const w = who(); if (w) void netBegin((s) => s.create(w.n, 'solo', { track: T.DEF.id, length: netLength() }, netLivery(), w.expect, undefined, netSetup())); });
-  overlay.querySelector('#n-champ')?.addEventListener('click', () => {
-    const w = who(); if (!w) return;
-    const c = connectedChamp();
-    // the championship's length is chosen when its first round is started, and every later round keeps it (#132)
-    const length = connectedChampLength() ?? keepConnectedChampLength(c, netLength());
-    // each round's setup is the one chosen for it here (#133): a new choice is allowed between rounds, never during one
-    void netBegin((s) => s.create(w.n, 'championship', { track: R.CHAMP_TRACKS[c.round - 1], length }, netLivery(), w.expect, c, netSetup()));
-  });
-  overlay.querySelector('#n-back')!.addEventListener('click', () => { netNotice = ''; showTitle(); });
-}
 // ------------------------------------------------------------ accounts (docs/accounts.md)
 const localStore = (): Storage | null => { try { return window.localStorage; } catch { return null; } };
 /** Sign-in and driver profiles: offered only when the same-origin server passes its health check and has accounts. */
@@ -1399,146 +738,6 @@ window.addEventListener('storage', (e) => {
     else if (screen === 'online' && !net) showOnline();
   });
 });
-
-function accountEntryHtml(): string {
-  if (!accountsOn()) return '';
-  const a = accounts.auth;
-  if (a.state === 'loading') return `<button class="linkbtn" id="o-account" disabled aria-busy="true">${t('acct.loading')}</button>`;
-  if (a.state === 'unavailable') return `<button class="linkbtn" id="o-account">${t('acct.unavailableShort')}</button>`;
-  // the display name is the driver's own public name; other people's text is always escaped
-  if (a.state === 'signed-in') return `<button class="linkbtn" id="o-account" aria-label="${t('acct.profile')}">👤 <span class="nm">${esc(a.account.displayName)}</span></button>`;
-  return `<button class="linkbtn" id="o-account">${t('acct.signIn')}</button>`;
-}
-
-function acctErrorText(e: AuthError, detail?: string): string {
-  if (e === 'invalid_name') return t(`acct.err.name.${detail === 'too_long' || detail === 'reserved' || detail === 'blank' ? detail : 'other'}`);
-  return t(`acct.err.${e}`);
-}
-
-/** Sign in, create an account, or (signed in) edit the driver name and sign out. Built for phone keyboards: real forms, Enter submits. */
-function showAccount(tab: 'login' | 'register' = 'login'): void {
-  if (!accountsOn() || net) { showTitle(); return; }
-  enter('account');
-  overlay.className = 'overlay show';
-  const a = accounts.auth;
-  const field = (id: string, label: string, attrs: string): string =>
-    `<label class="acct-field" for="${id}"><span class="lbl2">${t(label)}</span><input id="${id}" ${attrs} spellcheck="false" autocorrect="off"></label>`;
-  let body: string;
-  if (a.state === 'signed-in') {
-    body = `<h2>${t('acct.profile')}</h2>
-      <p class="acct-who">${t('acct.signedInAs')} <b class="mono" id="a-user"></b></p>
-      <p><small>${t('acct.privateNote')}</small></p>
-      <form id="a-form" class="acct-form" novalidate>
-        ${field('a-name', 'acct.driverName', `maxlength="${LIMITS.nameMax * 2}" autocomplete="nickname" enterkeyhint="done" required`)}
-        <small>${t('acct.nameRules', { n: LIMITS.nameMax })}</small>
-        <button class="cta" type="submit" id="a-submit">${t('acct.save')}</button>
-      </form>
-      <p id="a-msg" class="net-msg" role="status" aria-live="polite"></p>
-      <section class="career" id="a-career" aria-busy="true" aria-live="polite"><h3>${t('career.title')}</h3><p><small>${t('career.loading')}</small></p></section>
-      <div class="row"><button class="cta alt" id="a-logout" type="button">${t('acct.signOut')}</button><button class="cta alt" id="a-back" type="button">${t('boards.back')}</button></div>`;
-  } else if (a.state === 'loading' || a.state === 'unavailable') {
-    body = `<h2>${t('acct.title')}</h2><p id="a-msg" class="net-msg" role="status" aria-live="polite">${t(a.state === 'loading' ? 'acct.loading' : 'acct.unavailable')}</p>
-      <div class="row">${a.state === 'unavailable' ? `<button class="cta" id="a-retry" type="button">${t('acct.retry')}</button>` : ''}<button class="cta alt" id="a-back" type="button">${t('boards.back')}</button></div>`;
-  } else {
-    const reg = tab === 'register';
-    body = `<h2>${t('acct.title')}</h2>
-      <div class="tabs" role="tablist"><button class="tab ${reg ? '' : 'sel'}" role="tab" aria-selected="${!reg}" id="a-tab-login" type="button">${t('acct.signIn')}</button><button class="tab ${reg ? 'sel' : ''}" role="tab" aria-selected="${reg}" id="a-tab-register" type="button">${t('acct.create')}</button></div>
-      <form id="a-form" class="acct-form" novalidate data-kind="${reg ? 'register' : 'login'}">
-        ${field('a-user-in', 'acct.username', `maxlength="20" autocomplete="username" autocapitalize="none" enterkeyhint="next" required`)}
-        ${reg ? `<small>${t('acct.userRules')}</small>` : ''}
-        ${field('a-pass', 'acct.password', `type="password" maxlength="128" autocomplete="${reg ? 'new-password' : 'current-password'}" enterkeyhint="${reg ? 'next' : 'go'}" required`)}
-        ${reg ? `<small>${t('acct.passRules')}</small>${field('a-name', 'acct.driverNameOpt', `maxlength="${LIMITS.nameMax * 2}" autocomplete="nickname" enterkeyhint="go"`)}<small>${t('acct.nameRules', { n: LIMITS.nameMax })}</small>` : ''}
-        <button class="cta" type="submit" id="a-submit">${t(reg ? 'acct.create' : 'acct.signIn')}</button>
-      </form>
-      <p id="a-msg" class="net-msg" role="status" aria-live="polite"></p>
-      <p><small>${t('acct.noEmail')}</small></p>
-      <div class="row"><button class="cta alt" id="a-back" type="button">${t('boards.back')}</button></div>`;
-  }
-  overlay.innerHTML = `<div class="card account">${body}</div>`;
-  const msg = overlay.querySelector<HTMLElement>('#a-msg')!;
-  msg.textContent = acctNotice || msg.textContent;
-  acctNotice = '';
-  const say2 = (text: string, kind: 'err' | 'ok' | 'busy'): void => { msg.textContent = text; msg.dataset.kind = kind; };
-  overlay.querySelector('#a-back')!.addEventListener('click', () => { if (!accounts.busy) showTitle(); });
-  overlay.querySelector('#a-retry')?.addEventListener('click', () => { void accounts.restore().then(() => { if (screen === 'account') showAccount(); }); showAccount(); });
-  overlay.querySelector('#a-tab-login')?.addEventListener('click', () => showAccount('login'));
-  overlay.querySelector('#a-tab-register')?.addEventListener('click', () => showAccount('register'));
-  const form = overlay.querySelector<HTMLFormElement>('#a-form');
-  const inputs = [...overlay.querySelectorAll<HTMLInputElement>('#a-form input')];
-  const setBusy = (on: boolean, label: string): void => {
-    overlay.querySelectorAll<HTMLButtonElement>('.account button').forEach((b) => { b.disabled = on; });
-    inputs.forEach((i) => { i.readOnly = on; });
-    form?.setAttribute('aria-busy', String(on));
-    if (on) say2(label, 'busy');
-  };
-  const invalid = (el: HTMLInputElement | null, text: string): void => { say2(text, 'err'); if (el) { el.setAttribute('aria-invalid', 'true'); el.focus(); } };
-  inputs.forEach((i) => i.addEventListener('input', () => i.removeAttribute('aria-invalid')));
-  if (a.state === 'signed-in') {
-    overlay.querySelector('#a-user')!.textContent = a.account.username;
-    loadCareer(a.account.id);
-    const nameEl = overlay.querySelector<HTMLInputElement>('#a-name')!;
-    nameEl.value = a.account.displayName;
-    form!.addEventListener('submit', (e) => {
-      e.preventDefault();
-      if (accounts.busy) return;
-      setBusy(true, t('acct.saving'));
-      void accounts.rename(nameEl.value).then((r) => {
-        if (screen !== 'account') return;
-        if (r.ok) { showAccount(); say2(t('acct.saved'), 'ok'); return; }
-        if (r.error === 'session_expired' || r.error === 'signed_out') { showAccount(); return; }
-        // signed out and in again in another tab: nothing was saved, and the screen now shows who this browser really is
-        if (r.error === 'identity_changed') { onIdentityChanged(); acctNotice = t('acct.err.identity_changed'); showAccount(); return; }
-        setBusy(false, '');
-        invalid(nameEl, acctErrorText(r.error, r.detail));
-      });
-    });
-    overlay.querySelector('#a-logout')!.addEventListener('click', () => {
-      if (accounts.busy) return;
-      setBusy(true, t('acct.signingOut'));
-      void accounts.logout().then((r) => {
-        onIdentityChanged();
-        if (screen !== 'account') return;
-        if (r.ok) { acctNotice = t('acct.signedOut'); showAccount(); return; }
-        // the server has not revoked the session: this device is still signed in
-        setBusy(false, '');
-        say2(t(r.error === 'unreachable' ? 'acct.err.signOutUnreachable' : 'acct.err.signOutFailed'), 'err');
-      });
-    });
-  } else if (form) {
-    const reg = form.dataset.kind === 'register';
-    const user = overlay.querySelector<HTMLInputElement>('#a-user-in')!, pass = overlay.querySelector<HTMLInputElement>('#a-pass')!;
-    const nameEl = overlay.querySelector<HTMLInputElement>('#a-name');
-    user.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); pass.focus(); } });
-    if (reg) pass.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); nameEl?.focus(); } });
-    form.addEventListener('submit', (e) => {
-      e.preventDefault();
-      if (accounts.busy) return;
-      if (!/^[A-Za-z0-9_-]{3,20}$/.test(user.value.trim())) { invalid(user, t('acct.err.invalid_username')); return; }
-      const n = [...pass.value].length;
-      if (reg ? n < 10 || n > 128 : !n) { invalid(pass, t(reg ? 'acct.err.invalid_password' : 'acct.err.passwordRequired')); return; }
-      setBusy(true, t(reg ? 'acct.creating' : 'acct.signingIn'));
-      const go = reg ? accounts.register(user.value, pass.value, nameEl?.value ?? '') : accounts.login(user.value, pass.value);
-      void go.then((r) => {
-        if (screen !== 'account') return;
-        if (r.ok) { onIdentityChanged(); acctNotice = t(reg ? 'acct.created' : 'acct.welcome', { name: r.account.displayName }); showAccount(); return; }
-        // the account was created but the server could not sign it in: send the driver to sign in (registering again would
-        // only say the name is taken), with the username filled in
-        if (reg && r.error === 'unavailable' && r.detail === 'account_created') {
-          const name = user.value.trim();
-          acctNotice = t('acct.err.createdNotSignedIn');
-          showAccount('login');
-          const u = overlay.querySelector<HTMLInputElement>('#a-user-in');
-          if (u) u.value = name;
-          return;
-        }
-        setBusy(false, '');
-        pass.value = '';
-        invalid(r.error === 'invalid_name' ? nameEl : r.error === 'username_taken' || r.error === 'invalid_username' ? user : pass, acctErrorText(r.error, r.detail));
-      });
-    });
-    if (!('ontouchstart' in window)) user.focus({ preventScroll: true });
-  }
-}
 
 /** A sign-in, sign-out or switch: nothing this page holds for the previous identity survives it. */
 function onIdentityChanged(): void {
@@ -1707,11 +906,6 @@ function onNetResult(r: ResultView, fresh: boolean): void {
 }
 
 // ------------------------------------------------------------ career (docs/career.md)
-/** Local and offline races never earn account points: said wherever the server could have offered them. */
-function localCareerNote(): string {
-  if (!accountsOn()) return '';
-  return `<p class="career-note"><small>${t(accounts.account ? 'career.localNote' : 'career.localNoteGuest')}</small></p>`;
-}
 
 /** The race lengths the connected server runs (#132): none from a server older than presets, which races Standard only. */
 const netLengths = (): readonly RaceLengthId[] => (online.state === 'available' ? online.lengths : []);
@@ -1775,53 +969,6 @@ function onNetAwards(a: AwardsView): void {
   }
 }
 
-/** The server's career points for this race, with whether they are stored yet. Nothing here is computed by the browser. */
-function awardsHtml(r: ResultView, a: AwardsView | null): string {
-  // a server without accounts records no careers: nothing to say
-  if (!accountsOn() && !a?.rows.some((x) => x.credit)) return '';
-  if (!a || a.raceId !== r.raceId) return `<p class="sync" data-sync="none"><small>${t('career.waiting')}</small></p>`;
-  if (!a.eligible) return `<p class="sync" data-sync="none"><small>${t(a.reason === 'practice' ? 'career.practice' : 'career.incomplete')}</small></p>`;
-  const byId = new Map(r.participants.map((x) => [x.id, x]));
-  const rows = a.rows.filter((x) => x.credit).map((x) => {
-    const p = byId.get(x.participant);
-    const where = x.status === 'dq' ? t('res.dq') : x.status === 'dnf' ? t('res.dnf') : `P${x.pos}`;
-    return `<tr class="${x.participant === localId ? 'me' : ''}" data-pts="${x.points}"><td>#${p?.num ?? 0} ${esc(x.participant === localId ? t('hud.you') : p?.name ?? '')}</td><td>${where}</td><td class="mono">+${x.points}</td></tr>`;
-  }).join('');
-  const mine = a.rows.find((x) => x.participant === localId);
-  const guestNote = mine && !mine.credit ? `<p><small>${t(accountsOn() ? 'career.youGuest' : 'career.noAccounts')}</small></p>` : '';
-  const others = a.rows.some((x) => !x.credit) ? `<p><small>${t('career.noCredit')}</small></p>` : '';
-  // nobody signed in: no accounts to save to, so no sync state either
-  if (!rows) return guestNote;
-  return `<div class="lbl2">${t('career.racePoints')}</div>
-    <div class="tscroll"><table><thead><tr><th>${t('res.driver')}</th><th>#</th><th>${t('champ.points')}</th></tr></thead><tbody>${rows}</tbody></table></div>
-    ${guestNote}${others}
-    <p class="sync" data-sync="${a.sync}" role="status">${t(`career.sync.${a.sync}`)}</p>`;
-}
-
-const fmtDate = (iso: string): string => { const d = new Date(iso); return Number.isNaN(d.getTime()) ? '' : d.toLocaleDateString(undefined, { day: 'numeric', month: 'short' }); };
-const careerMode = (m: string): string => t(`career.mode.${m}`);
-
-/** The signed-in driver's career from the server, rendered into the profile once it arrives (for that account only). */
-function loadCareer(accountId: string): void {
-  void accounts.stats().then((r) => {
-    const el = overlay.querySelector<HTMLElement>('#a-career');
-    if (screen !== 'account' || !el || accounts.account?.id !== accountId) return;
-    el.removeAttribute('aria-busy');
-    el.innerHTML = r.ok ? careerHtml(r.stats) : `<h3>${t('career.title')}</h3><p><small>${t(`acct.err.${r.error}`)}</small></p>`;
-  });
-}
-function careerHtml(s: CareerStats): string {
-  const c = s.career;
-  const tile = (v: number | string, label: string, id: string): string => `<div class="tile" data-k="${id}"><b class="mono">${v}</b><small>${label}</small></div>`;
-  const bests = s.bests.length ? `<div class="tscroll"><table><thead><tr><th>${t('career.circuit')}</th><th>${t('career.mode')}</th><th>${t('res.best')}</th></tr></thead><tbody>${s.bests.map((b) => `<tr data-mode="${b.mode}" data-setup="${setupOr(b.setup)}"><td>${t(`track.${b.track}.name`)}${b.current ? '' : ` <small>(${t(b.tuningCurrent === false ? 'career.oldTuning' : 'career.oldLayout')})</small>`}</td><td>${careerMode(b.mode)} ${setupChip(b.setup)}</td><td class="mono">${R.fmtMs(b.lapMs)} <small>${t('career.lapN', { n: b.lap })} · ${fmtDate(b.setAt)}</small></td></tr>`).join('')}</tbody></table></div>` : `<p><small>${t('career.noBests')}</small></p>`;
-  const recent = s.recent.length ? `<div class="tscroll"><table><thead><tr><th>${t('career.date')}</th><th>${t('career.mode')}</th><th>${t('career.circuit')}</th><th>#</th><th>${t('champ.points')}</th></tr></thead><tbody>${s.recent.map((x) => `<tr data-race="${esc(x.raceId)}"><td>${fmtDate(x.finishedAt)}</td><td>${careerMode(x.mode)}${x.championship ? ` <small>R${x.championship.round}</small>` : ''} <small class="len">${lengthName(lengthOr(x.length))}</small> ${setupChip(x.setup)}</td><td>${t(`track.${x.track}.name`)}</td><td>${x.status === 'dq' ? t('res.dq') : x.status === 'dnf' ? t('res.dnf') : `P${x.pos}/${x.field}`}</td><td class="mono">${x.points}</td></tr>`).join('')}</tbody></table></div>` : `<p><small>${t('career.noRaces')}</small></p>`;
-  return `<h3>${t('career.title')} · <span class="nm">${esc(s.displayName)}</span></h3>
-    <div class="tiles">${tile(c.points, t('career.points'), 'points')}${tile(c.wins, '🥇', 'wins')}${tile(c.seconds, '🥈', 'seconds')}${tile(c.thirds, '🥉', 'thirds')}${tile(c.races, t('career.races'), 'races')}</div>
-    <p><small>${t('career.policy', { a: s.scoring.podium[0] ?? 0, b: s.scoring.podium[1] ?? 0, c: s.scoring.podium[2] ?? 0 })}</small></p>
-    <h3>${t('career.bests')}</h3>${bests}
-    <h3>${t('career.recent')}</h3>${recent}`;
-}
-
 function onNetNack(m: Extract<ServerMsg, { t: 'nack' }>): void {
   // a refused settings change (say, a length a seated older page cannot show, #132) leaves the room as it was: redraw the
   // lobby so its selectors show the room's real settings again, then say why
@@ -1852,240 +999,8 @@ function onNetEnd(why: EndReason, detail?: string): void {
   if (why === 'left' || online.state !== 'available') showTitle(); else showOnline();
 }
 
-function seatRow(p: PublicRoom['participants'][number], hostId: string | null): string {
-  const tags: string[] = [];
-  if (p.id === net?.me) tags.push(`<span class="chip yel">${t('hud.you')}</span>`);
-  if (p.id === hostId) tags.push(`<span class="chip cyan">${t('net.host')}</span>`);
-  if (p.left) tags.push(`<span class="chip red">${t('net.left')}</span>`);
-  else if (!p.connected) tags.push(`<span class="chip org">${t('net.disconnected')}</span>`);
-  if (!p.left && p.id !== hostId) tags.push(p.ready ? `<span class="chip grn">${t('net.ready')}</span>` : `<span class="chip dim">${t('net.notReady')}</span>`);
-  const asked = p.liveryRequested ? ` <small>${t('net.asked', { c: t(`net.liv.${p.liveryRequested}`) })}</small>` : '';
-  // every driver's setup is shown to everyone before the start (#133); a server older than setups names none (Balanced)
-  return `<tr class="${p.id === net?.me ? 'me' : ''}" data-pid="${esc(p.id)}" data-setup="${setupOr(p.setup)}"><td class="mono">#${p.num}</td><td>${colorDot(p.color)}<span class="nm">${esc(p.name)}</span>${asked} ${setupChip(p.setup)}</td><td>${tags.join(' ')}</td></tr>`;
-}
-
-/** A driver's setup as a small text label (#133), for the lobby and results tables. */
-const setupChip = (id: SetupId | undefined): string => `<small class="setup-chip" data-setup="${setupOr(id)}">${setupName(setupOr(id))}</small>`;
-
-/** The room: code to share, track, every driver's identity and state, AI slots, and what this browser may do. */
-function showLobby(): void {
-  const r = net?.room;
-  if (!net || !r) return;
-  const first = screen !== 'lobby';
-  enter('lobby');
-  overlay.className = 'overlay show';
-  const host = net.host;
-  // while reconnecting the seat may be gone on the server: Start and Ready wait for the resume
-  const live = net.conn === 'connected' ? '' : 'disabled';
-  const meP = r.participants.find((p) => p.id === net!.me);
-  const others = r.participants.filter((p) => p.id !== r.hostId && !p.left);
-  const waitingFor = r.participants.length < r.minHumans ? t('net.needMore', { n: r.minHumans }) : r.participants.some((p) => !p.connected) ? t('net.waitConn') : others.some((p) => !p.ready) ? t('net.waitReady') : '';
-  const trackTabs = host && r.mode !== 'championship' ? `<div class="tabs" role="radiogroup">${T.TRACKS.map((d) => `<button class="tab ${d.id === r.settings.track ? 'sel' : ''}" data-ntrack="${d.id}">${t(`track.${d.id}.name`)}</button>`).join('')}</div>` : `<div class="lobby-track">${t(`track.${r.settings.track}.name`)}</div>`;
-  // the race length (#132): every driver sees it before Ready/Start; only the host changes it, and only on a server that runs
-  // presets (its rooms carry `length`). A championship round keeps its championship's length
-  const len = lengthOr(r.settings.length);
-  const lenRow = host && r.settings.length !== undefined && r.mode !== 'championship' && r.mode !== 'practice' && net.lengths.length > 1
-    ? lengthRadiosHtml('nlen', len, net.lengths)
-    : `<div class="lbl2">${t('len.label')}</div><div class="lobby-track lobby-len" id="l-len">${lengthTag(len)}</div>`;
-  const aiRow = r.mode === 'multiplayer' ? (host ? `<label class="chk"><input type="checkbox" id="l-ai" ${r.settings.aiFill ? 'checked' : ''}> ${t('net.aiFill')}</label>` : `<small>${t(r.settings.aiFill ? 'net.aiOn' : 'net.aiOff')}</small>`) : '';
-  const aiRows = r.ai.map((a) => `<tr class="ai" data-setup="${setupOr(a.setup)}"><td class="mono">#${a.num}</td><td>${colorDot(a.color)}<span class="nm">${esc(a.name)}</span> ${setupChip(a.setup)}</td><td><span class="chip dim">${t('net.aiSlot')}</span></td></tr>`).join('');
-  // this driver's own setup (#133): only on a server that runs setups (its rooms list `setups`), only in the lobby. A room
-  // a seated older page keeps to Balanced shows the others disabled and says why
-  const offered = net.setups;
-  const allowed = r.setups ?? [];
-  const mySetup = setupOr(meP?.setup);
-  const setupRow = r.setups !== undefined && offered.length > 1 && meP && !meP.left
-    ? setupRadiosHtml('nsetup', mySetup, offered, allowed.length > 1 ? t('setup.lobbyNote') : t('setup.lockNote'), allowed)
-    : '';
-  const free = r.maxHumans - r.participants.filter((p) => !p.left).length;
-  const livs = NET_LIVERIES.map((l) => `<button class="car sq ${meP?.livery === l.id ? 'sel' : ''}" data-mylivery="${l.id}" aria-label="${t(`net.liv.${l.id}`)}" title="${t(`net.liv.${l.id}`)}"><i style="background:${hexc(l.color)}"></i></button>`).join('');
-  overlay.innerHTML = `<div class="card results lobby">
-    <div class="lbl2">${modeLabel(r.mode)}</div>
-    ${r.mode === 'multiplayer' ? `<h2>${t('net.room')} <span class="code mono" id="l-code"></span></h2>
-    <div class="row"><button class="cta alt small" id="l-copy">${t('net.copy')}</button>${typeof navigator.share === 'function' ? `<button class="cta alt small" id="l-share">${t('net.share')}</button>` : ''}</div>` : `<h2>${r.mode === 'championship' && r.championship ? t('net.champRound', { n: r.championship.round, m: R.CHAMP_TRACKS.length }) : t('net.modeSolo')}</h2>`}
-    <div class="lbl2">${t('title.track')}</div>
-    ${trackTabs}
-    ${lenRow}
-    ${aiRow}
-    <div class="tscroll"><table><thead><tr><th>${t('net.num')}</th><th>${t('res.driver')}</th><th>${t('net.state')}</th></tr></thead><tbody>${r.participants.map((p) => seatRow(p, r.hostId)).join('')}${aiRows}</tbody></table></div>
-    ${r.mode === 'multiplayer' ? `<p><small>${t('net.seats', { n: Math.max(0, free), m: r.maxHumans })}</small></p>` : ''}
-    <div class="lbl2">${t('net.yourColour')}</div><div class="cars">${livs}</div>
-    ${setupRow}
-    <p id="l-msg" class="net-msg" role="status" aria-live="polite">${esc(host ? waitingFor : t('net.hostStarts'))}</p>
-    <div class="row">
-      ${host ? `<button class="cta" id="l-start" ${live} ${waitingFor && r.mode === 'multiplayer' ? 'aria-disabled="true"' : ''}>${t('net.start')}</button>` : `<button class="cta" id="l-ready" ${live}>${t(meP?.ready ? 'net.unready' : 'net.readyBtn')}</button>`}
-      <button class="cta alt" id="l-leave">${t('net.leave')}</button>
-    </div>
-  </div>`;
-  const codeEl = overlay.querySelector('#l-code');
-  if (codeEl) codeEl.textContent = r.code;
-  const shareText = (): string => t('net.shareText', { code: r.code });
-  overlay.querySelector('#l-copy')?.addEventListener('click', () => {
-    const msg = overlay.querySelector('#l-msg')!;
-    navigator.clipboard?.writeText(r.code).then(() => { msg.textContent = t('net.copied'); }, () => { msg.textContent = t('net.copyFail', { code: r.code }); });
-  });
-  overlay.querySelector('#l-share')?.addEventListener('click', () => { void navigator.share({ title: t('title.name'), text: shareText(), url: `${location.origin}${location.pathname}#room=${r.code}` }).catch(() => undefined); });
-  overlay.querySelectorAll<HTMLElement>('[data-ntrack]').forEach((b) => b.addEventListener('click', () => net?.settings({ track: b.dataset.ntrack! })));
-  bindRadios('nlen', (id) => { chooseLength(id); net?.settings({ length: lengthOr(id) }); });
-  overlay.querySelector<HTMLInputElement>('#l-ai')?.addEventListener('change', (e) => net?.settings({ aiFill: (e.target as HTMLInputElement).checked }));
-  bindRadios('nsetup', (id) => { chooseSetup(id); syncSetupDesc('nsetup', setupOr(id)); net?.setup(setupOr(id)); });
-  overlay.querySelectorAll<HTMLElement>('[data-mylivery]').forEach((b) => b.addEventListener('click', () => { try { localStorage.setItem(NLIV_KEY, b.dataset.mylivery!); } catch { /* ignore */ } net?.livery(b.dataset.mylivery as LiveryId); }));
-  overlay.querySelector('#l-start')?.addEventListener('click', () => net?.start());
-  overlay.querySelector('#l-ready')?.addEventListener('click', () => net?.ready(!meP?.ready));
-  overlay.querySelector('#l-leave')!.addEventListener('click', () => net?.leave());
-  if (first) (overlay.querySelector('#l-start, #l-ready') as HTMLElement | null)?.focus({ preventScroll: true });
-}
-
-/** The race menu online: the shared race keeps running behind it, and this browser's controls are released. */
-function showNetMenu(): void {
-  enter('pause');
-  overlay.className = 'overlay show';
-  overlay.innerHTML = `<div class="card">
-    <h2>${t('net.menuTitle')}</h2>
-    <p>${t('net.menuNote')}</p>
-    ${controlsHtml()}
-    ${settingsHtml()}
-    <div class="row"><button class="cta" id="o-resume">${t('pause.resume')}</button><button class="cta alt" id="o-leave">${t('net.leaveRace')}</button></div>
-  </div>`;
-  bindSettings();
-  bindHowTo();
-  overlay.querySelector('#o-resume')!.addEventListener('click', () => {
-    if (netResult && netResult.raceId === netRaceId) showNetResults(netResult);
-    else resume();   // a driver whose race is over goes back to spectating (#135)
-  });
-  overlay.querySelector('#o-leave')!.addEventListener('click', () => net?.leave());
-}
-
-/** Standings rows from the server: positions only for classified finishers, explicit DQ and DNF, nothing estimated. */
-function standingRows(rows: { id: string; name: string; color: number; num: number; pos: number | null; status: string; time: number | null; best: number; pits: number; reason: string; lap?: string; setup?: SetupId }[], pick = false): string {
-  return rows.map((x) => {
-    // #135: on the live standings a car still racing can be picked to watch (never the driver's own: it is not running)
-    const watch = pick && x.status === 'running' && x.id !== localId ? ` <button class="cta alt small w-pick" data-watch="${esc(x.id)}">${t('spec.watchRow')}</button>` : '';
-    const cell = x.status === 'dq' ? `<td class="mono dq">${t('res.dq')}</td>` : x.status === 'dnf' ? `<td class="mono">${t('res.dnf')}</td>` : x.status === 'running' ? `<td class="mono"><small>${t('net.stillRacing')}${x.lap ? ` · ${x.lap}` : ''}</small></td>` : `<td class="mono">${fmt(x.time ?? NaN)}</td>`;
-    return `<tr class="${x.id === localId ? 'me' : ''}" data-status="${x.status}"><td>${x.pos ?? '–'}</td><td>${colorDot(x.color)}#${x.num} ${esc(x.id === localId ? t('hud.you') : x.name)} ${setupChip(x.setup)}${watch}</td>${cell}<td class="mono">${fmt(x.best)}</td><td>${x.pits}</td><td>${x.reason}</td></tr>`;
-  }).join('');
-}
-const STAND_HEAD = (): string => `<thead><tr><th>#</th><th>${t('res.driver')}</th><th>${t('res.time')}</th><th>${t('res.best')}</th><th>${t('res.pits')}</th><th>${t('res.pen')}</th></tr></thead>`;
-
-/** what the pending card last showed: unchanged content is left alone, so a selection or a screen reader's place in the table is not reset for nothing */
-let netWaitShown = { head: '', rows: '' };
-/**
- * Standings / My result (#135): this driver is done but the race is not. Live state with no positions invented for anyone still
- * running, the driver's own result, and a way back to watching; a running car's row picks it as the one to watch. Online it is
- * the pending card (with Leave, and its lost-contact safety net, #43); locally the race carries on behind it, with Skip to
- * results and the menu.
- */
-function showNetWait(): void {
-  enter('netwait');
-  netWaitShown = { head: '', rows: '' };
-  overlay.className = 'overlay show see';
-  // the card and its buttons are built once; each snapshot updates only the heading and the standings, so a press or the
-  // keyboard focus on Watch or Leave survives the 20 Hz updates
-  const acts = net
-    ? `<button class="cta alt" id="w-leave">${t('net.leave')}</button>`
-    : `<button class="cta alt" id="w-skip">${t('spec.skip')}</button><button class="cta alt" id="w-menu">${t('pause.menu')}</button>`;
-  overlay.innerHTML = `<div class="card results netwait">
-    <h2>${t('net.pendingTitle')}</h2>
-    <div class="place" id="w-head"></div>
-    <p><small>${t(net ? 'net.pendingNote' : 'spec.localNote')}</small></p>
-    <p class="deb-pending"><small>${t('deb.pending')}</small></p>
-    <p id="w-lost" class="net-msg" role="status" aria-live="polite"></p>
-    <div class="tscroll"><table>${STAND_HEAD()}<tbody id="w-rows"></tbody></table></div>
-    <div class="row"><button class="cta" id="w-watch">${t('net.watch')}</button>${acts}</div>
-  </div>`;
-  overlay.querySelector('#w-watch')!.addEventListener('click', closeNetWait);
-  overlay.querySelector('#w-leave')?.addEventListener('click', () => net?.leave());
-  overlay.querySelector('#w-skip')?.addEventListener('click', skipToResults);
-  overlay.querySelector('#w-menu')?.addEventListener('click', toMenu);
-  // a running car's Watch button: follow that car and go back to the race view (event delegation: the rows are redrawn)
-  overlay.querySelector('#w-rows')!.addEventListener('click', (e) => {
-    const b = (e.target as Element | null)?.closest<HTMLElement>('[data-watch]');
-    if (!b || !spec.active) return;
-    if (spec.pick(race, b.dataset.watch!)) closeNetWait();
-  });
-  renderNetWait();
-  // online, the safety net normally runs already (it started with spectating); a fresh window either way
-  if (net) netGuard.start();
-}
-function renderNetWaitView(v: NetWaitView): void {
-  if (v === 'closed') { showNetClosed(); return; }
-  const el = overlay.querySelector('#w-lost');
-  if (el) el.textContent = v === 'lost' ? t('net.lostContact') : '';
-}
-/** The room closed (the resume was refused) before the server sent results: nothing more will come. */
-function showNetClosed(): void {
-  enter('netres');
-  overlay.className = 'overlay show';
-  overlay.innerHTML = `<div class="card results netclosed">
-    <h2>${t('net.pendingTitle')}</h2>
-    <p role="status">${t('net.closedNoResult')}</p>
-    <div class="row"><button class="cta" id="w-menu">${t('net.backMenu')}</button></div>
-  </div>`;
-  const back = overlay.querySelector<HTMLButtonElement>('#w-menu')!;
-  back.addEventListener('click', () => { if (online.state === 'available') showOnline(); else showTitle(); });
-  back.focus({ preventScroll: true });
-}
 /** Back to watching (#135): the spectator view, with the target kept (or the one picked from the standings). */
 function closeNetWait(): void { if (!spec.active && me().status !== 'running') enterSpectate(); resume(); }
-function renderNetWait(): void {
-  const headEl = overlay.querySelector('#w-head'), rowsEl = overlay.querySelector('#w-rows');
-  if (!headEl || !rowsEl) return;
-  const p = me();
-  const rows = race.order().map((c) => ({
-    id: c.id, name: c.name, color: c.color, num: c.num, pos: null, status: c.status, time: c.status === 'finished' ? c.finishTime + c.timePen : null,
-    best: c.bestLap, pits: c.pitStops, reason: c.status === 'dq' ? t(`res.dqReason.${c.dqReason}`) : c.status === 'dnf' ? t(`net.dnf.${c.dnfReason}`) : flags(c), lap: `${Math.min(race.targetLaps, c.lapsDone + 1)}/${race.targetLaps}`,
-    setup: c.setup.id,
-  }));
-  const head = p.status === 'dq' ? `${t('res.youDq')} · ${t(`res.dqReason.${p.dqReason}`)}` : p.status === 'dnf' ? t('res.youDnf') : t('net.youFinished');
-  const body = standingRows(rows, spec.active);
-  if (netWaitShown.head !== head) { headEl.innerHTML = head; netWaitShown.head = head; }
-  if (netWaitShown.rows !== body) { rowsEl.innerHTML = body; netWaitShown.rows = body; }
-}
-
-/** The server's final standings, identical for every member of the room. */
-function showNetResults(r: ResultView): void {
-  enter('netres');
-  overlay.className = 'overlay show';
-  const room = net?.room;
-  const host = !!net?.host;
-  const byId = new Map(r.participants.map((x) => [x.id, x]));
-  const liv = (id: string): number => NET_LIVERIES.find((l) => l.id === byId.get(id)?.livery)?.color ?? 0x888888;
-  let body: string, head: string;
-  if (r.classification) {
-    const rows = r.classification.map((x) => ({
-      id: x.id, name: byId.get(x.id)?.name ?? x.id, color: liv(x.id), num: byId.get(x.id)?.num ?? 0, pos: x.pos, status: x.status, time: x.time, setup: byId.get(x.id)?.setup,
-      best: x.bestLap, pits: x.pitStops, reason: x.status === 'dq' ? `<span class="flag sg">${t('hud.flagDq')}</span> <small>${t(`res.dqReason.${x.dqReason}`)}</small>` : x.status === 'dnf' ? `<small>${t(`net.dnf.${x.dnfReason}`)}</small>` : x.timePen > 0 ? `<span class="flag tp">+${x.timePen}s</span>` : '–',
-    }));
-    const mine = r.classification.find((x) => x.id === localId);
-    head = !mine ? '' : mine.status === 'dq' ? `${t('res.youDq')} · ${t(`res.dqReason.${mine.dqReason}`)}` : mine.status === 'dnf' ? t('res.youDnf') : t('res.youPlace', { n: mine.pos ?? 0 });
-    body = `<div class="tscroll"><table>${STAND_HEAD()}<tbody>${standingRows(rows)}</tbody></table></div>`;
-    // #134: this driver's debrief, as the server collected it (never from events this page received); an older server's
-    // result has none, which is shown as unavailable
-    if (mine && r.outcome === 'completed') {
-      const setup = setupOr(byId.get(mine.id)?.setup);
-      body += debriefHtml({
-        d: readDebrief(r, mine.id), pb: comparePb(netPbBefore(r), mine.bestLap > 0 ? mine.bestLap : null), open: debriefOpen(),
-        facts: { status: mine.status, dqReason: mine.dqReason, dnfReason: mine.dnfReason, timePen: mine.timePen, pos: mine.pos },
-        where: `${t(`track.${r.track.id}.name`)} · ${lengthTag(lengthOr(r.settings?.length))} · ${setupTag(setup)}`,
-      });
-    }
-  } else {
-    head = t('net.noResult');
-    body = `<p>${t(r.outcome === 'aborted' ? 'net.aborted' : 'net.ended', { why: esc(r.abortReason ?? '') })}</p>`;
-  }
-  const canRematch = room?.state === 'results' && room.raceId === r.raceId;
-  overlay.innerHTML = `<div class="card results netres" data-race="${esc(r.raceId)}">
-    <div class="lbl2">${modeLabel(r.mode)} · ${t(`track.${r.track.id}.name`)} · ${lengthTag(lengthOr(r.settings?.length))}</div>
-    <h2>${t('net.finalTitle')}</h2>
-    <div class="place">${head}</div>
-    ${body}
-    <div class="awards" id="r-awards">${awardsHtml(r, net?.awards ?? null)}</div>
-    <p><small>${t('net.resultNote')}</small></p>
-    <div class="row">${canRematch ? (host ? `<button class="cta" id="r-rematch">${t('net.rematch')}</button>` : `<span class="net-msg">${t('net.waitRematch')}</span>`) : ''}<button class="cta alt" id="r-leave">${t('net.leave')}</button></div>
-  </div>`;
-  overlay.querySelector('#r-rematch')?.addEventListener('click', () => net?.rematch());
-  overlay.querySelector('#r-leave')!.addEventListener('click', () => { if (net) net.leave(); else showTitle(); });
-}
 
 /** Connection state, always visible while online: connecting, reconnecting (with how long the seat is held), retired. */
 const banner = document.createElement('div');
@@ -2204,6 +1119,65 @@ function tick(dt: number): void {
   noteDone();
   if (race.phase === 'done' && (screen === 'race' || screen === 'netwait')) showResults();
 }
+// ------------------------------------------------------------ client shell (#141, src/menu/*)
+// The screens live in their own modules. Each is built once, here, with the overlay, the state above (read and written
+// through accessors: it stays owned by this file) and the actions it calls; nothing runs until the title is shown below.
+const { showOnline, awardsHtml, showLobby, showNetMenu, showNetWait, renderNetWaitView, renderNetWait, showNetResults } = createOnline({
+  overlay, accounts, spec, netGuard, NAME_KEY, NLIV_KEY,
+  get online() { return online; },
+  get screen() { return screen; },
+  get net() { return net; },
+  get netRaceId() { return netRaceId; },
+  get netResult() { return netResult; },
+  get netNotice() { return netNotice; }, set netNotice(v) { netNotice = v; },
+  get onlinePending() { return onlinePending; }, set onlinePending(v) { onlinePending = v; },
+  get race() { return race; },
+  get localId() { return localId; },
+  me, enter, resume, toMenu, showTitle: () => showTitle(), closeNetWait, skipToResults, netName, netLivery, netLengths, netLength, netSetups, netSetup,
+  connectedChamp, connectedChampLength, keepConnectedChampLength, accountsOn, entryIdentity, say, netBegin, netPbBefore,
+  bindHowTo, bindRadios, chooseLength, syncSetupDesc, chooseSetup, settingsHtml, bindSettings,
+});
+const { accountEntryHtml, showAccount, localCareerNote } = createAccount({
+  overlay, accounts,
+  get screen() { return screen; },
+  get net() { return net; },
+  get acctNotice() { return acctNotice; }, set acctNotice(v) { acctNotice = v; },
+  accountsOn, enter, showTitle: () => showTitle(), onIdentityChanged,
+});
+const { showResults, startChampRound, showChamp, showBoards } = createResults({
+  overlay, sfx, freshIds,
+  get mode() { return mode; },
+  get camMode() { return camMode; }, set camMode(v) { camMode = v; },
+  get race() { return race; },
+  get localId() { return localId; },
+  get pbBefore() { return pbBefore; },
+  get champ() { return champ; },
+  get champRoundSaved() { return champRoundSaved; }, set champRoundSaved(v) { champRoundSaved = v; },
+  get carId() { return carId; }, set carId(v) { carId = v; },
+  get lbTrack() { return lbTrack; }, set lbTrack(v) { lbTrack = v; },
+  get lbKind() { return lbKind; }, set lbKind(v) { lbKind = v; },
+  get lbSetup() { return lbSetup; }, set lbSetup(v) { lbSetup = v; },
+  me, isMe, enter, applyTrack, startSession, restartSession, toMenu, showTitle: () => showTitle(), localCareerNote,
+  bindRadios, syncSetupDesc, chooseSetup,
+});
+const { centreTrack, showTitle, showPause } = createTitle({
+  overlay, sfx, autoQuality,
+  get screen() { return screen; },
+  get mode() { return mode; }, set mode(v) { mode = v; },
+  get camMode() { return camMode; }, set camMode(v) { camMode = v; },
+  get champ() { return champ; }, set champ(v) { champ = v; },
+  get carId() { return carId; }, set carId(v) { carId = v; },
+  get preset() { return preset; },
+  get raceLen() { return raceLen; },
+  get carSetupId() { return carSetupId; },
+  get online() { return online; },
+  get lbSetup() { return lbSetup; }, set lbSetup(v) { lbSetup = v; },
+  get net() { return net; },
+  enter, setRace, newRace, applyTrack, startSession, restartSession, resume, toMenu, startChampRound, showChamp, showBoards, showOnline, showAccount, showNetMenu,
+  onlineLinksHtml, onlineNoticeHtml, syncRecheck, probeHealth, applyOnline, seatStore, netBegin,
+  bindHowTo, bindTips, bindRadios, chooseLength, syncSetupDesc, chooseSetup, settingsHtml, bindSettings,
+});
+
 let last = performance.now();
 let time = 0;
 showTitle();

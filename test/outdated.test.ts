@@ -3,12 +3,15 @@
 // An older server (#80: rolled back after a protocol bump) is not this page's fault: "temporarily unavailable" with Retry,
 // never "a new version is available", whichever way the mismatch is found (health probe or a refused hello).
 import { describe, it, expect, vi } from 'vitest';
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import { CLOSE_PROTOCOL, HelloRefused, OnlineClient, isProtocolRefusal, type SocketCtor, type SocketLike } from '../src/net/client';
 import { NetSession, type EndReason } from '../src/net/session';
 import { PROTOCOL_VERSION } from '../src/net/protocol';
 import { RECHECK_MAX, RECHECK_MS, afterProtocolRefusal, afterRetry, behindHtml, outdatedHtml, probeOnline, startRecheck, type OnlineStatus } from '../src/online';
 
+/** The client shell's source: src/main.ts and the screens split out of it into src/menu/ (#141). */
+const shellSource = (): string => ['main.ts', ...readdirSync(new URL('../src/menu/', import.meta.url)).filter((f) => f.endsWith('.ts')).map((f) => `menu/${f}`)]
+  .map((f) => readFileSync(new URL(`../src/${f}`, import.meta.url), 'utf8')).join('\n');
 const health = (protocol: unknown) => (() => Promise.resolve(new Response(JSON.stringify({ ok: true, protocol, version: 'v' }), { status: 200 }))) as unknown as typeof fetch;
 
 /** A server endpoint whose hello answer can change between sockets (an upgrade while a session is open). */
@@ -66,8 +69,8 @@ describe('an outdated page (#67)', () => {
     const ids = (JSON.parse(readFileSync(new URL('../assets/ui/strings.json', import.meta.url), 'utf8')) as { strings: { id: string }[] }).strings.map((s) => s.id);
     expect(ids).toEqual(expect.arrayContaining(['net.outdated', 'net.reload']));
     expect(new Set(ids).size).toBe(ids.length);
-    // main.ts shows it for the outdated state and wires the button to a reload
-    const main = readFileSync(new URL('../src/main.ts', import.meta.url), 'utf8');
+    // the client shell shows it for the outdated state and wires the button to a reload
+    const main = shellSource();
     expect(main).toContain("if (online.state === 'outdated') return outdatedHtml();");
     expect(main).toContain("overlay.querySelector('#o-reload')?.addEventListener('click', () => location.reload());");
     // a refused hello (create/join/resume) and a refused reconnect both ask /api/health which side is newer (#80)
@@ -206,7 +209,7 @@ describe('an older game server (#80: a server rollback after a protocol bump)', 
     const ids = (JSON.parse(readFileSync(new URL('../assets/ui/strings.json', import.meta.url), 'utf8')) as { strings: { id: string }[] }).strings.map((s) => s.id);
     expect(ids).toEqual(expect.arrayContaining(['net.behind', 'net.retry']));
     expect(new Set(ids).size).toBe(ids.length);
-    const main = readFileSync(new URL('../src/main.ts', import.meta.url), 'utf8');
+    const main = shellSource();
     expect(main).toContain("if (online.state === 'behind') return behindHtml();");
     expect(main).toContain("void probeHealth().then((st) => applyOnline(afterRetry(st), true));");
   });
@@ -310,8 +313,8 @@ describe('an older game server (#80: a server rollback after a protocol bump)', 
         startRecheck(p3, () => {}, () => true);
         await vi.advanceTimersByTimeAsync(RECHECK_MS * (RECHECK_MAX + 10));
         expect(p3).toHaveBeenCalledTimes(RECHECK_MAX);
-        // main.ts runs it only on the title with the older-server notice
-        const main = readFileSync(new URL('../src/main.ts', import.meta.url), 'utf8');
+        // the client shell runs it only on the title with the older-server notice
+        const main = shellSource();
         expect(main).toContain("() => screen === 'title' && online.state === 'behind'");
       } finally { vi.useRealTimers(); }
     });
