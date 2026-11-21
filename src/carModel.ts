@@ -134,3 +134,18 @@ export function makePlayerMarker(): THREE.Group {
   marker.visible = false;
   return marker;
 }
+
+/** The personal-best ghost's car (src/ghost.ts GhostPlayer.attach): see-through, no shadows, drawn over the cars it overlaps. */
+export function makeGhostCar(): CarVisual {
+  const v = makeCar(0x7dd3fc, 0, false);
+  v.group.traverse((o) => {
+    const m = o as THREE.Mesh;
+    if (!m.isMesh) return;
+    m.castShadow = false; m.receiveShadow = false;
+    const mats = Array.isArray(m.material) ? m.material : [m.material];
+    for (const mat of mats) { mat.transparent = true; mat.opacity = 0.42; mat.depthWrite = false; }
+    m.renderOrder = 6;
+  });
+  v.group.visible = false;
+  return v;
+}
