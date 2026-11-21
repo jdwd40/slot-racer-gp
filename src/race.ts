@@ -1,13 +1,14 @@
 import * as T from './track';
 import { PitTraffic, PitWait } from './pit';
-import { PIT_Q } from './pitConst';
 import { outOfTraffic } from './traffic';
 import { raceLength, type RaceLength, type RaceLengthId } from './raceLength';
 import { carSetup, isSetupId, DEFAULT_SETUP, type CarSetup, type SetupId } from './carSetup';
 import { DebriefCollector, type DriverDebrief } from './debrief';
-import { BRAKE, PEN } from './raceConst';
+import { BRAKE, PEN, SERVICE_READY } from './raceConst';
 import * as stall from './stall';
 import * as away from './away';
+import * as autoSg from './autoStopGo';
+import { AUTO, SG_STOP } from './autoStopGo';
 
 // No lap count lives here: each Race takes its target from an allowlisted preset (src/raceLength.ts, #132), as `race.targetLaps`.
 // Drive, top speed, drag and grip are not here either: each car has its own setup preset (src/carSetup.ts, #133, Car.setup).
@@ -15,8 +16,8 @@ import * as away from './away';
 // retired car, the wording of tuning comments) and for tests; no car's dynamics read them. Coasting and braking are shared.
 const BAL = carSetup(DEFAULT_SETUP);
 export const ACC = BAL.acc, VMAX = BAL.vmax, COAST = 9, DRAG = BAL.drag;
-/** BRAKE (shared braking) and PEN: src/raceConst.ts (#141), a leaf the subsystem modules read them from */
-export { BRAKE, PEN } from './raceConst';
+/** BRAKE (shared braking), PEN and SERVICE_READY: src/raceConst.ts (#141), a leaf the subsystem modules read them from */
+export { BRAKE, PEN, SERVICE_READY } from './raceConst';
 export const AI_GRIP = BAL.aiGrip;   // cornering speeds the Balanced AI aims for
 export const GRIP = BAL.grip;        // real grip of the slot for a Balanced car (well above the AI's target, so cars stick)
 /** Fuel burned per unit of track for a lap of length L. L is required: a default read from the displayed track would let it reach a race. */
@@ -30,9 +31,8 @@ const PLAN_BURN = 1.25;
  * Service obligations (see docs/penalties.md). A stop-and-go is due by the end of the lap of its first reachable pit entrance;
  * a deferred fuel stop by the end of the next lap. Each obligation may be put back one lap, once, and never past the final lap.
  * A deadline still unmet at its lap's timing-line crossing latches a breach, and the car is disqualified when it finishes.
+ * SERVICE_READY, the stationary service in a bay before the car may leave, is in src/raceConst.ts (#141).
  */
-/** stationary service in a bay before the car may leave: the same time a deferred fuel stop needs to count */
-export const SERVICE_READY = 0.5;
 /**
  * simulated seconds the field is run on for after the race ends, so every car gets a real result rather than an estimate:
  * Standard's (and Sprint's) run-on; each preset has its own (RaceLength.runOutS), so Endurance has twice this
@@ -96,24 +96,8 @@ export const REV_CAP = Math.min(REV.speed, T.PIT_SPEED);
 /** a pit-lane car backs up no further than where the pit lane has fully left the road */
 export const REV_PIT_MIN = T.PIT_IN1;
 
-/**
- * Automatic stop-and-go service for the player (see docs/auto-stop-go.md). From `window` metres before the pit entrance the
- * car's pedals belong to the controller: it brakes to the pit limit by the entrance, follows the shared queue, stops in the box,
- * holds still for the whole stop and drives to the pit exit. Everything is in simulation time and distance, never frames.
- */
-export const AUTO = {
-  window: PIT_Q.approach, // road distance before the entrance where the approach is taken over (the pit-queue approach)
-  plan: 18,            // braking the entry profile plans with (m/s²) so the car reaches the pit limit at the entrance
-  late: 24,            // braking an approach may need at most and still be taken over; beyond it the entrance is too late
-  box: 6,              // braking the box stop plans with (m/s²)
-  stopTol: 0.05,       // within this of the stop point the car is brought to rest
-  entryLead: 0.5,      // the entry profile reaches the pit limit this far before the entrance
-  entryTol: 0.5,       // a stop-and-go car not under automatic control is refused entry this far above the pit limit
-  bayWait: T.CAR_LEN + 0.5 + 0.3, // with its own bay occupied, a car waits this far short of it: clear of the occupant's merge
-  bayTol: 0.15,        // a car at rest within this of its bay centre turns in
-};
-/** where the car is stopped: the centre of the penalty box */
-export const SG_STOP = T.PEN_S;
+/** Automatic stop-and-go and bay visits for the player (AUTO, SG_STOP): src/autoStopGo.ts (#141). */
+export { AUTO, SG_STOP } from './autoStopGo';
 /**
  * What automatic pit service is doing for the player, for the HUD (null when nothing applies). Stop-and-go: armed, entry,
  * queued, serving. Fuel visit (docs/auto-bay.md): entry, queued, then `bay` (driving to the car's own bay), `bayWait` (its
@@ -1230,7 +1214,7 @@ export class Race {
         if (c.sgOwed > 0 && !c.finished) this.pmsg(c, 'msg.penStillOwed', 'bad');
       }
       // automatic fuel visit: brought to rest at the centre of the car's own bay, it turns in (the usual entry animation)
-      else if (c.human && c.sgCtl && this.autoBay(c, s)) {
+      else if (c.human && c.sgCtl && autoSg.autoBay(this, c, s)) {
         if (Math.abs(this.T.gapS(s, this.T.BAYS[c.bayHome])) < AUTO.bayTol && Math.abs(c.v) < 0.05 && this.bayFree(c.bayHome, c)) this.enterBay(c, c.bayHome);
       }
       // a bay is only captured nearly stopped: never while reversing past it, nor while the queue holds the car (unless braking there)
@@ -1284,113 +1268,15 @@ export class Race {
     if (c.revMark !== null && c.u >= c.revMark) { if (ds >= 0) this.rejoinSqueeze(c); c.revMark = null; }
   }
 
-  // ---------------------------------------------------------------- automatic pit service for human drivers
-  /**
-   * Decide, before the car moves, whether automatic control owns the pedals and what to show. On the road it takes over within
-   * `AUTO.window` of an entrance the car is routed into for a stop-and-go or a fuel visit and can still reach (outside lane, a
-   * change to it, or a switch to it ahead), and only if braking to the pit limit by the entrance is possible. Defer, the lane
-   * override and cancelling an optional stop release it. In the pit lane it keeps control from the entrance to the box and through
-   * the stop, then to the car's own bay on a fuel visit (docs/auto-bay.md), through the bay service, and on to the pit exit.
-   */
-  sgUpdate(c: Car): void {
-    c.sgCtl = false; c.sgPhase = null;
-    if (!c.human || c.finished || c.status !== 'running' || this.phase !== 'racing') return;
-    const s = this.s(c);
-    if (c.mode === 'bayIn' || c.mode === 'service' || c.mode === 'bayOut') {
-      // in the bay the pedals never move the car; only a fresh Throttle press once departure is ready asks to leave
-      c.sgCtl = true;
-      c.sgPhase = c.mode === 'bayIn' ? 'refuel' : c.mode === 'bayOut' ? 'leaving' : c.exitReq ? 'exit' : this.departBlock(c) ? 'refuel' : c.upPrev ? 'release' : 'ready';
-      return;
-    }
-    if (c.mode === 'pitlane') {
-      // run dry on the way out: the controller cannot drive the car on, so it hands back and its bay or the tow takes over
-      if (c.sgLeave && c.fuel <= 0) { c.sgLeave = false; this.pmsg(c, 'msg.sgDry', 'bad'); }
-      if (c.sgLeave) { c.sgCtl = true; c.sgPhase = 'leaving'; return; }
-      // in control up to the end of the box; a car beyond it (it can only get there in reverse recovery) is driven by hand
-      if (c.sgOwed > 0) {
-        if (this.T.gapS(s, SG_STOP) > -this.T.PEN_HALF) { c.sgCtl = true; c.sgPhase = c.sgServing ? 'serving' : c.pitHold ? 'queued' : 'entry'; }
-        return;
-      }
-      if (this.autoBay(c, s)) { c.sgCtl = true; c.sgPhase = c.pitHold ? 'queued' : this.bayFree(c.bayHome, c) ? 'bay' : 'bayWait'; }
-      return;
-    }
-    c.sgLeave = false;
-    const sg = c.sgOwed > 0;
-    if ((!sg && !c.fuelReq && c.fuelDue <= 0) || c.mode !== 'race') { c.sgCommit = -1; return; }
-    const k = this.apprLap(c);
-    if (c.routeHold === k) { if (sg) c.sgPhase = 'deferred'; c.sgCommit = -1; return; }
-    if (sg) c.sgPhase = 'armed';
-    const dEntry = this.T.ahead(s, this.T.PIT_IN0);
-    // an override armed earlier that no switch before the entrance can use any more changes nothing: drop it
-    if (c.laneOverride && !this.switchBeforeEntry(c) && (c.change ? c.change.to < 0 : c.laneSide < 0)) c.laneOverride = false;
-    if (!this.pitAssist(c) || c.laneOverride || dEntry >= AUTO.window || !this.sgPath(c, s, dEntry)) { c.sgCommit = -1; return; }
-    if (c.sgCommit !== k) {
-      // too fast for this entrance: no takeover (a stop-and-go is then not entered; a fuel visit is taken over in the pit lane)
-      if (c.v * c.v > this.T.PIT_SPEED ** 2 + 2 * AUTO.late * dEntry) return;
-      c.sgCommit = k; c.sgVc = Math.max(this.T.PIT_SPEED, c.v);
-      this.pmsg(c, sg ? 'msg.sgAuto' : 'msg.bayAuto', 'info', { n: this.bayNo(c) });
-    }
-    c.sgCtl = true; c.sgPhase = c.pitHold ? 'queued' : 'entry';
-  }
-
-  /**
-   * The player's fuel visit in the pit lane is still to reach its own bay: the controller drives it there (stop-and-go first).
-   * A car already past the bay centre (only by hand) is left to the driver: reversing back and releasing captures the bay as usual.
-   */
-  autoBay(c: Car, s: number): boolean {
-    return c.mode === 'pitlane' && c.pitFuel && !c.serviced && !c.sgLeave && c.sgOwed <= 0 && this.T.gapS(s, this.T.BAYS[c.bayHome]) > -AUTO.bayTol;
-  }
+  // ---------------------------------------------------------------- automatic pit service for human drivers: src/autoStopGo.ts
+  sgUpdate(c: Car): void { autoSg.sgUpdate(this, c); }
 
   /** The bay number shown to the driver: 1 for the first bay down the pit lane. */
   bayNo(c: Car): number { return c.bayHome + 1; }
 
-  /** Why the car in its bay may not ask to leave yet, or null. A stationary minimum (so a fuel stop counts) and any tow penalty. */
-  departBlock(c: Car): DepartBlock | null {
-    if (c.penalty > 0) return 'penalty';
-    if (c.serviceT <= SERVICE_READY) return 'settle';
-    return null;
-  }
-
-  /** Where automatic control brings the car to rest next: the box centre, its own bay, or short of that bay while it is occupied. */
-  autoStopS(c: Car): number {
-    if (c.sgOwed > 0) return SG_STOP;
-    const bs = this.T.BAYS[c.bayHome];
-    return this.bayFree(c.bayHome, c) ? bs : bs - AUTO.bayWait;
-  }
-
-  /** The car can still be on the outside lane at the entrance `dEntry` ahead: it is there, changing to it, or has a switch to it in time. */
-  sgPath(c: Car, s: number, dEntry: number): boolean {
-    if (c.change) return c.change.to < 0;
-    if (c.laneSide < 0) return true;
-    return this.T.SWITCHES.some((sw) => { const a = this.T.ahead(s, sw.s0); return a > 0.05 && a + this.T.SWITCH_LEN < dEntry; });
-  }
-
-  /**
-   * Speed the controller drives at now: the takeover speed on the road, braking at `AUTO.plan` to the pit limit at the entrance and
-   * at `AUTO.box` to rest at the box centre or the car's own bay, and a stopping gap behind traffic ahead. The shared queue's cap still applies on top.
-   */
-  sgTarget(c: Car): number {
-    const s = this.s(c);
-    if (c.sgLeave) return this.T.PIT_SPEED;
-    const road = c.mode === 'race';
-    const dEntry = road ? this.T.ahead(s, this.T.PIT_IN0) : 0;
-    const stopS = this.autoStopS(c);
-    const dStop = road ? dEntry + stopS - this.T.PIT_IN0 : this.T.gapS(s, stopS);
-    if (c.sgServing || (!road && dStop <= AUTO.stopTol)) return 0;
-    let v = road ? Math.max(this.T.PIT_SPEED, c.sgVc) : this.T.PIT_SPEED;
-    if (road) v = Math.min(v, Math.sqrt(this.T.PIT_SPEED ** 2 + 2 * AUTO.plan * Math.max(0, dEntry - AUTO.entryLead)), this.sgFollow(c, s), this.sgCorner(c, s));
-    return Math.min(v, Math.sqrt(2 * AUTO.box * Math.max(0, dStop)), c.pitCap);
-  }
-
-  /** The player's planned cornering speed here and just ahead, on every lane the car may use: a takeover mid-corner never holds a speed the slot cannot. */
-  sgCorner(c: Car, s: number): number {
-    const n = this.profiles['-1'].length;
-    const i0 = Math.floor(this.T.wrapS(s) / this.T.PROFILE_STEP) % n;
-    const i1 = Math.floor(this.T.wrapS(s + c.v * c.persona.look) / this.T.PROFILE_STEP) % n;
-    const sides = c.change || c.laneSide > 0 ? [-1, 1] : [-1];
-    // the player profile of this car's own setup (#133): a Speed car is never held at a corner speed only Grip could carry
-    return Math.min(...sides.map((k) => { const p = this.playerProfile(c, k); return Math.min(p[i0], p[i1]); }));
-  }
+  departBlock(c: Car): DepartBlock | null { return autoSg.departBlock(this, c); }
+  sgTarget(c: Car): number { return autoSg.sgTarget(this, c); }
+  sgCorner(c: Car, s: number): number { return autoSg.sgCorner(this, c, s); }
 
   /**
    * The assisted-driver ('player' persona) planned speed profile of a car's own setup on one side (#133): what the automatic
@@ -1398,20 +1284,6 @@ export class Race {
    */
   playerProfile(c: Car, side: number): Float32Array {
     return this.profiles[profKey(c.setup.id, 'player', side < 0 ? -1 : 1, false)];
-  }
-
-  /** A stopping gap behind any car ahead on the car's lane or the outside lane it is heading for (road only). */
-  sgFollow(c: Car, s: number): number {
-    let cap = 1e9;
-    const paths = [c.d, -this.T.laneHalf(s)];
-    for (const o of this.cars) {
-      if (o === c || (o.mode !== 'race' && o.mode !== 'pitlane' && o.mode !== 'grid') || outOfTraffic(o)) continue;
-      const g = this.T.gapS(s, this.s(o));
-      if (g <= 1e-6 || g > PIT_Q.look || !paths.some((d) => Math.abs(d - o.d) < this.T.CAR_W)) continue;
-      const room = g - this.T.CAR_LEN - PIT_Q.gap + (o.v > 0 ? (o.v * o.v) / (2 * PIT_Q.leadBrake) : o.v * 0.5);
-      cap = Math.min(cap, Math.sqrt(2 * PIT_Q.decel * Math.max(0, room)));
-    }
-    return cap;
   }
 
   // ---------------------------------------------------------------- reverse for human drivers

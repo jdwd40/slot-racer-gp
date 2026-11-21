@@ -15,3 +15,6 @@ export const PEN = {
   stopSeconds: 3,      // stationary time for one stop-and-go
   minEntryDist: 6,     // an entrance closer than this (in the outside lane) is already unreachable
 };
+
+/** stationary service in a bay before the car may leave: the same time a deferred fuel stop needs to count */
+export const SERVICE_READY = 0.5;
