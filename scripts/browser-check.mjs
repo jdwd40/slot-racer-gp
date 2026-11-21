@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Bounded browser validation of the real game. Procedure and results: docs/validation.md.
 //
-//   node scripts/browser-check.mjs [tracks race controlled routing practice championship touch responsive touchrace reverse service lastchance stall queue autosg autobay localslot online memory netbanner racelength carsetup debrief spectate qahook boot]   functional checks (default: all)
+//   node scripts/browser-check.mjs [tracks race controlled routing practice championship touch responsive touchrace reverse service lastchance stall queue autosg autobay localslot online memory netbanner racelength carsetup debrief spectate qahook boot howto]   functional checks (default: all)
 //   node scripts/browser-check.mjs perf --label updated --machine "<name>"          frame-time capture
 //   node scripts/browser-check.mjs compare <baseline.json> <updated.json>           like-for-like comparison
 //
@@ -1023,6 +1023,16 @@ class PadKeys {
 }
 
 const PHONE = { hasTouch: true, isMobile: true };
+
+/** The race menu's How to play sheet (#151): opened from the pause card, its text read, then closed with Escape, which must leave the menu up. */
+async function pauseHelp(page) {
+  await page.locator('#o-help').click();
+  await waitFor(page, () => document.getElementById('howto').open, null, 5000);
+  const text = await page.locator('#howto').textContent();
+  await page.keyboard.press('Escape');
+  await waitFor(page, () => !document.getElementById('howto').open, null, 5000);
+  return { text, screen: await read(page, () => window.__game.screen) };
+}
 
 /** Touch mode end to end, on Chromium's touch emulation and on a mouse. No physical device: see docs/touch.md. */
 async function touch(run, c) {
@@ -2605,8 +2615,8 @@ async function autosg(run, c) {
   // the help: keyboard rules explain the automatic stop and the DQ consequence
   await keys.tap('Escape');
   await waitFor(page, () => window.__game.screen === 'pause', null, 5000).catch(() => null);
-  const help = await page.locator('.overlay').textContent().catch(() => '');
-  c.ok('Keyboard: the pause help explains the automatic stop-and-go, the override and the DQ', help.includes(STRINGS['ctl.rules']), help.slice(0, 120));
+  const help = await pauseHelp(page).catch((e) => ({ text: '', error: String(e) }));
+  c.ok('Keyboard: the pause help (How to play) explains the automatic stop-and-go, the override and the DQ', help.screen === 'pause' && ['how.pit.1', 'how.pit.2', 'how.rules.1', 'how.rules.2', 'how.rules.3'].every((id) => help.text.includes(STRINGS[id])), { ...help, text: help.text.slice(0, 120) });
   await keys.tap('Escape');
 
   // ---- emulated touch
@@ -2831,8 +2841,8 @@ async function autobay(run, c) {
   // the help
   await keys.tap('Escape');
   await waitFor(page, () => window.__game.screen === 'pause', null, 5000).catch(() => null);
-  const help = await page.locator('.overlay').textContent().catch(() => '');
-  c.ok('Keyboard: the pause help explains the automatic bay stop and the release-then-press departure', help.includes(STRINGS['ctl.rules']) && help.includes(STRINGS['ctl.pit']), help.slice(0, 120));
+  const help = await pauseHelp(page).catch((e) => ({ text: '', error: String(e) }));
+  c.ok('Keyboard: the pause help (How to play) explains the automatic bay stop and the release-then-press departure', help.screen === 'pause' && help.text.includes(STRINGS['ctl.pit']) && ['how.pit.3', 'how.pit.4', 'how.pit.5', 'how.rules.4', 'how.rules.5'].every((id) => help.text.includes(STRINGS[id])), { ...help, text: help.text.slice(0, 120) });
   await keys.tap('Escape');
 
   // ---- emulated touch, phone and tablet
@@ -3889,8 +3899,197 @@ async function spectate(run, c) {
   return s;
 }
 
-const SCENARIOS = { tracks, race, controlled, routing, practice, championship, touch, responsive, touchrace, reverse, service, lastchance, stall, queue, autosg, autobay, localslot, online, memory, netbanner, racelength, carsetup, debrief, spectate, qahook, boot };
-const USAGE = 'usage: browser-check.mjs [tracks|race|controlled|routing|practice|championship|touch|responsive|touchrace|reverse|service|lastchance|stall|queue|autosg|autobay|localslot|online|memory|netbanner|racelength|carsetup|debrief|spectate|qahook|boot ...] | perf | compare <a.json> <b.json>\n'
+/**
+ * How to play (#151): the title card's controls grid, touch hint and service-rules paragraph live in a sheet now. The title
+ * keeps none of that text; How to play opens a modal sheet (a bottom sheet under 900 px, a centred card from 900 px) holding
+ * Drive (first on a touch screen), Pit & fuel, Service rules and Keyboard with every fact the old text had; Close, Escape and
+ * the backdrop close it, focus returns to the control that opened it, and no key reaches the game while it is open. The race
+ * menu keeps a compact legend (keys, or the pad buttons on a touch screen) and opens the same sheet.
+ */
+const HOW_FACTS = ['how.drive.throttle', 'how.drive.brake', 'how.drive.lane', 'how.drive.pit', 'how.drive.defer', 'touch.throttle', 'touch.brake', 'touch.lane', 'touch.pit', 'touch.defer',
+  'how.pit.1', 'how.pit.2', 'how.pit.3', 'how.pit.4', 'how.pit.5', 'how.rules.1', 'how.rules.2', 'how.rules.3', 'how.rules.4', 'how.rules.5',
+  'ctl.throttle', 'ctl.brake', 'ctl.lane', 'ctl.pit', 'ctl.defer', 'ctl.view', 'ctl.zoom', 'ctl.pause', 'ctl.restart', 'ctl.ghost'];
+
+/** The title card's text and the sheet's state and geometry. Words are tokens with a letter or digit in them, of the rendered text (innerText). */
+function measureHowTo(facts) {
+  const d = document.getElementById('howto');
+  const words = (s) => s.split(/\s+/).filter((x) => /[\p{L}\p{N}]/u.test(x)).length;
+  const card = document.querySelector('.overlay.show .card');
+  const a = document.activeElement;
+  const out = {
+    screen: window.__game.screen, touch: document.body.classList.contains('touch'), open: d.open, modal: d.matches(':modal'),
+    focus: a?.id || a?.className || a?.tagName || '',
+    cardWords: card ? words(card.innerText) : null,
+    wall: card ? [...card.querySelectorAll('.rules, .touch-hint, .touch-legend, .controls, kbd')].filter((e) => e.getClientRects().length).map((e) => e.className || e.tagName) : [],
+    pageX: document.documentElement.scrollWidth - document.documentElement.clientWidth,
+  };
+  if (!d.open) return out;
+  const vw = window.innerWidth, vh = window.innerHeight;
+  const rr = (e) => { const r = e.getBoundingClientRect(); return { x: Math.round(r.x), y: Math.round(r.y), r: Math.round(r.right), b: Math.round(r.bottom), w: Math.round(r.width), h: Math.round(r.height) }; };
+  const r = rr(d), x = rr(document.getElementById('howto-close'));
+  const body = d.querySelector('.howto-body');
+  out.rect = r;
+  out.inside = r.x >= 0 && r.y >= 0 && r.r <= vw && r.b <= vh;
+  out.bottomSheet = Math.abs(r.b - vh) <= 1 && r.h < vh;
+  out.centred = Math.abs((r.x + r.r) / 2 - vw / 2) <= 1 && Math.abs((r.y + r.b) / 2 - vh / 2) <= 1 && r.b < vh;
+  out.close = { ...x, onTop: document.elementFromPoint(x.x + x.w / 2, x.y + x.h / 2)?.closest('button')?.id ?? null };
+  out.label = document.getElementById(d.getAttribute('aria-labelledby') ?? '')?.textContent ?? null;
+  out.sections = [...d.querySelectorAll('.how-sec')].map((s) => s.dataset.how);
+  out.headings = [...d.querySelectorAll('.how-sec h3')].map((h) => h.textContent);
+  const text = d.textContent;
+  out.missing = facts.filter(([, s]) => !text.includes(s)).map(([id]) => id);
+  out.bodyFont = Math.min(...[...d.querySelectorAll('.how-sec li, .how-sec dd, .how-keys .krow > span:last-child')].map((e) => parseFloat(getComputedStyle(e).fontSize)));
+  out.scroll = { top: body.scrollTop, h: body.scrollHeight, client: body.clientHeight };
+  const top0 = body.scrollTop;
+  body.scrollTop = body.scrollHeight;
+  const last = d.querySelector('.how-sec:last-child').getBoundingClientRect(), br = body.getBoundingClientRect();
+  out.lastReachable = last.bottom <= br.bottom + 1 && last.bottom > br.top;
+  body.scrollTop = top0;
+  return out;
+}
+
+async function howto(run, c) {
+  const facts = HOW_FACTS.map((id) => [id, STRINGS[id]]);
+  const how = (page) => read(page, measureHowTo, facts);
+  const isOpen = (page) => read(page, () => document.getElementById('howto').open);
+  const sheetOk = (m, order) => m.open && m.modal && m.inside && m.label === STRINGS['how.title'] && m.sections.join() === order.join() && m.missing.length === 0 && m.bodyFont >= 16 && m.close.w >= 44 && m.close.h >= 44 && m.close.onTop === 'howto-close' && m.lastReachable && m.pageX <= 0;
+  const brief = (m) => ({ rect: m.rect, sections: m.sections, missing: m.missing, bodyFont: m.bodyFont, close: m.close, focus: m.focus, lastReachable: m.lastReachable, bottomSheet: m.bottomSheet, centred: m.centred, scroll: m.scroll });
+  const ORDER_KEYS = ['keys', 'pit', 'rules', 'drive'], ORDER_TOUCH = ['drive', 'pit', 'rules', 'keys'];
+  c.evidence.titleWords = {};
+
+  // ---- desktop, mouse and keyboard
+  const d = await open(run, { viewport: { width: 1280, height: 800 } });
+  {
+    const { page, keys } = d;
+    const t0 = await how(page);
+    c.evidence.titleWords['1280x800'] = t0.cardWords;
+    const cardText = await page.locator('.overlay .card').innerText();
+    c.ok('Desktop title: no keyboard grid, touch hint or service-rules text on the card, and How to play is there', !t0.touch && t0.wall.length === 0 && !cardText.includes(STRINGS['how.rules.1']) && !cardText.includes(STRINGS['ctl.defer']) && !t0.open && await page.locator('#o-help').isVisible(), { wall: t0.wall, words: t0.cardWords });
+    c.ok('Desktop title: the card is far shorter than the 528 words it had before #151', t0.cardWords < 330, t0.cardWords);
+    await page.click('#o-help');
+    await waitFor(page, () => document.getElementById('howto').open, null, 5000);
+    const m = await how(page);
+    await page.screenshot({ path: path.join(run.out, 'howto-1280x800.png') });
+    c.ok('Desktop: How to play opens a centred modal with Keyboard, Pit & fuel, Service rules and Drive, every fact, 16 px body, focus on Close', sheetOk(m, ORDER_KEYS) && m.centred && m.focus === 'howto-close', brief(m));
+    // the backdrop: everything behind is out of reach
+    const behind = await read(page, () => { const b = document.getElementById('o-start').getBoundingClientRect(); return document.elementFromPoint(b.x + b.width / 2, b.y + b.height / 2)?.id ?? null; });
+    c.ok('Desktop: the title behind the sheet cannot be clicked', behind !== 'o-start', behind);
+    // keyboard inside the sheet: Tab reaches the scrolling body, the arrow keys scroll it, and none of it reaches the game
+    await keys.tap('Tab');
+    const tabbed = await read(page, () => document.activeElement?.className ?? '');
+    for (let i = 0; i < 4; i++) await keys.tap('ArrowDown');
+    await keys.tap('Space');
+    const scrolled = await read(page, () => document.querySelector('.howto-body').scrollTop);
+    c.ok('Desktop: Tab moves into the sheet body, arrows and Space scroll it, and the game takes no key', tabbed === 'howto-body' && scrolled > 0 && await read(page, () => window.__game.screen === 'title' && document.getElementById('howto').open), { tabbed, scrolled });
+    await keys.tap('Escape');
+    await waitFor(page, () => !document.getElementById('howto').open, null, 5000);
+    const esc = await how(page);
+    c.ok('Desktop: Escape closes it, focus returns to How to play, still on the title', !esc.open && esc.focus === 'o-help' && esc.screen === 'title', { focus: esc.focus, screen: esc.screen });
+    // opened and closed with the keyboard alone: Enter on How to play, Enter on Close; no race starts
+    await keys.tap('Enter');
+    await waitFor(page, () => document.getElementById('howto').open, null, 5000);
+    const k1 = await how(page);
+    await keys.tap('Enter');
+    await waitFor(page, () => !document.getElementById('howto').open, null, 5000);
+    await frames(page, 2);
+    const k2 = await how(page);
+    c.ok('Desktop: Enter opens it from How to play and Enter on Close shuts it, with no race started', k1.open && k1.focus === 'howto-close' && !k2.open && k2.focus === 'o-help' && k2.screen === 'title', { k1: k1.focus, k2: k2.focus, screen: k2.screen });
+    // the backdrop closes it; a click inside does not
+    await page.click('#o-help');
+    await waitFor(page, () => document.getElementById('howto').open, null, 5000);
+    await page.locator('#howto .how-sec h3').first().click();
+    const inside = await isOpen(page);
+    await page.mouse.click(40, 400);
+    await waitFor(page, () => !document.getElementById('howto').open, null, 5000).catch(() => null);
+    const bd = await how(page);
+    c.ok('Desktop: a click inside the sheet keeps it, a click on the backdrop closes it and focus returns', inside && !bd.open && bd.focus === 'o-help' && bd.screen === 'title', { inside, open: bd.open, focus: bd.focus });
+    await page.click('#o-help');
+    await waitFor(page, () => document.getElementById('howto').open, null, 5000);
+    await page.click('#howto-close');
+    await waitFor(page, () => !document.getElementById('howto').open, null, 5000);
+    c.ok('Desktop: the Close button closes it', (await how(page)).focus === 'o-help');
+
+    // the race menu: the key legend stays, and the same sheet opens from it; Escape closes the sheet, not the menu
+    await page.click('#o-start');
+    await waitFor(page, () => window.__game.screen === 'race');
+    await keys.tap('Escape');
+    await waitFor(page, () => window.__game.screen === 'pause');
+    const p0 = await read(page, () => ({ legend: document.querySelector('.overlay .controls')?.getClientRects().length > 0, touchLegend: document.querySelector('.overlay .touch-legend')?.getClientRects().length > 0, help: !!document.getElementById('o-help'), t: window.__game.race.t }));
+    await page.click('#o-help');
+    await waitFor(page, () => document.getElementById('howto').open, null, 5000);
+    const pm = await how(page);
+    await keys.tap('Escape');
+    await waitFor(page, () => !document.getElementById('howto').open, null, 5000);
+    const p1 = await read(page, () => ({ screen: window.__game.screen, focus: document.activeElement?.id ?? '', t: window.__game.race.t }));
+    c.ok('Desktop pause: the key legend stays, How to play opens the same sheet, Escape closes it and the race stays paused', p0.legend && !p0.touchLegend && p0.help && sheetOk(pm, ORDER_KEYS) && p1.screen === 'pause' && p1.focus === 'o-help' && p1.t === p0.t, { p0, p1, sheet: brief(pm) });
+    await keys.tap('Escape');
+    await waitFor(page, () => window.__game.screen === 'race', null, 5000).catch(() => null);
+    c.ok('Desktop pause: Escape then resumes as before', await read(page, () => window.__game.screen === 'race'));
+    await d.context.close();
+  }
+  c.ok('Desktop part: no page or console errors', d.errors.length === 0, d.errors.slice(0, 5));
+
+  // ---- desktop 1366x768: the word count against the 528 measured before #151
+  {
+    const w = await open(run, { viewport: { width: 1366, height: 768 } });
+    c.evidence.titleWords['1366x768'] = (await how(w.page)).cardWords;
+    await w.context.close();
+  }
+
+  // ---- emulated touch: phone portrait first, then every menu layout
+  const s = await open(run, { viewport: { width: 390, height: 844 }, dpr: 2, device: PHONE });
+  const { page } = s;
+  const t0 = await how(page);
+  c.ok('Touch title: no touch hint, keyboard grid or rules text on the card', t0.touch && t0.wall.length === 0 && !t0.open, t0.wall);
+  await page.locator('#o-help').tap();
+  await waitFor(page, () => document.getElementById('howto').open, null, 5000);
+  const m = await how(page);
+  await page.screenshot({ path: path.join(run.out, 'howto-390x844.png') });
+  c.ok('Touch 390x844: a bottom sheet with Drive first, then Pit & fuel, Service rules and Keyboard; every fact, 16 px body, 44 px Close', sheetOk(m, ORDER_TOUCH) && m.bottomSheet, brief(m));
+  await page.touchscreen.tap(195, Math.max(8, m.rect.y / 2));
+  await waitFor(page, () => !document.getElementById('howto').open, null, 5000).catch(() => null);
+  c.ok('Touch: a tap on the dimmed backdrop closes it', !(await isOpen(page)) && await read(page, () => window.__game.screen === 'title'));
+  const sizes = [...LAYOUTS, ['phone portrait, audit', 360, 740], ['phone landscape, audit', 740, 360], ['tablet landscape', 1024, 768]];
+  for (const [label, w, h] of sizes) {
+    await page.setViewportSize({ width: w, height: h });
+    await frames(page, 2);
+    const tw = await how(page);
+    if (w === 360 && h === 740) c.evidence.titleWords['360x740'] = tw.cardWords;
+    if (w === 768) c.evidence.titleWords['768x1024'] = tw.cardWords;
+    await page.locator('#o-help').tap();
+    await waitFor(page, () => document.getElementById('howto').open, null, 5000);
+    const mm = await how(page);
+    const shape = w >= 900 ? mm.centred : mm.bottomSheet;
+    c.ok(`Touch ${w}x${h} (${label}): sheet on screen as a ${w >= 900 ? 'centred card' : 'bottom sheet'}, Drive first, Close 44 px and on top, last section reachable by scrolling`, sheetOk(mm, ORDER_TOUCH) && shape && tw.wall.length === 0, { ...brief(mm), titleWall: tw.wall });
+    if ([360, 740].includes(w)) await page.screenshot({ path: path.join(run.out, `howto-${w}x${h}.png`) });
+    await page.locator('#howto-close').tap();
+    await waitFor(page, () => !document.getElementById('howto').open, null, 5000);
+  }
+  c.ok('Touch title: the card is far shorter than the 511 words it had at 360x740 before #151', c.evidence.titleWords['360x740'] < 300, c.evidence.titleWords);
+
+  // the race menu by touch: the pad legend instead of the keys, and the same sheet
+  await page.setViewportSize({ width: 390, height: 844 });
+  await frames(page, 2);
+  await page.locator('#o-start').tap();
+  await waitFor(page, () => window.__game.screen === 'race');
+  await page.locator('#t-pause').tap();
+  await waitFor(page, () => window.__game.screen === 'pause');
+  const tp = await read(page, () => { const h = document.getElementById('o-help').getBoundingClientRect(); return { legend: document.querySelector('.overlay .touch-legend')?.getClientRects().length > 0, keys: document.querySelector('.overlay .controls')?.getClientRects().length > 0, help: [Math.round(h.width), Math.round(h.height)] }; });
+  await page.locator('#o-help').tap();
+  await waitFor(page, () => document.getElementById('howto').open, null, 5000);
+  const tm = await how(page);
+  await page.screenshot({ path: path.join(run.out, 'howto-pause-390x844.png') });
+  await page.locator('#howto-close').tap();
+  await waitFor(page, () => !document.getElementById('howto').open, null, 5000);
+  const after = await read(page, () => window.__game.screen);
+  c.ok('Touch pause: the pad legend shows (no key grid), How to play opens the sheet with Drive first, closing it leaves the menu up', tp.legend && !tp.keys && tp.help[0] >= 44 && tp.help[1] >= 44 && sheetOk(tm, ORDER_TOUCH) && after === 'pause', { tp, sheet: brief(tm), after });
+  await page.locator('#o-resume').tap();
+  await waitFor(page, () => window.__game.screen === 'race');
+  return s;
+}
+
+const SCENARIOS = { tracks, race, controlled, routing, practice, championship, touch, responsive, touchrace, reverse, service, lastchance, stall, queue, autosg, autobay, localslot, online, memory, netbanner, racelength, carsetup, debrief, spectate, qahook, boot, howto };
+const USAGE = 'usage: browser-check.mjs [tracks|race|controlled|routing|practice|championship|touch|responsive|touchrace|reverse|service|lastchance|stall|queue|autosg|autobay|localslot|online|memory|netbanner|racelength|carsetup|debrief|spectate|qahook|boot|howto ...] | perf | compare <a.json> <b.json>\n'
   + 'options: --dist <dir> --url <url> --commit <sha> --machine <name> --label <name> --viewport WxH --dpr N --preset low|balanced|high\n'
   + '         --seconds N --headed --channel <chrome|msedge> --out <dir> --max-minutes N';
 

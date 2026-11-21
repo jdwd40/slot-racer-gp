@@ -166,4 +166,4 @@ Save compatibility is tested in `test/records.test.ts`.
 
 - Scripted placement (`__game.advance` and direct state) sets up the browser situations, so they are functional coverage, not play-testing. No full race was played to a DQ in real frames.
 - The run-out simulates up to 240 s in one frame when the race ends. That is a single pause while the results screen opens. It was not measured on a real device.
-- The touch Defer cue is short (`⏭ next lap`). Its consequence is in the toast on tapping, the touch hint and the HUD chip.
+- The touch Defer cue is short (`⏭ next lap`). Its consequence is in the toast on tapping, the How to play sheet (#151) and the HUD chip.

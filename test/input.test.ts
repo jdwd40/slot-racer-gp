@@ -331,7 +331,7 @@ describe('same race behaviour as the keyboard', () => {
   it('has a label for every state', () => {
     for (const s of ['idle', 'armed', 'routed', 'override']) expect(t(`touch.lane.${s}`)).not.toBe(`touch.lane.${s}`);
     for (const s of ['idle', 'armed', 'compulsory', 'held']) expect(t(`touch.pit.${s}`)).not.toBe(`touch.pit.${s}`);
-    for (const id of ['touch.defer', 'touch.defer.idle', 'ctl.defer', 'ctl.rules']) expect(t(id)).not.toBe(id);
+    for (const id of ['touch.defer', 'touch.defer.idle', 'ctl.defer', 'how.rules.1', 'how.rules.2', 'how.rules.3', 'how.drive.defer']) expect(t(id)).not.toBe(id);
     for (const m of TOUCH_MODES) expect(t(`touch.${m}`)).not.toBe(`touch.${m}`);
   });
 });

@@ -49,7 +49,7 @@ The shared queue's `pitCap` and the pit limiter apply on top of this. The car co
 
 ## HUD and help
 
-The phase chip (`.sgp`) sits in the meter panel's chip row. The status line explains the phase. While the controller has the car, the touch Brake cue reads `auto · no R`. The pit-queue `QUEUED` chip and the deferral chip are not repeated while the phase chip says the same. The keyboard rules (title and pause) and the touch hint each add one sentence: the stop drives itself, Defer or Lane before the entrance are the only ways to skip it, and skipping it on its last allowed lap means DQ. No control was added to the racing view.
+The phase chip (`.sgp`) sits in the meter panel's chip row. The status line explains the phase. While the controller has the car, the touch Brake cue reads `auto · no R`. The pit-queue `QUEUED` chip and the deferral chip are not repeated while the phase chip says the same. The How to play sheet (#151; it replaced the keyboard rules paragraph and the touch hint) says it: the stop drives itself, Defer or Lane before the entrance are the only ways to skip it, and skipping it on its last allowed lap means DQ. No control was added to the racing view.
 
 ## Evidence
 

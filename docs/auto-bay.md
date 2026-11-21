@@ -119,7 +119,7 @@ The loss is the distance driven since the car last passed its bay, from a few me
 
 - While the count runs, the driver's HUD shows a red blinking chip, first in the row, `⚠ MOVE YOUR CAR · PITS IN n`, and the status line `⚠ Move your car — pit recovery in n…` with n going 3, 2, 1 (`stallLeft()` in `src/hud.ts`). Both are words and a number, not colour alone. They sit where the other service chips and status lines sit, which the responsive checks keep clear of the touch pad. Both clear the moment the car resumes, is held or is recovered.
 - On recovery: `Stopped on track — moved to pits` to the driver, and `<name> stopped on track — moved to the pits` to everyone else. In the bay, the usual `IN BAY n`, Release Throttle and Ready prompts follow. Waiting for a taken bay shows `Stopped on track — moved to pits · waiting for bay n`.
-- The pause help (`ctl.rules`) states the rule.
+- The How to play sheet (`how.pit.*`, `how.rules.*`, #151), opened from the title or the race menu, states the rule.
 
 ### Online
 
