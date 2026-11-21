@@ -8,7 +8,7 @@ import { describe, expect, it } from 'vitest';
 /** Line ceilings, updated by the extract PRs (README.md, "Where new code goes"). */
 const HUB_CEILINGS: Record<string, number> = {
   'src/race.ts': 2402,
-  'src/main.ts': 2380,
+  'src/main.ts': 1404,
 };
 
 /** Lines as `wc -l` counts them: newline characters. */
