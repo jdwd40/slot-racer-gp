@@ -310,6 +310,7 @@ node scripts/load-check.mjs http://127.0.0.1:8787 --rooms 6 --humans 2 --ai-fill
 npm test                                    # includes room, protocol and WebSocket tests; DB tests skip without a database
 npm run test:db                             # starts a private PostgreSQL under .local-pg/ (port 55471) and runs the DB tests
 node scripts/local-pg.mjs start|stop|env    # that local cluster on its own
+node scripts/pg-backup.mjs dump|restore|check --url-env VAR ...   # pg_dump -Fc / pg_restore wrapper for the restore drill (docs/restore.md)
 npm run pack:server                         # server-bundle/slotrush-server-<rev>.tar.gz (+ .sha256)
 node scripts/browser-check.mjs online       # browser gate check (diagnostics only)
 ```
@@ -376,7 +377,7 @@ The production unit runs Node with `--max-old-space-size=96`, `MemoryMax=256M` (
   - **Health's database probe (#98).** Health is public and polled by every page load, the smoke and online checks and the release procedure, while the pool has three connections. So its `db` field comes from a read-only probe (one `SELECT` on `schema_migrations`, no `CREATE TABLE`; a database with no migrations at all reads as `outdated`), reused for `SLOTRUSH_HEALTH_DB_CACHE_MS`, with at most one probe in flight: requests that arrive meanwhile wait for it, so any burst costs one query per window. Only `db` (and `ok` and the status code that follow from it) is cached; `rooms`, `racing`, `humans`, `pendingResults` and the tick and memory figures are read live on every request. The service's start-up check and `admin status` still use the full `schemaStatus` (which creates the empty bookkeeping table if it is missing). Tested in `test/server/health.test.ts`.
   - Tested: `test/server/dbpool.test.ts` (a pool in a child process against a wire peer that drops its connections) and `test/server/dbrestart.db.test.ts` (the server process through a TCP proxy that cuts PostgreSQL mid-race, then restores it).
 - **CI:** the new `server` job uses a throwaway `postgres:17` service container and **no secrets**:
-  - runs the database tests on PostgreSQL 17, including the mid-race database outage
+  - runs the database tests on PostgreSQL 17, including the mid-race database outage and the dump/restore drill (`scripts/pg-backup.mjs`, with the PostgreSQL 17 client tools the job installs)
   - builds and packs the release with the locked production dependencies
   - starts the packed release in production mode against a migrated database and runs the smoke check
   - uploads `slotrush-server-<sha>` (tarball and SHA-256) for 30 days
@@ -423,7 +424,7 @@ These steps run as an administrator on the site host (`ssh app-vps`). None of th
    sudo ln -sfn releases/slotrush-server-<rev> /srv/slotrush-server/current.new && sudo mv -T /srv/slotrush-server/current.new /srv/slotrush-server/current
    ```
 
-6. **Migrate**, then check the schema. On an existing database, back it up first ([accounts.md](accounts.md#backup-and-restore)); release #24 adds `002_driver_profiles`, release #25 adds `003_career_awards_bests` ([career.md](career.md#production-activation-owner)):
+6. **Migrate**, then check the schema. On an existing database, back it up first ([accounts.md](accounts.md#backup-and-restore)); release #24 adds `002_driver_profiles`, release #25 adds `003_career_awards_bests` ([career.md](career.md#production-activation-owner)), release #133 adds `004_setup_bests`:
 
    ```bash
    cd /srv/slotrush-server/current
@@ -460,7 +461,7 @@ These steps run as an administrator on the site host (`ssh app-vps`). None of th
 
 **Upgrades.**
 
-- Install a new release beside the old one (step 5 with the new name), run `migrate` (migrations are additive), switch `current`, and run `sudo systemctl restart slotrush-server`.
+- Install a new release beside the old one (step 5's `tar` and `chown` with the new name), run `migrate` from the new release directory (migrations are additive; the running server keeps the code it started with), then switch `current` (step 5's `ln`/`mv`) and run `sudo systemctl restart slotrush-server`. Note the release `current` pointed at before: it is the rollback target, since the server has no `previous` link.
 - A restart aborts races in progress. They get aborted envelopes, never results. Restart when `/api/health` shows `racing: 0` if possible.
 - Re-run steps 8 and 10.
 - If the protocol or rules version changed, the static client of the same commit deploys itself on merge; upgrade the server first, or in the same window ([Deploy order](#deploy-order-read-first)). Until both match, the handshake keeps online play off on whichever side is behind (*Mixed versions*).
@@ -504,7 +505,9 @@ Before declaring a release ready:
 
 ### Rollback
 
-- **Server release:** point `current` back at the previous release directory (`ln -sfn releases/<previous> current.new && mv -T current.new current`), then `sudo systemctl restart slotrush-server`, then re-run step 8. **What players see:** races in progress are aborted by the restart. If the rolled-back release has the same `PROTOCOL_VERSION`, pages reconnect or show **Online** as before. If it has an older one (rolling back across a protocol bump) while the static site still serves the newer client, those pages say *Online play is temporarily unavailable — try again shortly.* with **Retry** (never *a new version is available*), and players can still race locally; roll the static release back too (`deployment.md`) or roll the server forward, and open pages recover by Retry or the title's re-check without a reload. Pages on the older bundle are unaffected. Migrations are additive and the old release ignores newer tables. A release before #25 stores results without scoring them: races finished while it runs never earn career points, even after upgrading again (a stored race is never re-scored), so prefer rolling forward. If a migration ever must be reverted, restore the database from the backup taken before step 6 (`pg_dump -Fc slotrush > slotrush-<ts>.dump`).
+The rehearsed version of these steps, with a database dump, a restore into a throwaway database, an unpacked release and what a host loss keeps, is the [restore drill](restore.md) (#144).
+
+- **Server release:** point `current` back at the previous release directory (`cd /srv/slotrush-server && sudo ln -sfn releases/slotrush-server-<previous sha> current.new && sudo mv -T current.new current`), then `sudo systemctl restart slotrush-server`, then re-run step 8. The server has no `previous` link: the target is the release noted at the last upgrade, or found from each release's `RELEASE` file. The full command sequence, with the health checks, is in the [restore drill](restore.md#4-server-rollback-the-exact-commands-read-them-run-them-only-when-needed). **What players see:** races in progress are aborted by the restart. If the rolled-back release has the same `PROTOCOL_VERSION`, pages reconnect or show **Online** as before. If it has an older one (rolling back across a protocol bump) while the static site still serves the newer client, those pages say *Online play is temporarily unavailable — try again shortly.* with **Retry** (never *a new version is available*), and players can still race locally; roll the static release back too (`deployment.md`) or roll the server forward, and open pages recover by Retry or the title's re-check without a reload. Pages on the older bundle are unaffected. Migrations are additive and the old release ignores newer tables. A release before #25 stores results without scoring them: races finished while it runs never earn career points, even after upgrading again (a stored race is never re-scored), so prefer rolling forward. If a migration ever must be reverted, restore the database from the backup taken before step 6 (the `pg_dump --format=custom` command in [accounts.md](accounts.md#backup-and-restore), or `scripts/pg-backup.mjs dump` in the [restore drill](restore.md)), restoring into a fresh database first ([Restoring for real](restore.md#restoring-for-real)).
 - **Turn online play off entirely:** restore the backed-up static-only Nginx site file, run `nginx -t`, and reload Nginx. `/api` and `/ws` then return 404, the client's health check fails, and online play stays off. Then run `sudo systemctl disable --now slotrush-server`. The static game is unaffected throughout.
 - **Rollback matrix (#142).** What open pages show after a rollback that leaves the two sides on different versions. Players can always still race locally.
 

@@ -64,6 +64,7 @@ The build output is plain HTML/JS/CSS; serve the `dist/` folder from any static 
 - `docs/auto-bay.md` — race-long bay ownership, automatic fuel visits to the car's own bay, the fresh-Throttle departure, stopped-on-track recovery to the bay (#69), and their evidence.
 - `docs/online-client.md` — online lobbies and the online race client; `docs/online-client-evidence.md` — its evidence.
 - `docs/online-server.md` — the online room server: rules, protocol, timing policy, accounts, configuration, resource limits, activation and rollback runbook; `docs/online-evidence.md` — its evidence.
+- `docs/restore.md` — the restore drill (#144): Postgres dump and restore into a throwaway database, what a host loss keeps, unpacking a checked server release, server and static rollback.
 - `docs/accounts.md` — player accounts and driver profiles; `docs/accounts-evidence.md` — its evidence.
 - `docs/career.md` — career points, personal bests and race history; `docs/career-evidence.md` — its evidence.
 - `docs/validation.md` — repeatable browser checks, results and the remaining hardware validation.

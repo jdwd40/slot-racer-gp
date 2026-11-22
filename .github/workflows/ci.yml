@@ -162,6 +162,16 @@ jobs:
       - name: Install dependencies from the lockfile
         run: npm ci
 
+      # pg_dump/pg_restore must be at least the server's major version for the dump/restore drill test
+      # (test/server/pgbackup.db.test.ts, scripts/pg-backup.mjs); the runner image ships an older client, so add 17 from the
+      # PostgreSQL apt repository (scripts/pg-backup.mjs picks the newest /usr/lib/postgresql/<n>/bin)
+      - name: Install the PostgreSQL 17 client tools
+        run: |
+          [ -x /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh ] || { sudo apt-get update && sudo apt-get install -y --no-install-recommends postgresql-common; }
+          sudo /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y
+          sudo apt-get install -y --no-install-recommends postgresql-client-17
+          /usr/lib/postgresql/17/bin/pg_dump --version
+
       # every test file named *db.test.ts (test/server/db.test.ts and each *.db.test.ts): the same filter as `npm run test:db`
       # (scripts/local-pg.mjs), so a new database test file runs here without editing a list (test/ciworkflow.test.ts checks it)
       - name: Database tests (every *db.test.ts file) on PostgreSQL 17
