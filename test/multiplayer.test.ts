@@ -9,6 +9,13 @@ import trafficSrc from '../src/traffic.ts?raw';
 import raceLengthSrc from '../src/raceLength.ts?raw';
 import carSetupSrc from '../src/carSetup.ts?raw';
 import debriefSrc from '../src/debrief.ts?raw';
+import stallSrc from '../src/stall.ts?raw';
+import awaySrc from '../src/away.ts?raw';
+import autoStopGoSrc from '../src/autoStopGo.ts?raw';
+import reverseSrc from '../src/reverse.ts?raw';
+import squeezeSrc from '../src/squeeze.ts?raw';
+import recoverSrc from '../src/recover.ts?raw';
+import raceConstSrc from '../src/raceConst.ts?raw';
 import trackSrc from '../src/track.ts?raw';
 import * as T from '../src/track';
 import { Race, Car, Input, Controls, RaceOpts, RosterEntry, DriverAction, PEN, SERVICE_READY, CLOSE_DELAY, REV_CAP, DRIVERS, SOLO_ID, RaceEvent, SgPhase, wireEvent, soloRoster } from '../src/race';
@@ -471,12 +478,16 @@ describe('authoritative state', () => {
     expect(typeof (globalThis as { document?: unknown }).document).toBe('undefined');
     // src/traffic.ts (#74 review): the one out-of-traffic predicate the race core and the pit traffic share; src/raceLength.ts
     // (#132): the race-length preset table, plain data; src/carSetup.ts (#133): the car-setup preset table, plain data;
-    // src/debrief.ts (#134): the post-race metrics collector, read-only observation of the race (type imports of race only)
-    for (const src of [raceSrc, pitSrc, pitConstSrc, trackSrc, trafficSrc, raceLengthSrc, carSetupSrc, debriefSrc]) {
+    // src/debrief.ts (#134): the post-race metrics collector, read-only observation of the race (type imports of race only);
+    // the race rules moved out of the Race class (#141): src/stall.ts, src/away.ts, src/autoStopGo.ts, src/reverse.ts, src/squeeze.ts, src/recover.ts, and src/raceConst.ts (the tuning they share)
+    const core = ['./track', './pit', './pitConst', './race', './traffic', './raceLength', './carSetup', './debrief', './raceConst', './stall', './away', './autoStopGo', './reverse', './squeeze', './recover'];
+    for (const src of [raceSrc, pitSrc, pitConstSrc, trackSrc, trafficSrc, raceLengthSrc, carSetupSrc, debriefSrc, raceConstSrc, stallSrc, awaySrc, autoStopGoSrc, reverseSrc, squeezeSrc, recoverSrc]) {
       const imports = [...src.matchAll(/from '([^']+)'/g)].map((m) => m[1]);
-      expect(imports.every((x) => x === './track' || x === './pit' || x === './pitConst' || x === './race' || x === './traffic' || x === './raceLength' || x === './carSetup' || x === './debrief')).toBe(true);
+      expect(imports.every((x) => core.includes(x))).toBe(true);
       expect(src).not.toMatch(/\b(window|document|localStorage|requestAnimationFrame|AudioContext|performance)\b\./);
     }
+    // the subsystem modules only type-import race.ts, so race.ts value-importing them makes no runtime import cycle
+    for (const src of [stallSrc, awaySrc, autoStopGoSrc, reverseSrc, squeezeSrc, recoverSrc]) expect(src.match(/^import .* from '\.\/race';$/gm)?.every((l) => l.startsWith('import type '))).toBe(true);
     const r = new Race({ roster: [{ id: 'a', control: 'ai' }, { id: 'b', control: 'ai' }], seed: 5 });
     let t = 0;
     while (r.phase !== 'done' && t < 600) { r.update(DT, {}); r.events.length = 0; t += DT; }

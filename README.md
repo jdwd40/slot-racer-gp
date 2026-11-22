@@ -38,12 +38,12 @@ The build output is plain HTML/JS/CSS; serve the `dist/` folder from any static 
 
 ### Where new code goes (hub-size budget)
 
-`src/main.ts` (the client hub) and `src/race.ts` (the `Race` class) are capped by line ceilings in `test/hubSize.test.ts`, which runs with `npm test` and so in CI (#141). New behaviour belongs in a subsystem module, wired in from the hub, not in the hub's body: client screens and menu HTML in `src/menu/` (`controls.ts`, `title.ts`, `results.ts`, `account.ts`, `online.ts`, each built once by `src/main.ts` with the state and actions it needs), race rules in a module of their own beside `src/race.ts` with `Race` calling into it. A PR that only grows a hub is out of scope; one that moves code out of a hub ratchets that hub's ceiling down to its new line count plus 50 lines of slack, in the same PR.
+`src/main.ts` (the client hub) and `src/race.ts` (the `Race` class) are capped by line ceilings in `test/hubSize.test.ts`, which runs with `npm test` and so in CI (#141). New behaviour belongs in a subsystem module, wired in from the hub, not in the hub's body: client screens and menu HTML in `src/menu/` (`controls.ts`, `title.ts`, `results.ts`, `account.ts`, `online.ts`, each built once by `src/main.ts` with the state and actions it needs), race rules in a module of their own beside `src/race.ts` with `Race` calling into it (`src/stall.ts`, `src/away.ts`, `src/autoStopGo.ts`, `src/reverse.ts`, `src/squeeze.ts`, `src/recover.ts`, and `src/raceConst.ts` for the tuning they share). A subsystem module takes the `Race` as its first argument, only type-imports `src/race.ts` (no runtime import cycle), and `Race` keeps a one-line method only where tests, the HUD, the server or browser checks call or override that name; new race behaviour goes in such a module, not in the `Race` class body. A PR that only grows a hub is out of scope; one that moves code out of a hub ratchets that hub's ceiling down to its new line count plus 50 lines of slack, in the same PR.
 
 ## Layout
 
 - `index.html` — the page that boots the game.
-- `src/` — TypeScript source (`src/main.ts` is the entry; `src/race.ts` and `src/track.ts` are the simulation; `src/net/` is the online protocol and client, `src/online.ts` the online gate).
+- `src/` — TypeScript source (`src/main.ts` is the entry; `src/race.ts` and `src/track.ts` are the simulation, with the race rules split out of `Race` in the modules listed above; `src/net/` is the online protocol and client, `src/online.ts` the online gate).
 - `server/` — the online room server; `deploy/server/` its systemd unit and environment example.
 - `assets/ui/strings.json` — all player-visible text.
 - `docs/architecture-audit.md` — the first architecture and deployment audit (2026-10-28, historical).
