@@ -4,6 +4,7 @@
 // from the same places as before, so tests, the HUD and the room server see the same API.
 import type { Car, Controls, Race } from './race';
 import { outOfTraffic } from './traffic';
+import * as squeeze from './squeeze';
 
 /**
  * Stopped-on-track recovery (#69, docs/auto-bay.md#stopped-on-track-recovery). A human car stopped on the racing lane, not held
@@ -115,7 +116,7 @@ export function stallRecover(r: Race, c: Car): boolean {
   c.u -= r.T.ahead(r.T.BAYS[c.bayHome], r.s(c));
   if (c.change) { c.laneSide = c.change.to; c.change = null; }
   // out of traffic now: the squeeze queue, any pit reservation, routing state and contact state go; debts stay
-  r.leaveSqueeze(c); r.pit.releaseAll(c, 'recover');
+  squeeze.leaveSqueeze(r, c); r.pit.releaseAll(c, 'recover');
   r.clearPitIntent(c);
   c.laneReq = false; c.sgCommit = -1; c.sgLeave = false; c.sgCtl = false; c.sgPhase = null; c.sgServing = false;
   c.revOn = false; c.revHoldT = 0;

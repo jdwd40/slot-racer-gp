@@ -4,6 +4,7 @@
 import type { Car, Race } from './race';
 import { BRAKE, PEN } from './raceConst';
 import { STALL } from './stall';
+import * as squeeze from './squeeze';
 
 /**
  * When a car held for an away driver (#74) may rejoin traffic, counted from the moment the driver is back (`awayWaitT`):
@@ -64,7 +65,7 @@ export function awayUpdate(r: Race, dt: number): void {
     if (c.linkAway && !c.retire) {
       // a car the automatic pit controller is driving (sgCtl: the approach, the box queue) is never held: the controller
       // still drives it on into the pits when its turn comes, so the cars queued behind it are not stuck for the hold
-      if (!c.away && Math.abs(c.v) < STALL.stopV && !c.sgCtl) { c.away = true; r.leaveSqueeze(c); }
+      if (!c.away && Math.abs(c.v) < STALL.stopV && !c.sgCtl) { c.away = true; squeeze.leaveSqueeze(r, c); }
       c.awayWaitT = 0;
       continue;
     }

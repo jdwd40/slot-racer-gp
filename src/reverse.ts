@@ -3,6 +3,7 @@
 // (reverseBlock, clearReverse), and calls in here from stepCar() as before.
 import * as T from './track';
 import type { Car, Input, Race } from './race';
+import * as squeeze from './squeeze';
 
 /**
  * Player reverse gear, for backing into an overshot pit bay, penalty box or pit entrance (see docs/reverse.md).
@@ -70,7 +71,7 @@ export function reverseTravel(r: Race, c: Car, s0: number, ds: number): number {
   if (ds < 0) {
     c.lapValid = false;
     if (c.revMark === null) c.revMark = c.u;
-    r.leaveSqueeze(c);
+    squeeze.leaveSqueeze(r, c);
   }
   return ds;
 }
