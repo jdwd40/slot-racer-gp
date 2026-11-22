@@ -5,7 +5,7 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import WebSocket from 'ws';
 import type { RaceSnapshot } from '../../src/race';
 import { LENGTH_IDS, LENGTH_SET, raceLength, type RaceLengthId } from '../../src/raceLength';
-import { parseClientMessage, type PublicRoom } from '../../src/net/protocol';
+import { RULES_VERSION, parseClientMessage, type PublicRoom } from '../../src/net/protocol';
 import { OnlineClient, type SocketCtor } from '../../src/net/client';
 import { NetSession } from '../../src/net/session';
 import { mirrorRace } from '../../src/net/mirror';
@@ -313,7 +313,7 @@ describe('a current page and a server older than presets', () => {
       send(data: string): void {
         const m = JSON.parse(data) as Record<string, unknown>;
         sent.push(m);
-        if (m.t === 'hello') { this.deliver({ t: 'welcome', v: 2, server: 'old', rules: 'r', now: 0 }); return; }
+        if (m.t === 'hello') { this.deliver({ t: 'welcome', v: 2, server: 'old', rules: RULES_VERSION, now: 0 }); return; }
         const s = (m.settings ?? {}) as Record<string, unknown>;
         if ('lengths' in m || Object.keys(s).some((k) => k !== 'track' && k !== 'aiFill')) { this.deliver({ t: 'nack', ref: m.t, code: 'malformed' }); return; }
         if (m.t === 'create' || m.t === 'join') this.deliver({ t: 'joined', you: 'p0', token: 't', ctlSeq: 0, actSeq: 0, resumed: false,

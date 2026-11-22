@@ -4,7 +4,7 @@
 import { describe, it, expect } from 'vitest';
 import { HISTORY_DEFAULT_CAP, HISTORY_MAX, HISTORY_OFF, OnlineClient, type SocketCtor, type SocketLike } from '../src/net/client';
 import { NetSession } from '../src/net/session';
-import type { ServerMsg } from '../src/net/protocol';
+import { RULES_VERSION, type ServerMsg } from '../src/net/protocol';
 import { Race } from '../src/race';
 import { STEP } from '../src/timing';
 import { SnapEncoder } from '../src/net/snapwire';
@@ -27,7 +27,7 @@ function fakeSocket() {
     deliver(m: unknown): void { this.onmessage?.({ data: JSON.stringify(m) }); }
     send(data: string): void {
       const m = JSON.parse(data) as { t: string };
-      if (m.t === 'hello') setTimeout(() => this.deliver({ t: 'welcome', v: 1, server: 't', rules: 't', now: 0 }), 0);
+      if (m.t === 'hello') setTimeout(() => this.deliver({ t: 'welcome', v: 1, server: 't', rules: RULES_VERSION, now: 0 }), 0);
       if (m.t === 'resume') setTimeout(() => this.deliver({ t: 'joined', room: room('race'), you: 'p0', token: 'tok', ctlSeq: 0, actSeq: 0, resumed: true }), 0);
     }
     close(): void { this.readyState = 3; }

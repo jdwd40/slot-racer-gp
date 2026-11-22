@@ -1,7 +1,7 @@
 // One browser's online seat: the connection, the room it is in, reconnection within the server's grace period and the
 // result of each race. No race logic and no DOM: main.ts renders what this reports, and tests drive it with the `ws` package.
 // The private reconnect token is kept in memory and in sessionStorage (this tab only), never in a URL, log or the page.
-import { OnlineClient, isProtocolRefusal, type SocketCtor } from './client';
+import { OnlineClient, versionRefusal, type SocketCtor } from './client';
 import type { AwardsView, ChampionshipTag, ClientMsg, ErrorCode, LiveryId, Mode, PublicRoom, RoomSettings, ServerMsg } from './protocol';
 import type { ActionType, DriverId, Standing } from '../race';
 import { LENGTH_SET, isRaceLengthId, type RaceLengthId } from '../raceLength';
@@ -10,8 +10,8 @@ import { SETUP_SET, isSetupId, type SetupId } from '../carSetup';
 export type Conn = 'offline' | 'connecting' | 'connected' | 'reconnecting';
 /**
  * Why a session ended for good. `expired`: the seat can no longer be resumed (it is never re-claimed as a new driver).
- * `outdated`: a reconnect's hello was refused for its protocol (the server was upgraded or rolled back meanwhile; the page
- * asks /api/health which, #80).
+ * `outdated`: a reconnect's hello was refused for its protocol, or its welcome named other race rules (#142): the server
+ * was upgraded or rolled back meanwhile; the page asks /api/health which, #80. The end's detail is `protocol` or `rules`.
  */
 export type EndReason = 'left' | 'expired' | 'closed' | 'shutdown' | 'superseded' | 'outdated';
 
@@ -45,7 +45,11 @@ export interface NetHooks {
   nack?(m: Extract<ServerMsg, { t: 'nack' }>): void;
 }
 
-export type Outcome = { ok: true } | { ok: false; code: ErrorCode | 'unreachable'; detail?: string };
+/**
+ * `rules` (#142) is this page's own refusal, never a server nack: the server's welcome named other race rules, so nothing
+ * was entered (`detail`: the server's rules string, when it sent one).
+ */
+export type Outcome = { ok: true } | { ok: false; code: ErrorCode | 'unreachable' | 'rules'; detail?: string };
 
 const SEAT_KEY = 'srgp.seat';
 const SEEN_KEY = 'srgp.netResults';
@@ -107,7 +111,9 @@ export class NetSession {
       // dropped seat and start a reconnect nobody asked for (and lose the stored seat)
       this.client.drop();
       this.setConn('offline');
-      return isProtocolRefusal(e) ? { ok: false, code: 'protocol' } : { ok: false, code: 'unreachable' };
+      const v = versionRefusal(e);
+      if (v === 'rules') { const d = (e as { detail?: string }).detail; return { ok: false, code: 'rules', ...(d ? { detail: d } : {}) }; }
+      return v === 'protocol' ? { ok: false, code: 'protocol' } : { ok: false, code: 'unreachable' };
     }
     let r: ServerMsg;
     try { r = await this.client.request(this.forServer(req)); } catch { this.client.drop(); this.setConn('offline'); return { ok: false, code: 'unreachable' }; }
@@ -227,8 +233,10 @@ export class NetSession {
         const n = r as Extract<ServerMsg, { t: 'nack' }>;
         if (n.code === 'expired' || n.code === 'forbidden' || n.code === 'not_found') { this.client.drop(); this.finish('expired', n.detail); return; }
       } catch (e) {
-        // the server now speaks another protocol: retrying cannot succeed, and the old page must never race on it
-        if (isProtocolRefusal(e)) { this.client.drop(); this.finish('outdated'); return; }
+        // the server now speaks another protocol or races other rules (#142): retrying cannot succeed, and the page must
+        // never race on it
+        const v = versionRefusal(e);
+        if (v) { this.client.drop(); this.finish('outdated', v); return; }
         /* otherwise not reachable yet */
       }
       // a refused or failed attempt gives its socket up before the next one, or each retry would hold another server connection

@@ -2,6 +2,8 @@
 
 > **Current state.** DNS and TLS are live, and every deploy proves them with an HTTPS preflight (`deploy/run.sh`). Since online play was activated (2026-11-09) the installed site file is `deploy/nginx/slotrush.jdwd40.com.online.conf` (it adds `/api/` and `/ws`); `deploy/nginx/slotrush.jdwd40.com.conf` is the static-only rollback. Passages below written before launch (NXDOMAIN, "no Node process required") are kept as the record of the original setup.
 
+> **Deploy order (#142).** This pipeline deploys the static client on every merge to `main`; it never deploys the room server. When a commit changes `RULES_VERSION`, `PROTOCOL_VERSION` or server code, **upgrade the room server first** (wait for `/api/health` `"racing": 0`, install the checked `slotrush-server-<sha>` artifact, health-check), **then** let the static client deploy. A static deploy that lands first is safe: its pages show *temporarily unavailable* with **Retry** until the server matches, and never join a room on other rules. A PR that changes either version must carry a `SERVER-DEPLOY: required` line in its description (the *Server deploy reminder* check). Details, the handshake table and the rollback matrix: [online-server.md](online-server.md#deploy-order-read-first).
+
 ## Scope and verified target
 
 This is a **static browser game**. No production Node process, multiplayer backend,

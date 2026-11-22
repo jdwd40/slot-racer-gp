@@ -6,7 +6,7 @@ import WebSocket from 'ws';
 import type { RaceSnapshot } from '../../src/race';
 import { SETUP_IDS, SETUP_SET, carSetup, type SetupId } from '../../src/carSetup';
 import { LENGTH_SET } from '../../src/raceLength';
-import { parseClientMessage, type PublicRoom } from '../../src/net/protocol';
+import { RULES_VERSION, parseClientMessage, type PublicRoom } from '../../src/net/protocol';
 import { OnlineClient, type SocketCtor } from '../../src/net/client';
 import { NetSession } from '../../src/net/session';
 import { mirrorRace } from '../../src/net/mirror';
@@ -313,7 +313,7 @@ describe('a current page and a server older than setups', () => {
       send(data: string): void {
         const m = JSON.parse(data) as Record<string, unknown>;
         sent.push(m);
-        if (m.t === 'hello') { this.deliver({ t: 'welcome', v: 2, server: 'old', rules: 'r', now: 0, lengths: ['sprint', 'standard', 'endurance'] }); return; }
+        if (m.t === 'hello') { this.deliver({ t: 'welcome', v: 2, server: 'old', rules: RULES_VERSION, now: 0, lengths: ['sprint', 'standard', 'endurance'] }); return; }
         if (m.t === 'setup' || 'setup' in m || 'setups' in m) { this.deliver({ t: 'nack', ref: m.t, code: 'malformed' }); return; }
         if (m.t === 'create' || m.t === 'join') this.deliver({ t: 'joined', you: 'p0', token: 't', ctlSeq: 0, actSeq: 0, resumed: false,
           room: { id: 'r', code: 'ABCDEF', mode: 'solo', state: 'lobby', rev: 1, hostId: 'p0', settings: { track: 'circuit-1', aiFill: true, length: 'standard' }, championship: null, participants: [{ id: 'p0', name: 'Me', slot: 0, num: 7, bay: 0, livery: 'yellow', color: 0, liveryRequested: null, ready: false, connected: true, host: true, guest: true, joinOrder: 0, left: false }], ai: [], raceId: null, maxHumans: 1, minHumans: 1, graceS: 20 } });

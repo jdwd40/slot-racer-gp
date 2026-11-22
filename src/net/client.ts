@@ -3,7 +3,7 @@
 // controls and actions, and resends held controls as a heartbeat so the server's input timeout never fires while a pedal
 // is really held. An app-level ping and a receive watchdog notice a socket that died without a close event (half-open TCP
 // behind a proxy, a sleeping phone, a NAT timeout): the server has hung up, but nothing tells the browser.
-import { PROTOCOL_NAME, PROTOCOL_VERSION, type ClientMsg, type PublicRoom, type ServerMsg } from './protocol';
+import { PROTOCOL_NAME, PROTOCOL_VERSION, RULES_VERSION, type ClientMsg, type PublicRoom, type ServerMsg } from './protocol';
 import type { ActionType } from '../race';
 import { SnapDecoder, type WireStateMsg } from './snapwire';
 
@@ -58,9 +58,12 @@ export interface RxStats { total: number; byType: Partial<Record<ServerMsg['t'],
 export const CLOSE_PROTOCOL = 4002;
 
 /**
- * The server refused this page's hello. `code` is the refusal's typed nack code (`protocol` when the server speaks another
- * protocol version); callers branch on it, never on the message text. The message keeps its historic wording
- * (`hello refused: <code>`) for logs and older tests only.
+ * The server refused this page's hello, or this page refused the server's welcome. `code` is the refusal's typed nack code
+ * (`protocol` when the server speaks another protocol version); callers branch on it, never on the message text. One code
+ * is the client's own (#142): `rules`, a `welcome` whose race rules are not this page's. The server never sends it (on
+ * protocol 2 it cannot know the page's rules: the hello carries none), so it is additive and older servers are unaffected;
+ * `detail` is then the server's rules string. The message keeps its historic wording (`hello refused: <code>`) for logs
+ * and older tests only.
  */
 export class HelloRefused extends Error {
   constructor(readonly code: string, readonly detail?: string) {
@@ -72,6 +75,15 @@ export class HelloRefused extends Error {
 /** Whether a failed connect() was the server refusing this page's protocol (a newer or older server). */
 export function isProtocolRefusal(e: unknown): boolean {
   return e instanceof HelloRefused && e.code === 'protocol';
+}
+
+/**
+ * Whether a failed connect() means this page and the server are on different versions: `protocol` (the server refused the
+ * hello) or `rules` (the welcome named other race rules, #142). Null for anything else (unreachable, another refusal).
+ * Either way the page must not race there, and asks /api/health whether to say Reload or Retry.
+ */
+export function versionRefusal(e: unknown): 'protocol' | 'rules' | null {
+  return e instanceof HelloRefused && (e.code === 'protocol' || e.code === 'rules') ? e.code : null;
 }
 
 export class OnlineClient {
@@ -95,6 +107,11 @@ export class OnlineClient {
   /** The newest message of each type (bounded by the number of message types). */
   readonly latest: Partial<Record<ServerMsg['t'], ServerMsg>> = {};
   closed: { code: number; reason: string } | null = null;
+  /**
+   * The race rules a `welcome` must name for connect() to succeed (#142): this build's RULES_VERSION. Only a test changes
+   * it, to stand for a page built with other rules.
+   */
+  expectRules: string = RULES_VERSION;
   /** the current connection's `welcome` (null until a hello is answered): what this server says it supports (#132 `lengths`) */
   welcome: Extract<ServerMsg, { t: 'welcome' }> | null = null;
   private waiters: { pred: (m: ServerMsg) => boolean; res: (m: ServerMsg) => void; rej: (e: Error) => void; timer: ReturnType<typeof setTimeout> }[] = [];
@@ -129,7 +146,10 @@ export class OnlineClient {
     if (over > 0) { this.received.splice(0, over); this.rx.dropped += over; }
   }
 
-  /** Open the socket and complete the versioned hello. Rejects on a protocol mismatch. */
+  /**
+   * Open the socket and complete the versioned hello. Rejects with HelloRefused on a protocol mismatch (`protocol`), and on
+   * a welcome whose race rules are not `expectRules` (`rules`, #142): that socket is closed before any room is asked for.
+   */
   async connect(version = PROTOCOL_VERSION): Promise<void> {
     this.closed = null;
     this.welcome = null;
@@ -164,6 +184,13 @@ export class OnlineClient {
     if (m.t !== 'welcome') {
       const n = m as { code?: unknown; detail?: unknown };
       throw new HelloRefused(typeof n.code === 'string' ? n.code : 'unknown', typeof n.detail === 'string' ? n.detail : undefined);
+    }
+    // the same protocol on other race rules (#142): the HUD, lobby and results would disagree with the server about which
+    // rules this is, so this page never enters a room there. A welcome without a rules string is not a match either.
+    const rules = (m as { rules?: unknown }).rules;
+    if (rules !== this.expectRules) {
+      this.drop();
+      throw new HelloRefused('rules', typeof rules === 'string' ? rules.slice(0, 64) : undefined);
     }
     this.welcome = m;
     if (this.ws === ws) { this.answered = false; this.startKeepalive(ws); }
