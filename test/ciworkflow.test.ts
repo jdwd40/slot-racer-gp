@@ -320,7 +320,8 @@ describe('coverage report job (#145)', () => {
 // `SERVER-DEPLOY: required` (scripts/server-deploy-check.mjs, unit-tested in test/serverDeployCheck.test.ts). Its own
 // workflow, on pull requests only (a push to main has no description), re-run when the description is edited; it deploys
 // nothing and holds no secrets. The server job it reminds about cannot be skipped in ci.yml: no job-level if: and no path
-// filter on the workflow's triggers.
+// filter on the workflow's triggers. The same workflow carries the John checkpoint job (#143, scripts/john-gate-check.mjs,
+// unit-tested in test/johnGateCheck.test.ts), wired the same way.
 describe('server-deploy reminder (#142)', () => {
   const FILE = '.github/workflows/server-deploy.yml';
   const raw = readFileSync(FILE, 'utf8');
@@ -334,20 +335,39 @@ describe('server-deploy reminder (#142)', () => {
     expect(body).toMatch(/^permissions:\n {2}contents: read\n/m);
   });
 
-  it('has one job that runs the tested script on the merge commit against its base, with the body from the environment', () => {
-    const jobsAt = own.indexOf('jobs:');
-    const jobIds = own.slice(jobsAt + 1).map((l) => /^ {2}([A-Za-z0-9_-]+):\s*$/.exec(l)?.[1]).filter(Boolean);
-    expect(jobIds).toEqual(['versions']);
-    const job = own.slice(jobsAt + 1).join('\n');
+  // job id -> its lines, under the top-level jobs: mapping (two-space headers)
+  const jobsAt = own.indexOf('jobs:');
+  const wfJobs = new Map<string, string[]>();
+  let cur: string[] | null = null;
+  for (const l of own.slice(jobsAt + 1)) {
+    const h = /^ {2}([A-Za-z0-9_-]+):\s*$/.exec(l);
+    if (h) { cur = []; wfJobs.set(h[1], cur); continue; }
+    cur?.push(l);
+  }
+  // each job: always runs on a PR, runs its tested script on the merge commit against its base, body from the environment
+  const pinned = (id: string, run: string) => {
+    const job = wfJobs.get(id)!.join('\n');
     expect(job, 'no job- or step-level if: (it always runs on a PR)').not.toMatch(/^ {4,8}if:/m);
-    expect(job).not.toMatch(/continue-on-error|always\(\)|secrets\.|ssh|deploy\/run\.sh|upload-artifact|needs:/);
+    expect(job).not.toMatch(/continue-on-error|always\(\)|secrets\.|ssh|deploy\/run\.sh|upload-artifact|needs:|permissions:/);
     expect(job).toMatch(/fetch-depth: 2\n/);
     expect(job).toMatch(/persist-credentials: false/);
     expect(job).toMatch(/ {10}PR_BODY: \$\{\{ github\.event\.pull_request\.body \}\}\n/);
     const runs = [...job.matchAll(/^ {8}run: (.*)$/gm)].map((m) => m[1]);
-    expect(runs).toEqual(['node scripts/server-deploy-check.mjs HEAD^1']);
+    expect(runs).toEqual([run]);
     // the description is never pasted into a shell line (script injection)
     expect(runs.join('\n')).not.toMatch(/\$\{\{/);
+  };
+
+  it('has the versions job and the John checkpoint job (#143), nothing else', () => {
+    expect([...wfJobs.keys()]).toEqual(['versions', 'john']);
+  });
+
+  it('the versions job runs the server-deploy script on the merge commit against its base, with the body from the environment', () => {
+    pinned('versions', 'node scripts/server-deploy-check.mjs HEAD^1');
+  });
+
+  it('the john job runs the John checkpoint script the same way (#143, test/johnGateCheck.test.ts)', () => {
+    pinned('john', 'node scripts/john-gate-check.mjs HEAD^1');
   });
 
   it('the server job in ci.yml cannot be skipped: no job-level if:, no path filters, and the static deploy needs it', () => {
