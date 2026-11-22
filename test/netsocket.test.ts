@@ -4,6 +4,7 @@ import { describe, it, expect } from 'vitest';
 import type { SocketCtor, SocketLike } from '../src/net/client';
 import { NetSession, type EndReason } from '../src/net/session';
 
+import { RULES_VERSION } from '../src/net/protocol';
 /** A fake server endpoint: answers hello, and answers each resume from a script ('joined' or a nack code). */
 function fakeServer(script: string[]) {
   const sockets: Fake[] = [];
@@ -22,7 +23,7 @@ function fakeServer(script: string[]) {
     private reply(m: unknown): void { setTimeout(() => { if (this.readyState === 1) this.onmessage?.({ data: JSON.stringify(m) }); }, 1); }
     send(data: string): void {
       const m = JSON.parse(data) as { t: string };
-      if (m.t === 'hello') { this.reply({ t: 'welcome', v: 1, server: 't', rules: 't', now: 0 }); return; }
+      if (m.t === 'hello') { this.reply({ t: 'welcome', v: 1, server: 't', rules: RULES_VERSION, now: 0 }); return; }
       if (m.t !== 'resume') return;
       const next = script.shift() ?? 'joined';
       if (next !== 'joined') { this.reply({ t: 'nack', ref: 'resume', code: next }); return; }

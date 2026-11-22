@@ -4,15 +4,16 @@
 // never "a new version is available", whichever way the mismatch is found (health probe or a refused hello).
 import { describe, it, expect, vi } from 'vitest';
 import { readFileSync, readdirSync } from 'node:fs';
-import { CLOSE_PROTOCOL, HelloRefused, OnlineClient, isProtocolRefusal, type SocketCtor, type SocketLike } from '../src/net/client';
+import { CLOSE_PROTOCOL, HelloRefused, OnlineClient, isProtocolRefusal, versionRefusal, type SocketCtor, type SocketLike } from '../src/net/client';
 import { NetSession, type EndReason } from '../src/net/session';
-import { PROTOCOL_VERSION } from '../src/net/protocol';
+import { PROTOCOL_VERSION, RULES_VERSION } from '../src/net/protocol';
 import { RECHECK_MAX, RECHECK_MS, afterProtocolRefusal, afterRetry, behindHtml, outdatedHtml, probeOnline, startRecheck, type OnlineStatus } from '../src/online';
 
 /** The client shell's source: src/main.ts and the screens split out of it into src/menu/ (#141). */
 const shellSource = (): string => ['main.ts', ...readdirSync(new URL('../src/menu/', import.meta.url)).filter((f) => f.endsWith('.ts')).map((f) => `menu/${f}`)]
   .map((f) => readFileSync(new URL(`../src/${f}`, import.meta.url), 'utf8')).join('\n');
-const health = (protocol: unknown) => (() => Promise.resolve(new Response(JSON.stringify({ ok: true, protocol, version: 'v' }), { status: 200 }))) as unknown as typeof fetch;
+/** A health answer: `rules` defaults to this page's (#142); pass `null` for a body without the field (an older server). */
+const health = (protocol: unknown, rules: unknown = RULES_VERSION) => (() => Promise.resolve(new Response(JSON.stringify({ ok: true, protocol, version: 'v', ...(rules === null ? {} : { rules }) }), { status: 200 }))) as unknown as typeof fetch;
 
 /** A server endpoint whose hello answer can change between sockets (an upgrade while a session is open). */
 function fakeServer() {
@@ -22,7 +23,8 @@ function fakeServer() {
    * close 4002). `close` closes with 4002 before any nack is read. `nack-other` refuses for another reason (`malformed`).
    * `nack-bare` is a nack without a code.
    */
-  const srv = { upgraded: false, version: PROTOCOL_VERSION, refusal: 'nack' as 'nack' | 'close' | 'nack-other' | 'nack-bare', detail: undefined as string | undefined };
+  /** `rules`: what the welcome names (#142); `undefined` sends a welcome without the field */
+  const srv = { upgraded: false, version: PROTOCOL_VERSION, refusal: 'nack' as 'nack' | 'close' | 'nack-other' | 'nack-bare', detail: undefined as string | undefined, rules: RULES_VERSION as string | undefined, sent: [] as string[] };
   class Fake implements SocketLike {
     readyState = 0;
     onopen: ((ev: unknown) => void) | null = null;
@@ -33,6 +35,7 @@ function fakeServer() {
     deliver(m: unknown): void { setTimeout(() => { if (this.readyState === 1) this.onmessage?.({ data: JSON.stringify(m) }); }, 1); }
     send(data: string): void {
       const m = JSON.parse(data) as { t: string; v?: number };
+      srv.sent.push(m.t);
       if (m.t === 'hello') {
         // as server/app.ts: a hello of another version is refused and closed with 4002
         if (srv.upgraded || m.v !== srv.version) {
@@ -41,7 +44,7 @@ function fakeServer() {
           this.deliver({ t: 'nack', ref: 'hello', ...code, ...(srv.detail ? { detail: srv.detail } : {}) });
           setTimeout(() => this.close(srv.refusal === 'nack' ? CLOSE_PROTOCOL : 1008, 'refused'), 5);
         }
-        else this.deliver({ t: 'welcome', v: PROTOCOL_VERSION, server: 't', rules: 't', now: 0 });
+        else this.deliver({ t: 'welcome', v: PROTOCOL_VERSION, server: 't', ...(srv.rules === undefined ? {} : { rules: srv.rules }), now: 0 });
       }
       if (m.t === 'resume' || m.t === 'join') {
         const room = { id: 'r1', code: 'ABCDEF', mode: 'multiplayer', state: 'race', rev: 1, hostId: 'p0', settings: {}, championship: null,
@@ -74,7 +77,7 @@ describe('an outdated page (#67)', () => {
     expect(main).toContain("if (online.state === 'outdated') return outdatedHtml();");
     expect(main).toContain("overlay.querySelector('#o-reload')?.addEventListener('click', () => location.reload());");
     // a refused hello (create/join/resume) and a refused reconnect both ask /api/health which side is newer (#80)
-    expect(main).toContain("if (r.code === 'protocol') { onProtocolRefused(); return; }");
+    expect(main).toContain("if (r.code === 'protocol' || r.code === 'rules') { onProtocolRefused(); return; }");
     expect(main).toContain("if (why === 'outdated') { onProtocolRefused(); return; }");
     expect(main).toContain('void probeHealth().then((st) => applyOnline(afterProtocolRefusal(st), true));');
   });
@@ -111,7 +114,7 @@ describe('the outdated path branches on the typed hello nack code, not its messa
     const src = readFileSync(new URL('../src/net/session.ts', import.meta.url), 'utf8');
     expect(src).not.toMatch(/hello refused/);
     expect(src).not.toMatch(/\.message\)?\.includes\(/);
-    expect(src.match(/isProtocolRefusal\(e\)/g)).toHaveLength(2);   // the first connect and the reconnect loop
+    expect(src.match(/versionRefusal\(e\)/g)).toHaveLength(2);   // the first connect and the reconnect loop
   });
 
   it('connect() rejects with a typed HelloRefused carrying the nack code (and keeps the historic message)', async () => {
@@ -216,7 +219,7 @@ describe('an older game server (#80: a server rollback after a protocol bump)', 
 
   it('Retry once the server matches again returns to normal online play, without a reload', async () => {
     let proto = PROTOCOL_VERSION - 1;
-    const f = (() => Promise.resolve(new Response(JSON.stringify({ ok: true, protocol: proto, version: 'v' }), { status: 200 }))) as unknown as typeof fetch;
+    const f = (() => Promise.resolve(new Response(JSON.stringify({ ok: true, protocol: proto, rules: RULES_VERSION, version: 'v' }), { status: 200 }))) as unknown as typeof fetch;
     expect(afterRetry(await probeOnline(true, f, 'https://x'))).toEqual({ state: 'behind', server: PROTOCOL_VERSION - 1 });
     proto = PROTOCOL_VERSION;   // the server is rolled forward again
     expect(afterRetry(await probeOnline(true, f, 'https://x'))).toEqual({ state: 'available', version: 'v', wsUrl: 'wss://x/ws', accounts: false, lengths: [], setups: [] });
@@ -318,5 +321,78 @@ describe('an older game server (#80: a server rollback after a protocol bump)', 
         expect(main).toContain("() => screen === 'title' && online.state === 'behind'");
       } finally { vi.useRealTimers(); }
     });
+  });
+});
+
+describe('a welcome on other race rules never joins (#142)', () => {
+  const NEXT = RULES_VERSION.replace(/\.(\d+)$/, (_m, n: string) => `.${Number(n) + 1}`);
+  const PREV = RULES_VERSION.replace(/\.(\d+)$/, (_m, n: string) => `.${Number(n) - 1}`);
+
+  it('connect() rejects with a typed `rules` refusal and closes the socket before any room is asked for', async () => {
+    for (const rules of [NEXT, PREV, 'banana', undefined]) {
+      const { Ctor, sockets, srv } = fakeServer();
+      srv.rules = rules;
+      const c = new OnlineClient('ws://x', Ctor);
+      const e = await c.connect().catch((x: unknown) => x);
+      expect(e, String(rules)).toBeInstanceOf(HelloRefused);
+      expect(e).toMatchObject({ code: 'rules', detail: rules });
+      expect(versionRefusal(e)).toBe('rules');
+      expect(isProtocolRefusal(e)).toBe(false);
+      expect(c.ws).toBeNull();
+      expect(c.welcome).toBeNull();
+      expect(sockets[0].readyState).toBe(3);
+    }
+    // matching rules connect as before; a page built with other rules (a test's expectRules) is refused by the same server
+    const { Ctor } = fakeServer();
+    const ok = new OnlineClient('ws://x', Ctor);
+    await ok.connect();
+    expect(ok.welcome?.rules).toBe(RULES_VERSION);
+    const other = new OnlineClient('ws://x', Ctor);
+    other.expectRules = NEXT;
+    expect(versionRefusal(await other.connect().catch((x: unknown) => x))).toBe('rules');
+    expect(versionRefusal(new HelloRefused('protocol'))).toBe('protocol');
+    expect(versionRefusal(new HelloRefused('malformed'))).toBeNull();
+    expect(versionRefusal(new Error('hello refused: rules'))).toBeNull();
+  });
+
+  it('a session reports `rules` and joins nothing; the page then re-probes health to pick Reload or Retry', async () => {
+    const { Ctor, sockets, srv } = fakeServer();
+    srv.rules = PREV;
+    const s = new NetSession('ws://x', Ctor);
+    expect(await s.join('ABCDEF', 'Ann')).toEqual({ ok: false, code: 'rules', detail: PREV });
+    expect(s.conn).toBe('offline');
+    expect(s.room).toBeNull();
+    expect(sockets).toHaveLength(1);
+    // the server's rules older than this page (not upgraded yet / rolled back): Retry, never "a new version"
+    const older = afterProtocolRefusal(await probeOnline(true, health(PROTOCOL_VERSION, PREV), 'https://x'));
+    expect(older).toMatchObject({ state: 'behind', rules: PREV });
+    expect(notice(older)).toContain(BEHIND);
+    expect(notice(older)).not.toContain(NEW_VERSION);
+    // newer (this page is the cached one): Reload
+    const newer = afterProtocolRefusal(await probeOnline(true, health(PROTOCOL_VERSION, NEXT), 'https://x'));
+    expect(newer).toMatchObject({ state: 'outdated', rules: NEXT });
+    expect(notice(newer)).toContain(NEW_VERSION);
+    // a health body without rules (an older server) is Retry, not a match
+    expect(notice(await probeOnline(true, health(PROTOCOL_VERSION, null), 'https://x'))).toContain(BEHIND);
+  });
+
+  it('a reconnect whose welcome names other rules ends `outdated` (detail `rules`) once, never resuming the seat', async () => {
+    vi.useFakeTimers();
+    try {
+      const { Ctor, sockets, srv } = fakeServer();
+      const ends: [EndReason, string | undefined][] = [];
+      const s = new NetSession('ws://x', Ctor, { end: (why, d) => ends.push([why, d]) });
+      const p = s.join('ABCDEF', 'Ann');
+      await vi.advanceTimersByTimeAsync(50);
+      expect(await p).toEqual({ ok: true });
+      srv.rules = NEXT;   // the server was upgraded to new rules while this page raced
+      srv.sent.length = 0;
+      sockets[0].close(1012, 'restart');
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(ends).toEqual([['outdated', 'rules']]);
+      expect(sockets).toHaveLength(2);   // one attempt: retrying cannot succeed
+      expect(srv.sent).toEqual(['hello']);   // the welcome was read and the socket given up: no resume was ever sent
+      expect(s.conn).toBe('offline');
+    } finally { vi.useRealTimers(); }
   });
 });

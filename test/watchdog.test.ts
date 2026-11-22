@@ -5,6 +5,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import type { SocketCtor, SocketLike } from '../src/net/client';
 import { NetSession, type Conn, type EndReason, type KV } from '../src/net/session';
 import { NETWAIT_TIMEOUT_MS, NetWaitGuard, type NetWaitView } from '../src/net/netwait';
+import { RULES_VERSION } from '../src/net/protocol';
 
 type Msg = { t: string; [k: string]: unknown };
 
@@ -33,7 +34,7 @@ function fakeServer(script: string[] = [], roomState = 'lobby', resumeDelayMs = 
     send(data: string): void {
       const m = JSON.parse(data) as Msg;
       this.sent.push(m);
-      if (m.t === 'hello') { this.deliver({ t: 'welcome', v: 1, server: 't', rules: 't', now: 0 }); return; }
+      if (m.t === 'hello') { this.deliver({ t: 'welcome', v: 1, server: 't', rules: RULES_VERSION, now: 0 }); return; }
       if (m.t === 'ping') { this.deliver({ t: 'pong', id: m.id, now: 0 }); return; }
       if (m.t !== 'resume') return;
       const next = script.shift() ?? 'joined';

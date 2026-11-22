@@ -692,8 +692,8 @@ function syncRecheck(): void {
 }
 
 /**
- * A hello refused for its protocol: the refusal does not carry the server's protocol, so ask /api/health which side is
- * newer. Only a newer server makes this page outdated (Reload); an older one (a rollback) is the Retry notice (#80).
+ * A hello refused for its protocol, or a welcome on other rules (#142): ask /api/health which side is newer. Only a newer
+ * server (protocol or rules) makes this page outdated (Reload); an older one (a rollback) is the Retry notice (#80).
  */
 function onProtocolRefused(): void {
   online = { state: 'checking' };
@@ -785,8 +785,8 @@ async function netBegin(req: (s: NetSession) => Promise<{ ok: true } | { ok: fal
   if (!r.ok) {
     net = null;
     mode = 'race';
-    // the server refused this page's protocol: newer (upgraded after this page loaded) → Reload (#67); older → Retry (#80)
-    if (r.code === 'protocol') { onProtocolRefused(); return; }
+    // the server refused this page's protocol, or races other rules (#142): newer → Reload (#67); older → Retry (#80)
+    if (r.code === 'protocol' || r.code === 'rules') { onProtocolRefused(); return; }
     // the sign-in this page shows is not the browser's any more (expired, signed out elsewhere, reset, switched in another
     // tab): nothing was entered; find out who this browser is now and let the driver choose again
     const session = r.code === 'expired' && r.detail === 'session';

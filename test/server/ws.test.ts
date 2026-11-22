@@ -5,8 +5,10 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import WebSocket from 'ws';
 import { PEN, type RaceSnapshot } from '../../src/race';
 import { LAPS } from '../helpers';
-import { CLOSE_PROTOCOL, HelloRefused, OnlineClient, isProtocolRefusal, type SocketCtor } from '../../src/net/client';
-import { PROTOCOL_VERSION, type ServerMsg } from '../../src/net/protocol';
+import { CLOSE_PROTOCOL, HelloRefused, OnlineClient, isProtocolRefusal, versionRefusal, type SocketCtor } from '../../src/net/client';
+import { PROTOCOL_VERSION, RULES_VERSION, type ServerMsg } from '../../src/net/protocol';
+import { NetSession } from '../../src/net/session';
+import { afterProtocolRefusal, probeOnline } from '../../src/online';
 import { createApp, type App } from '../../server/app';
 import type { Peer } from '../../server/room';
 import { testConfig } from '../../server/config';
@@ -171,6 +173,48 @@ describe('headless clients race over WebSockets', () => {
     expect([...sink.stored.values()].filter((e) => e.roomId === id)).toHaveLength(1);
     cs.forEach((c) => c.close());
   }, 120_000);
+});
+
+describe('a page built with other race rules never joins (#142)', () => {
+  /** This server's rules with the month counter moved: what a page built one rules bump later (or earlier) carries. */
+  const spoof = (d: number): string => RULES_VERSION.replace(/\.(\d+)$/, (_m, n: string) => `.${Number(n) + d}`);
+
+  it('newer page rules (server not upgraded yet) → Retry; older page rules (a cached page) → Reload; neither enters a room', async () => {
+    expect(spoof(1)).not.toBe(RULES_VERSION);
+    for (const [d, want] of [[1, 'behind'], [-1, 'outdated']] as const) {
+      const page = spoof(d);
+      // the health probe this page runs first: the protocol matches, the rules do not, so online is never `available`
+      const probed = await probeOnline(true, fetch, base, 4000, page);
+      expect(probed, page).toMatchObject({ state: want, server: PROTOCOL_VERSION, rules: RULES_VERSION });
+      // a page that got past the probe (the server changed after it) is stopped by the welcome: typed, no room asked for
+      const before = mgr.size;
+      const c = new OnlineClient(base.replace('http', 'ws') + '/ws', Ctor, { headers: { origin: ORIGIN } });
+      c.expectRules = page;
+      const got: ServerMsg[] = [];
+      c.onMessage = (m) => got.push(m);
+      const e = await c.connect().catch((x: unknown) => x);
+      expect(e).toBeInstanceOf(HelloRefused);
+      expect(e).toMatchObject({ code: 'rules', detail: RULES_VERSION });
+      expect(versionRefusal(e)).toBe('rules');
+      expect(isProtocolRefusal(e)).toBe(false);
+      expect(c.ws).toBeNull();
+      expect(got.map((m) => m.t)).toEqual(['welcome']);
+      // the browser session reports it as `rules` and creates nothing; the page then re-probes health to pick Reload or Retry
+      const s = new NetSession(base.replace('http', 'ws') + '/ws', Ctor, {}, null, { headers: { origin: ORIGIN } });
+      s.client.expectRules = page;
+      expect(await s.create('Ann', 'solo', {})).toEqual({ ok: false, code: 'rules', detail: RULES_VERSION });
+      expect(s.conn).toBe('offline');
+      expect(s.room).toBeNull();
+      expect(afterProtocolRefusal(await probeOnline(true, fetch, base, 4000, page))).toMatchObject({ state: want });
+      await sleep(50);
+      expect(mgr.size).toBe(before);
+    }
+    // the control: this build's own rules join as always
+    const ok = new NetSession(base.replace('http', 'ws') + '/ws', Ctor, {}, null, { headers: { origin: ORIGIN } });
+    expect(await ok.create('Ann', 'solo', {})).toEqual({ ok: true });
+    expect(await probeOnline(true, fetch, base)).toMatchObject({ state: 'available' });
+    ok.leave();
+  });
 });
 
 describe('protocol and access checks', () => {

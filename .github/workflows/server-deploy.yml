@@ -1,0 +1,40 @@
+name: Server deploy reminder
+
+# A pull request that changes RULES_VERSION or PROTOCOL_VERSION in src/net/protocol.ts fails this check until its
+# description carries a line `SERVER-DEPLOY: required` (#142): the static client deploys itself on merge, the room server
+# is upgraded by hand, server first (docs/online-server.md, "Deploy order"). Every other PR passes. It is its own workflow
+# so that editing the description (`edited`) re-runs only this check, never the whole CI. A push to main carries no PR
+# description, so it does not run there. It deploys nothing and holds no secrets (test/ciworkflow.test.ts checks it).
+
+on:
+  pull_request:
+    types: [opened, edited, reopened, synchronize]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: server-deploy-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  versions:
+    name: RULES_VERSION / PROTOCOL_VERSION change needs SERVER-DEPLOY in the PR description
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      # the PR's merge commit and its first parent (the base branch it merges into): enough to compare protocol.ts
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version-file: .nvmrc
+
+      # the description goes in through the environment, never into the script text (it is untrusted input)
+      - name: Compare protocol.ts with the base branch and look for the SERVER-DEPLOY line
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: node scripts/server-deploy-check.mjs HEAD^1

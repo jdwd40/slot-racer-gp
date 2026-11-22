@@ -315,3 +315,47 @@ describe('coverage report job (#145)', () => {
     expect(cov.join('\n')).not.toMatch(/^ {4}permissions:/m);
   });
 });
+
+// The server-deploy reminder (#142): a PR that changes RULES_VERSION or PROTOCOL_VERSION fails until its description says
+// `SERVER-DEPLOY: required` (scripts/server-deploy-check.mjs, unit-tested in test/serverDeployCheck.test.ts). Its own
+// workflow, on pull requests only (a push to main has no description), re-run when the description is edited; it deploys
+// nothing and holds no secrets. The server job it reminds about cannot be skipped in ci.yml: no job-level if: and no path
+// filter on the workflow's triggers.
+describe('server-deploy reminder (#142)', () => {
+  const FILE = '.github/workflows/server-deploy.yml';
+  const raw = readFileSync(FILE, 'utf8');
+  const own = raw.split('\n').filter((l) => !/^\s*#/.test(l)).map((l) => l.replace(/\s+#.*$/, ''));
+  const body = own.join('\n');
+
+  it('runs on pull requests only, including description edits, never on push', () => {
+    expect(body).toMatch(/^on:\n {2}pull_request:\n {4}types: \[opened, edited, reopened, synchronize\]\n/m);
+    expect(body).not.toMatch(/^ {2}push:/m);
+    expect(body).not.toMatch(/pull_request_target|workflow_run|paths(-ignore)?:/);
+    expect(body).toMatch(/^permissions:\n {2}contents: read\n/m);
+  });
+
+  it('has one job that runs the tested script on the merge commit against its base, with the body from the environment', () => {
+    const jobsAt = own.indexOf('jobs:');
+    const jobIds = own.slice(jobsAt + 1).map((l) => /^ {2}([A-Za-z0-9_-]+):\s*$/.exec(l)?.[1]).filter(Boolean);
+    expect(jobIds).toEqual(['versions']);
+    const job = own.slice(jobsAt + 1).join('\n');
+    expect(job, 'no job- or step-level if: (it always runs on a PR)').not.toMatch(/^ {4,8}if:/m);
+    expect(job).not.toMatch(/continue-on-error|always\(\)|secrets\.|ssh|deploy\/run\.sh|upload-artifact|needs:/);
+    expect(job).toMatch(/fetch-depth: 2\n/);
+    expect(job).toMatch(/persist-credentials: false/);
+    expect(job).toMatch(/ {10}PR_BODY: \$\{\{ github\.event\.pull_request\.body \}\}\n/);
+    const runs = [...job.matchAll(/^ {8}run: (.*)$/gm)].map((m) => m[1]);
+    expect(runs).toEqual(['node scripts/server-deploy-check.mjs HEAD^1']);
+    // the description is never pasted into a shell line (script injection)
+    expect(runs.join('\n')).not.toMatch(/\$\{\{/);
+  });
+
+  it('the server job in ci.yml cannot be skipped: no job-level if:, no path filters, and the static deploy needs it', () => {
+    const all = jobs();
+    expect(all.get('server')!.join('\n')).not.toMatch(/^ {4}if:/m);
+    expect(text).not.toMatch(/paths(-ignore)?:|branches-ignore:/);
+    expect(needsOf(all.get('deploy')!)).toContain('server');
+    // ci.yml still deploys no server (docs/online-server.md: the upgrade is the owner's, server first)
+    expect(all.get('server')!.join('\n')).not.toMatch(/ssh|deploy\/run\.sh/);
+  });
+});

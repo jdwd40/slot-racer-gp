@@ -1,8 +1,8 @@
 // The shared protocol parser, the browser's online gate, server configuration bounds, and the race-core additions the
 // server relies on: frozen shared tracks, strict track ids, retire() and the live run-on.
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { LIMITS, PROTOCOL_VERSION, checkDisplayName, cleanName, parseClientMessage } from '../../src/net/protocol';
-import { probeOnline } from '../../src/online';
+import { LIMITS, PROTOCOL_VERSION, RULES_VERSION, checkDisplayName, cleanName, parseClientMessage } from '../../src/net/protocol';
+import { afterProtocolRefusal, compareRules, probeOnline, rulesStatus } from '../../src/online';
 import { loadConfig, testConfig } from '../../server/config';
 import { LINK_AWAY_MS } from '../../server/room';
 import { createLogger, redact } from '../../server/log';
@@ -78,21 +78,21 @@ describe('protocol parser', () => {
 describe('online gate (browser)', () => {
   const res = (status: number, body: unknown) => Promise.resolve(new Response(JSON.stringify(body), { status }));
   it('is off by default and never fetches; is available only on an ok health with this protocol version', async () => {
-    const f = vi.fn(() => res(200, { ok: true, protocol: PROTOCOL_VERSION, version: 'abc' }));
+    const f = vi.fn(() => res(200, { ok: true, protocol: PROTOCOL_VERSION, rules: RULES_VERSION, version: 'abc' }));
     expect(await probeOnline(false, f as unknown as typeof fetch, 'https://slotrush.jdwd40.com')).toEqual({ state: 'off' });
     expect(f).not.toHaveBeenCalled();
     expect(await probeOnline(true, f as unknown as typeof fetch, 'https://slotrush.jdwd40.com')).toEqual({ state: 'available', version: 'abc', wsUrl: 'wss://slotrush.jdwd40.com/ws', accounts: false, lengths: [], setups: [] });
     // sign-in is offered only when the server reports accounts and profiles (a database is attached)
-    expect(await probeOnline(true, (() => res(200, { ok: true, protocol: PROTOCOL_VERSION, version: 'abc', accounts: true, profiles: true })) as unknown as typeof fetch, 'https://x')).toMatchObject({ state: 'available', accounts: true });
-    expect(await probeOnline(true, (() => res(200, { ok: true, protocol: PROTOCOL_VERSION, version: 'abc', accounts: true })) as unknown as typeof fetch, 'https://x')).toMatchObject({ state: 'available', accounts: false });
+    expect(await probeOnline(true, (() => res(200, { ok: true, protocol: PROTOCOL_VERSION, rules: RULES_VERSION, version: 'abc', accounts: true, profiles: true })) as unknown as typeof fetch, 'https://x')).toMatchObject({ state: 'available', accounts: true });
+    expect(await probeOnline(true, (() => res(200, { ok: true, protocol: PROTOCOL_VERSION, rules: RULES_VERSION, version: 'abc', accounts: true })) as unknown as typeof fetch, 'https://x')).toMatchObject({ state: 'available', accounts: false });
     expect(f).toHaveBeenCalledWith('https://slotrush.jdwd40.com/api/health', expect.anything());
     // race-length presets (#132) are offered online only when health lists them; only ids this page knows are kept, and a
     // server older than presets (no list, or not an array) offers none, so the page never sends it a length
-    expect(await probeOnline(true, (() => res(200, { ok: true, protocol: PROTOCOL_VERSION, version: 'abc', lengths: ['endurance', 'marathon', 'sprint', 'standard'] })) as unknown as typeof fetch, 'https://x')).toMatchObject({ state: 'available', lengths: ['sprint', 'standard', 'endurance'] });
-    expect(await probeOnline(true, (() => res(200, { ok: true, protocol: PROTOCOL_VERSION, version: 'abc', lengths: 'all' })) as unknown as typeof fetch, 'https://x')).toMatchObject({ state: 'available', lengths: [] });
+    expect(await probeOnline(true, (() => res(200, { ok: true, protocol: PROTOCOL_VERSION, rules: RULES_VERSION, version: 'abc', lengths: ['endurance', 'marathon', 'sprint', 'standard'] })) as unknown as typeof fetch, 'https://x')).toMatchObject({ state: 'available', lengths: ['sprint', 'standard', 'endurance'] });
+    expect(await probeOnline(true, (() => res(200, { ok: true, protocol: PROTOCOL_VERSION, rules: RULES_VERSION, version: 'abc', lengths: 'all' })) as unknown as typeof fetch, 'https://x')).toMatchObject({ state: 'available', lengths: [] });
     // car setups (#133) the same way: only ids this page knows, none from a server older than setups (it is sent none)
-    expect(await probeOnline(true, (() => res(200, { ok: true, protocol: PROTOCOL_VERSION, version: 'abc', setups: ['grip', 'turbo', 'balanced', 'speed'] })) as unknown as typeof fetch, 'https://x')).toMatchObject({ state: 'available', setups: ['balanced', 'speed', 'grip'] });
-    expect(await probeOnline(true, (() => res(200, { ok: true, protocol: PROTOCOL_VERSION, version: 'abc', setups: { acc: 99 } })) as unknown as typeof fetch, 'https://x')).toMatchObject({ state: 'available', setups: [] });
+    expect(await probeOnline(true, (() => res(200, { ok: true, protocol: PROTOCOL_VERSION, rules: RULES_VERSION, version: 'abc', setups: ['grip', 'turbo', 'balanced', 'speed'] })) as unknown as typeof fetch, 'https://x')).toMatchObject({ state: 'available', setups: ['balanced', 'speed', 'grip'] });
+    expect(await probeOnline(true, (() => res(200, { ok: true, protocol: PROTOCOL_VERSION, rules: RULES_VERSION, version: 'abc', setups: { acc: 99 } })) as unknown as typeof fetch, 'https://x')).toMatchObject({ state: 'available', setups: [] });
     // a newer server means this page is outdated (it says so and offers a reload, #67); an older one is just unavailable
     expect(await probeOnline(true, (() => res(200, { ok: true, protocol: PROTOCOL_VERSION + 1 })) as unknown as typeof fetch, 'https://x')).toEqual({ state: 'outdated', server: PROTOCOL_VERSION + 1 });
     expect(await probeOnline(true, (() => res(200, { ok: true, protocol: PROTOCOL_VERSION - 1 })) as unknown as typeof fetch, 'https://x')).toEqual({ state: 'behind', server: PROTOCOL_VERSION - 1 });
@@ -102,6 +102,62 @@ describe('online gate (browser)', () => {
     expect(await probeOnline(true, (() => Promise.reject(new TypeError('net'))) as unknown as typeof fetch, 'https://x')).toMatchObject({ state: 'unavailable', reason: 'unreachable' });
     const hang = ((_u: string, o: { signal: AbortSignal }) => new Promise((_r, rej) => o.signal.addEventListener('abort', () => rej(Object.assign(new Error('a'), { name: 'AbortError' }))))) as unknown as typeof fetch;
     expect(await probeOnline(true, hang, 'https://x', 20)).toMatchObject({ state: 'unavailable', reason: 'timeout' });
+  });
+});
+
+describe('online gate: race rules (#142)', () => {
+  const res = (body: unknown) => (() => Promise.resolve(new Response(JSON.stringify(body), { status: 200 }))) as unknown as typeof fetch;
+  const probe = (body: Record<string, unknown>, page = 'race-core-2026.11.8') => probeOnline(true, res({ ok: true, version: 'abc', ...body }), 'https://x', 4000, page);
+
+  it('orders race-core-YYYY.MM.N by year, month, then counter (numerically); anything else that differs is unknown', () => {
+    expect(compareRules('race-core-2026.11.8', 'race-core-2026.11.8')).toBe('same');
+    expect(compareRules('race-core-2026.11.9', 'race-core-2026.11.8')).toBe('newer');
+    expect(compareRules('race-core-2026.11.10', 'race-core-2026.11.9')).toBe('newer');   // not a string compare
+    expect(compareRules('race-core-2026.11.7', 'race-core-2026.11.8')).toBe('older');
+    expect(compareRules('race-core-2026.12.1', 'race-core-2026.11.8')).toBe('newer');
+    expect(compareRules('race-core-2026.9.30', 'race-core-2026.11.1')).toBe('older');   // month 9 < 11, not "9" > "1"
+    expect(compareRules('race-core-2027.1.1', 'race-core-2026.12.9')).toBe('newer');
+    expect(compareRules('race-core-2025.12.9', 'race-core-2026.1.1')).toBe('older');
+    for (const odd of [undefined, null, 7, '', 'race-core-2026.11', 'race-core-2026.11.8-beta', 'other-2026.11.9', 'race-core-2026.11.08', ' race-core-2026.11.9'])
+      expect(compareRules(odd, 'race-core-2026.11.8'), String(odd)).toBe('unknown');
+    // a page whose own string is not in the form (never shipped, but defined): any other string is unknown, never newer
+    expect(compareRules('race-core-2026.11.9', 'dev')).toBe('unknown');
+    // the live constant is in the form, so the ordering really applies to it
+    expect(compareRules(RULES_VERSION)).toBe('same');
+    expect(RULES_VERSION).toMatch(/^race-core-\d{4}\.\d{1,2}\.\d+$/);
+  });
+
+  it('maps newer server rules to Reload, older / missing / unreadable to Retry, and a match to no verdict', () => {
+    expect(rulesStatus('race-core-2026.11.8', 'race-core-2026.11.8')).toBeNull();
+    expect(rulesStatus('race-core-2026.11.9', 'race-core-2026.11.8')).toEqual({ state: 'outdated', server: PROTOCOL_VERSION, rules: 'race-core-2026.11.9' });
+    expect(rulesStatus('race-core-2026.11.7', 'race-core-2026.11.8')).toEqual({ state: 'behind', server: PROTOCOL_VERSION, rules: 'race-core-2026.11.7' });
+    expect(rulesStatus(undefined, 'race-core-2026.11.8')).toEqual({ state: 'behind', server: PROTOCOL_VERSION, rules: null });
+    expect(rulesStatus('banana', 'race-core-2026.11.8')).toEqual({ state: 'behind', server: PROTOCOL_VERSION, rules: 'banana' });
+  });
+
+  it('health: protocol wins; same protocol with other rules is never available; a body without rules is Retry', async () => {
+    // protocol and rules both matching: available
+    expect(await probe({ protocol: PROTOCOL_VERSION, rules: 'race-core-2026.11.8' })).toMatchObject({ state: 'available' });
+    // rules newer on the server (this page is a cached bundle) → Reload; older (server not upgraded / rolled back) → Retry
+    expect(await probe({ protocol: PROTOCOL_VERSION, rules: 'race-core-2026.11.9' })).toEqual({ state: 'outdated', server: PROTOCOL_VERSION, rules: 'race-core-2026.11.9' });
+    expect(await probe({ protocol: PROTOCOL_VERSION, rules: 'race-core-2026.11.7' })).toEqual({ state: 'behind', server: PROTOCOL_VERSION, rules: 'race-core-2026.11.7' });
+    // a server older than the field, or one sending something unreadable: Retry, never Reload, never a crash
+    expect(await probe({ protocol: PROTOCOL_VERSION })).toEqual({ state: 'behind', server: PROTOCOL_VERSION, rules: null });
+    expect(await probe({ protocol: PROTOCOL_VERSION, rules: 42 })).toEqual({ state: 'behind', server: PROTOCOL_VERSION, rules: null });
+    expect(await probe({ protocol: PROTOCOL_VERSION, rules: 'race-core-next' })).toMatchObject({ state: 'behind' });
+    // protocol newer / older wins whatever the rules say (an older server with newer-looking rules is still Retry)
+    expect(await probe({ protocol: PROTOCOL_VERSION + 1, rules: 'race-core-2026.11.7' })).toEqual({ state: 'outdated', server: PROTOCOL_VERSION + 1 });
+    expect(await probe({ protocol: PROTOCOL_VERSION - 1, rules: 'race-core-2026.11.9' })).toEqual({ state: 'behind', server: PROTOCOL_VERSION - 1 });
+    expect(await probe({ protocol: PROTOCOL_VERSION - 1 })).toEqual({ state: 'behind', server: PROTOCOL_VERSION - 1 });
+    // the default page rules are this build's
+    expect(await probeOnline(true, res({ ok: true, protocol: PROTOCOL_VERSION, rules: RULES_VERSION }), 'https://x')).toMatchObject({ state: 'available' });
+  });
+
+  it('a welcome on other rules re-probes health: only newer rules there say Reload', async () => {
+    expect(afterProtocolRefusal(await probe({ protocol: PROTOCOL_VERSION, rules: 'race-core-2026.11.9' }))).toMatchObject({ state: 'outdated' });
+    expect(afterProtocolRefusal(await probe({ protocol: PROTOCOL_VERSION, rules: 'race-core-2026.11.7' }))).toMatchObject({ state: 'behind', rules: 'race-core-2026.11.7' });
+    // health now matches (the server changed again between the welcome and the probe): Retry, which re-probes
+    expect(afterProtocolRefusal(await probe({ protocol: PROTOCOL_VERSION, rules: 'race-core-2026.11.8' }))).toEqual({ state: 'behind', server: null });
   });
 });
 
