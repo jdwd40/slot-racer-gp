@@ -9,6 +9,8 @@ import * as stall from './stall';
 import * as away from './away';
 import * as autoSg from './autoStopGo';
 import { AUTO, SG_STOP } from './autoStopGo';
+import * as rev from './reverse';
+import { REV, REV_CAP } from './reverse';
 
 // No lap count lives here: each Race takes its target from an allowlisted preset (src/raceLength.ts, #132), as `race.targetLaps`.
 // Drive, top speed, drag and grip are not here either: each car has its own setup preset (src/carSetup.ts, #133, Car.setup).
@@ -81,21 +83,8 @@ export type DeferBlock = 'phase' | 'none' | 'pit' | 'held' | 'used' | 'final';
 /** where an obligation stands against the lap being raced */
 export type DueState = 'none' | 'next' | 'due' | 'overdue' | 'late';
 
-/**
- * Player reverse gear, for backing into an overshot pit bay, penalty box or pit entrance (see docs/reverse.md).
- * Brake held at a standstill engages it after `engage` seconds of simulation time; braking while still rolling never counts.
- */
-export const REV = {
-  engage: 0.6,         // seconds of continued Brake while stationary before reverse engages
-  speed: 3,            // reverse speed cap (m/s, by magnitude)
-  acc: 5,              // reverse acceleration (m/s²)
-  still: 0.02,         // speed magnitude that counts as stationary
-};
-/** the reverse cap by magnitude, never above the pit-lane limit */
-export const REV_CAP = Math.min(REV.speed, T.PIT_SPEED);
-/** a pit-lane car backs up no further than where the pit lane has fully left the road */
-export const REV_PIT_MIN = T.PIT_IN1;
-
+/** Player reverse gear (REV, REV_CAP, REV_PIT_MIN): src/reverse.ts (#141). */
+export { REV, REV_CAP, REV_PIT_MIN } from './reverse';
 /** Automatic stop-and-go and bay visits for the player (AUTO, SG_STOP): src/autoStopGo.ts (#141). */
 export { AUTO, SG_STOP } from './autoStopGo';
 /**
@@ -1040,7 +1029,7 @@ export class Race {
     // a car held out of traffic (#74) has no pedals until it is back in traffic, even once its driver is back: nothing it
     // could do while it overlaps another car may move it (no driving through anyone), and reverse gear is let go
     if (c.away) input = NEUTRAL;
-    if (c.human) { this.sgUpdate(c); this.reverseControl(c, dt, input); }
+    if (c.human) { this.sgUpdate(c); rev.reverseControl(this, c, dt, input); }
     if (c.retire === 'parked') { c.v = 0; c.throttle = 0; c.brake = 0; return; }
     if (c.retire) c.retireT += dt;
     if (c.retire && this.parkable(c)) { this.park(c); return; }
@@ -1122,7 +1111,7 @@ export class Race {
     // ---- move along slot
     const k = this.T.curvature(s0);
     let ds = (c.v * dt) / Math.max(0.3, 1 - k * c.d);
-    if (ds < 0) ds = this.reverseTravel(c, s0, ds);
+    if (ds < 0) ds = rev.reverseTravel(this, c, s0, ds);
     const prevD = c.d;
     const u0 = c.u;
     c.u += ds;
@@ -1286,60 +1275,9 @@ export class Race {
     return this.profiles[profKey(c.setup.id, 'player', side < 0 ? -1 : 1, false)];
   }
 
-  // ---------------------------------------------------------------- reverse for human drivers
-  /** Why reverse cannot engage now, or null. Checked by speed magnitude and position, never by direction alone. */
-  reverseBlock(c: Car): 'phase' | 'mode' | 'change' | 'fuel' | 'service' | 'assist' | null {
-    if (this.phase !== 'racing' || c.finished) return 'phase';
-    if (c.mode !== 'race' && c.mode !== 'pitlane') return 'mode';
-    // held by the pit queue or the exit: automatic control, so Brake held now never backs away when the hold ends
-    if (c.pitHold || c.sgCtl) return 'assist';
-    if (c.change) return 'change';
-    if (c.fuel <= 0) return 'fuel';
-    // standing (or arriving) in the penalty box with a stop owed is service: Brake must keep the car still for all of it
-    if (c.mode === 'pitlane' && c.sgOwed > 0 && Math.abs(this.T.gapS(this.s(c), this.T.PEN_S)) < this.T.PEN_HALF) return 'service';
-    return null;
-  }
-
-  /**
-   * Reverse engagement from the Brake hold, in simulation time. Releasing Brake ends it; Throttle cancels it and restarts the hold;
-   * any reason it cannot run latches it off until Brake is released and pressed again, so finishing a service with Brake held never backs away.
-   */
-  reverseControl(c: Car, dt: number, input: Input): void {
-    if (!input.down || c.finished) { c.revOn = false; c.revHoldT = 0; c.revLatch = false; return; }
-    const block = this.reverseBlock(c);
-    const still = Math.abs(c.v) < REV.still;
-    if (block === 'change') {
-      // a committed lane change is never reversed: an attempt is refused for this press, with a word why
-      c.revOn = false;
-      if (c.revLatch || !still) { c.revHoldT = 0; return; }
-      c.revHoldT += dt;
-      if (c.revHoldT >= REV.engage) { c.revHoldT = 0; c.revLatch = true; this.pmsg(c, 'msg.revChange', 'warn'); }
-      return;
-    }
-    if (block) { c.revOn = false; c.revHoldT = 0; c.revLatch = true; return; }
-    if (input.up || c.revLatch) { c.revOn = false; c.revHoldT = 0; return; }
-    if (c.revOn) return;
-    if (!still) { c.revHoldT = 0; return; }
-    c.revHoldT += dt;
-    if (c.revHoldT >= REV.engage) { c.revOn = true; c.revHoldT = 0; }
-  }
-
-  /** Forget the Brake hold and reverse gear, e.g. on pause: a resumed race never restores a reverse command. */
-  clearReverse(): void { for (const c of this.cars) { c.revOn = false; c.revHoldT = 0; c.revLatch = false; } }
-
-  /** One step of backward travel: a pit-lane car stops at the upstream end of the pit path. Backing up leaves the squeeze queue and voids the lap. */
-  reverseTravel(c: Car, s0: number, ds: number): number {
-    if (c.mode === 'pitlane') {
-      const room = Math.max(0, this.T.gapS(REV_PIT_MIN, s0));
-      if (-ds >= room) { ds = -room; c.v = 0; }
-    }
-    if (ds < 0) {
-      c.lapValid = false;
-      if (c.revMark === null) c.revMark = c.u;
-      this.leaveSqueeze(c);
-    }
-    return ds;
-  }
+  // ---------------------------------------------------------------- reverse for human drivers: src/reverse.ts
+  reverseBlock(c: Car): 'phase' | 'mode' | 'change' | 'fuel' | 'service' | 'assist' | null { return rev.reverseBlock(this, c); }
+  clearReverse(): void { rev.clearReverse(this); }
 
   /** Lap counting. dt/ds/s0 describe the step just taken so the crossing time can be interpolated to sub-step precision. */
   laps(c: Car, dt = 0, ds = 0, s0 = 0): void {
