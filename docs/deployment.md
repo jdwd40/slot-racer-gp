@@ -233,10 +233,11 @@ symlink immediately; no restart/reload is needed. Verify the public `REVISION`,
 HTML, referenced JS/CSS, favicon and browser startup after either direction. A
 rollback changes static files only and does not delete or transform localStorage.
 What players see: an open page keeps its loaded bundle until it is reloaded, and local
-play always works. Online, the page compares its protocol with the room server's
-(`online-server.md`, *Mixed versions*): a page older than the server says *A new
-version of Slot Rush is available. Reload to play online.* with **Reload**, so roll the
-static site and the server back across a protocol bump together. A page newer than the
+play always works. Online, the page compares its protocol and rules versions with the room server's
+(`online-server.md`, *Mixed versions* and the rollback matrix, #142): a page older than
+the server says *A new version of Slot Rush is available. Reload to play online.* with
+**Reload**, so roll the static site and the server back across a protocol or rules bump
+together. A page newer than the
 server (the server was rolled back but this static release was not) says *Online play
 is temporarily unavailable — try again shortly.* with **Retry**, and shows **Online**
 again without a reload once both agree.

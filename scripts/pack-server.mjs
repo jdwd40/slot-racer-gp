@@ -15,6 +15,7 @@ mkdirSync(out, { recursive: true });
 cpSync('server-dist', `${out}/server-dist`, { recursive: true });
 for (const f of ['package.json', 'package-lock.json', '.nvmrc']) copyFileSync(f, `${out}/${f}`);
 cpSync('scripts/server-smoke.mjs', `${out}/scripts/server-smoke.mjs`);
+cpSync('scripts/pg-backup.mjs', `${out}/scripts/pg-backup.mjs`);   // the restore drill's dump/restore wrapper (docs/restore.md)
 cpSync('deploy/server', `${out}/deploy/server`, { recursive: true });
 execFileSync('npm', ['ci', '--omit=dev', '--ignore-scripts', '--no-audit', '--no-fund'], { cwd: out, stdio: 'inherit' });
 // the release must load its native hasher and every runtime package as installed, with no build step
