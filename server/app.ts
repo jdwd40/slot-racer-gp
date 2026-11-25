@@ -477,7 +477,8 @@ export function createApp({ cfg, log, manager, pool = null, sessionCheckMs = SES
         return;
       }
       tokens--;
-      const p = parseClientMessage(isBinary ? null : data.toString('utf8'));
+      let p: ReturnType<typeof parseClientMessage>;
+      try { p = parseClientMessage(isBinary ? null : data.toString('utf8')); } catch (e) { fault('unknown', e); return; }
       if (!p.ok) { send({ t: 'nack', ref: p.ref, code: p.code }); return; }
       handle(p.msg);
     });
@@ -501,9 +502,20 @@ export function createApp({ cfg, log, manager, pool = null, sessionCheckMs = SES
       }
     }
 
+    /**
+     * A bug while handling one socket's message (#166) costs that socket only: it is logged (the message type, never the
+     * payload) and closed with 1011, and its seat is released by the close handler as for any lost link. Every other socket
+     * and room carries on; before this, a synchronous throw here exited the whole process.
+     */
+    function fault(type: string, e: unknown): void {
+      log.error('ws.handle_fault', { type, error: String(e), stack: e instanceof Error ? e.stack : undefined });
+      try { ws.close(1011, 'internal'); } catch { ws.terminate(); }
+    }
+
     function handle(m: ClientMsg): void {
       if (backlog) { backlog.push(m); return; }
-      const waiting = dispatch(m);
+      let waiting: Promise<void> | void;
+      try { waiting = dispatch(m); } catch (e) { fault(m.t, e); return; }
       if (!waiting) return;
       backlog = [];
       void waiting.catch((e: unknown) => { log.error('ws.dispatch_error', { error: String(e) }); ws.terminate(); }).finally(() => {
