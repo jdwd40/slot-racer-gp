@@ -1,5 +1,6 @@
 // slotrush-server entry point: `node server-dist/main.mjs` (production, under systemd) or `npm run server:dev`.
 import { createApp } from './app';
+import { installFaultHandlers } from './fault';
 import { loadConfig } from './config';
 import { createPool } from './db';
 import { createLogger } from './log';
@@ -40,18 +41,23 @@ async function main(): Promise<void> {
   log.info('server.listen', { host: cfg.host, port, version: cfg.version, roomCap: cfg.roomCap, env: cfg.env, db: !!pool, scoring: scoring.version, spool: !!cfg.spoolDir, pendingResults: durable.pending });
 
   let stopping = false;
-  const stop = (sig: string): void => {
+  // a fault (#166) exits non-zero even if it arrives while a signal's stop is already under way
+  let exitCode = 0;
+  const stop = (sig: string, code = 0): void => {
+    exitCode = Math.max(exitCode, code);
     if (stopping) return;
     stopping = true;
     log.info('server.stop', { signal: sig });
+    // the hard exit is armed first, so a stop that throws or hangs still ends the process
+    const hard = setTimeout(() => process.exit(1), 5000); hard.unref();
     // races in progress end without a result (never a fabricated one); clients are told the service is restarting
     manager.shutdown('shutdown');
     durable.stop();
-    const hard = setTimeout(() => process.exit(1), 5000); hard.unref();
-    void Promise.allSettled([...pending]).then(() => app.close()).then(() => pool?.end()).then(() => process.exit(0), () => process.exit(1));
+    void Promise.allSettled([...pending]).then(() => app.close()).then(() => pool?.end()).then(() => process.exit(exitCode), () => process.exit(1));
   };
   process.on('SIGTERM', () => stop('SIGTERM'));
   process.on('SIGINT', () => stop('SIGINT'));
+  installFaultHandlers({ log, stop, exit: (c) => process.exit(c) });
 }
 
 main().catch((e: unknown) => {

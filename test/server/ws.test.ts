@@ -451,3 +451,40 @@ describe('a leave that arrives while the server is closing the socket (#106)', (
     a.close();
   });
 });
+
+describe('a fault while handling one socket\'s message (#166)', () => {
+  it('closes only that socket with 1011 and logs the type, never the payload; the other driver keeps getting snapshots', async () => {
+    const { cs, id } = await room(2);
+    const [a, b] = cs;
+    await startRace(cs);
+    // the surviving driver keeps sending controls, or the room would drop its silent seat (#74)
+    a.startHeartbeat(100);
+    const r = mgr.room(id)!;
+    const victim = b.me!;
+    const handle = r.handle.bind(r);
+    r.handle = (pid, m, now) => {
+      if (pid === victim && m.t === 'act') throw new Error('injected handler bug');
+      return handle(pid, m, now);
+    };
+    b.action('pit');
+    for (let k = 0; k < 50 && !b.closed; k++) await sleep(20);
+    expect(b.closed?.code).toBe(1011);
+    const line = log.lines.find((l) => l.includes('"ws.handle_fault"'));
+    expect(line).toBeDefined();
+    expect(JSON.parse(line!)).toMatchObject({ lvl: 'error', type: 'act', error: 'Error: injected handler bug' });
+    expect(line).not.toContain('"seq"');
+    // the room and the other socket carry on
+    const before = states(a).length;
+    await sleep(500);
+    expect(states(a).length).toBeGreaterThan(before + 2);
+    expect(a.closed).toBeNull();
+    expect(r.state).toBe('race');
+    expect(r.participant(victim)!.lostAt).not.toBeNull(); // released like any lost link, waiting out the grace
+    // the room still handles messages, including the other driver's
+    const seq = a.action('pit');
+    expect(await a.wait((m) => (m.t === 'ack' || m.t === 'nack') && m.seq === seq)).toMatchObject({ t: 'ack', seq });
+    r.handle = handle;
+    a.stopHeartbeat();
+    a.close();
+  }, 30_000);
+});
