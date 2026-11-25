@@ -214,6 +214,43 @@ describe('the departure press', () => {
     expect(r.pit.log.filter((e) => e.zone === 'merge0' && e.op === 'grant')).toHaveLength(1);
   });
 
+  // #164: a driver holding Throttle from the road into the pits, read as discrete samples every 40 ms (a remote page or bot
+  // sending its pedals as messages: each sample repeats the same held value), keeps refuelling well past the 0.5 s minimum
+  it('#164 Throttle held from the road into the bay, sampled every 40 ms, keeps refuelling until a release and a press', () => {
+    const { r, P } = setup('circuit-2');
+    approach(r, P, 120, -1, 15);
+    P.fuel = 0.35;
+    r.requestPit(me(r).id);
+    // sample-and-hold at 40 ms: what a client message stream gives the race between messages
+    const sampled = (src: (r: Race) => Input) => {
+      let at = -1, held: Input = NONE;
+      return (r2: Race): Input => { if (at < 0 || r2.t - at >= 0.04 - 1e-9) { at = r2.t; held = src(r2); } return held; };
+    };
+    run(r, sampled(driver(UP)), 40, inService);
+    expect(P.mode).toBe('service');
+    const f0 = P.fuel;
+    const tr = run(r, sampled(() => UP), 4);
+    expect(P.mode).toBe('service'); expect(P.exitReq).toBe(false);
+    expect(P.sgPhase).toBe('release');
+    expect(tr.msgs).not.toContain('msg.departReq');
+    expect(P.fuel - f0).toBeGreaterThan(REFUEL_RATE * 3.5);
+    // one 40 ms release, then the press: departure is requested at once
+    run(r, sampled(() => NONE), 0.04);
+    expect(P.sgPhase).toBe('ready');
+    const t2 = run(r, sampled(() => UP), DT);
+    expect(t2.msgs).toContain('msg.departReq');
+    expect(P.exitReq || P.mode !== 'service').toBe(true);
+  });
+
+  it('#164 Throttle released on arrival: a tap just after the 0.5 s minimum leaves at once', () => {
+    const { r, P } = arrived(NONE);
+    expect(P.sgPhase).toBe('ready');
+    expect(P.serviceT).toBeLessThan(SERVICE_READY + 0.2);
+    const tr = run(r, UP, DT);
+    expect(tr.msgs).toContain('msg.departReq');
+    expect(P.exitReq || P.mode !== 'service').toBe(true);
+  });
+
   it('a press before departure is ready is refused with the reason, and only a fresh press after counts', () => {
     const { r, P } = setup();
     inPit(P, T.PIT_IN1, 6); P.pitFuel = true; P.fuel = 0.3; P.fuelDue = LAP;
