@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Bounded browser validation of the real game. Procedure and results: docs/validation.md.
 //
-//   node scripts/browser-check.mjs [tracks race controlled routing practice championship touch responsive touchrace reverse service lastchance stall queue autosg autobay localslot online memory netbanner racelength carsetup debrief spectate qahook boot howto titletype titlelayout smoke]   functional checks (default: all)
+//   node scripts/browser-check.mjs [tracks race controlled routing practice championship touch responsive touchrace reverse service lastchance stall queue autosg autobay localslot online memory gfxcost netbanner racelength carsetup debrief spectate qahook boot howto titletype titlelayout smoke]   functional checks (default: all)
 //   node scripts/browser-check.mjs perf --label updated --machine "<name>"          frame-time capture
 //   node scripts/browser-check.mjs compare <baseline.json> <updated.json>           like-for-like comparison
 //
@@ -2906,7 +2906,9 @@ async function autobay(run, c) {
 
 /** Real-time frame capture with the renderer on. Reports presentation and clock separately. */
 async function perf(run) {
-  const s = await open(run);
+  // the preset is stored before the page builds its renderer (#167): MSAA is fixed at creation, so a pick after load would
+  // capture Low with the MSAA of the default preset
+  const s = await open(run, { fixtures: { 'srgp.graphics': run.preset } });
   const { page, keys } = s;
   await pickRaceSetup(page);
   await page.click('#o-start');
@@ -3238,6 +3240,52 @@ async function memory(run, c) {
   c.ok('Geometries return to the baseline after every race rebuild', geo.every((n) => n === geo[0]), { geometries: geo });
   c.ok('No page errors', s.errors.length === 0, s.errors);
   return s;
+}
+
+/**
+ * Fixed GPU costs per preset (#167), from what the renderer itself reports (__game.info: the context's antialias attribute,
+ * shadowMap.enabled, the sun's castShadow and the shadow map it holds). Loaded at Low: no MSAA and no shadow map. Picked up to
+ * Balanced in the session: the 2048² shadow map comes back at once, MSAA stays off until the next load. Back and forth, the
+ * shadow map is freed each time and the texture count returns to Low's. Loaded at Balanced or High: MSAA and 2048² shadows.
+ */
+async function gfxcost(run, c) {
+  const snap = async (page) => { await frames(page, 4); return read(page, () => window.__game.info()); };
+  const ready = (page) => waitFor(page, () => window.__game.view3d === 'ready', undefined, 60000);
+  const s = await open(run, { preset: 'low', fixtures: { 'srgp.graphics': 'low' } });
+  const { page } = s;
+  await ready(page);
+  await read(page, () => { window.__game.startSession('race'); window.__game.advance(3); });
+  await waitFor(page, () => window.__game.screen === 'race');
+  const low = await snap(page);
+  c.ok('Loaded at Low: no MSAA, shadow pass off, the sun casts no shadow and no shadow map exists', low.antialias === false && low.shadows === false && low.castShadow === false && low.shadowMap === null && low.calls > 0, low);
+  await read(page, () => window.__game.showTitle());
+  await waitFor(page, () => window.__game.screen === 'title');
+  const toggles = [];
+  for (let i = 0; i < 3; i++) {
+    await pickSetting(page, '[data-preset="balanced"]');
+    const on = await snap(page);
+    await pickSetting(page, '[data-preset="low"]');
+    const off = await snap(page);
+    toggles.push({ on, off });
+  }
+  const on0 = toggles[0].on;
+  c.ok('Low to Balanced in the session: the 2048² shadow map is back at once; MSAA stays off until the next load', toggles.every((t) => t.on.shadows && t.on.castShadow && t.on.shadowMap?.join() === '2048,2048' && t.on.antialias === false), toggles.map((t) => t.on));
+  c.ok('Back to Low: the shadow map is freed each time', toggles.every((t) => !t.off.shadows && !t.off.castShadow && t.off.shadowMap === null), toggles.map((t) => t.off));
+  c.ok('Switching back and forth leaks no textures: Low returns to its count and Balanced is the same each time', toggles.every((t) => t.off.textures === low.textures && t.on.textures === on0.textures) && on0.textures > low.textures, { low: low.textures, toggles: toggles.map((t) => [t.on.textures, t.off.textures]) });
+  c.ok('No page errors at Low', s.errors.length === 0, s.errors);
+  await s.context.close();
+  let last = null;
+  for (const preset of ['balanced', 'high']) {
+    if (last) await last.context.close();
+    last = await open(run, { preset, fixtures: { 'srgp.graphics': preset } });
+    await ready(last.page);
+    await read(last.page, () => { window.__game.startSession('race'); window.__game.advance(3); });
+    await waitFor(last.page, () => window.__game.screen === 'race');
+    const x = await snap(last.page);
+    c.ok(`Loaded at ${preset}: MSAA and the 2048² shadow map, as before #167`, x.antialias === true && x.shadows && x.castShadow && x.shadowMap?.join() === '2048,2048', x);
+    c.ok(`No page errors at ${preset}`, last.errors.length === 0, last.errors);
+  }
+  return last;
 }
 
 /**
@@ -4472,8 +4520,8 @@ async function howto(run, c) {
   return s;
 }
 
-const SCENARIOS = { tracks, race, controlled, routing, practice, championship, touch, responsive, touchrace, reverse, service, lastchance, stall, queue, autosg, autobay, localslot, online, memory, netbanner, racelength, carsetup, debrief, spectate, qahook, boot, howto, titletype, titlelayout, smoke };
-const USAGE = 'usage: browser-check.mjs [tracks|race|controlled|routing|practice|championship|touch|responsive|touchrace|reverse|service|lastchance|stall|queue|autosg|autobay|localslot|online|memory|netbanner|racelength|carsetup|debrief|spectate|qahook|boot|howto|titletype|titlelayout|smoke ...] | perf | compare <a.json> <b.json>\n'
+const SCENARIOS = { tracks, race, controlled, routing, practice, championship, touch, responsive, touchrace, reverse, service, lastchance, stall, queue, autosg, autobay, localslot, online, memory, gfxcost, netbanner, racelength, carsetup, debrief, spectate, qahook, boot, howto, titletype, titlelayout, smoke };
+const USAGE = 'usage: browser-check.mjs [tracks|race|controlled|routing|practice|championship|touch|responsive|touchrace|reverse|service|lastchance|stall|queue|autosg|autobay|localslot|online|memory|gfxcost|netbanner|racelength|carsetup|debrief|spectate|qahook|boot|howto|titletype|titlelayout|smoke ...] | perf | compare <a.json> <b.json>\n'
   + 'options: --dist <dir> --url <url> --commit <sha> --machine <name> --label <name> --viewport WxH --dpr N --preset low|balanced|high\n'
   + '         --seconds N --headed --channel <chrome|msedge> --out <dir> --max-minutes N';
 

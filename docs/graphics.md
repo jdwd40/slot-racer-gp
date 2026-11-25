@@ -1,6 +1,6 @@
 # Graphics presets
 
-Low, Balanced and High change one thing: how many pixels the 3D scene draws. The selector is on the title (behind Settings, #152) and pause screens. The definitions are in `src/graphics.ts`.
+Low, Balanced and High change how many pixels the 3D scene draws, and Low also drops MSAA and the shadow pass (#167). The selector is on the title (behind Settings, #152) and pause screens. The definitions are in `src/graphics.ts`.
 
 ## Policy
 
@@ -12,7 +12,9 @@ Renderer pixel ratio = `min(preset cap, actual devicePixelRatio)`. A missing or 
 | Balanced (default) | 1 | One drawn pixel per CSS pixel. Same as the old picture on DPR 1. |
 | High | 2 | The old `min(2, DPR)` policy, so it is the existing picture. |
 
-- **Unchanged in every preset:** antialiasing, environment and PBR lighting, the 2048 shadow map, tone mapping, meshes and scenery. Only resolution changes because the 6 November investigation found a shadows-only change insufficient (also SwiftShader, so a diagnostic).
+- **Low's fixed costs (#167):** Low turns off MSAA (`antialias: false`) and the sun's 2048×2048 PCF shadow map, which was re-rendered every frame. These are often the largest fixed GPU costs on low-end phones, and resolution alone does not reduce them. Balanced and High keep both, so they look exactly as before. The flags sit beside the pixel-ratio caps in `src/graphics.ts`; `src/view3d.ts` applies them.
+- **MSAA is chosen once, at load:** WebGL fixes `antialias` when the context is created, so the 3D view takes it from the preset saved when the page loads. A change of preset during a session (a pick, an undo or the automatic fallback to Low) changes MSAA from the next load only. Rebuilding the renderer would mean a new canvas and context, re-uploading every mesh and texture and rebuilding the environment map mid-race, which is more risk than one reload is worth. Shadows change at once: Low frees the shadow map's GPU target and three.js recompiles the lit materials without shadow sampling; going back up creates a fresh 2048² map. The browser `gfxcost` scenario checks this from what the renderer reports, and checks that switching back and forth leaks no textures.
+- **Unchanged in every preset:** environment and PBR lighting, tone mapping, meshes and scenery.
 - **Storage:** `srgp.graphics` holds `low`, `balanced` or `high`. A missing or invalid value, or unavailable storage, gives Balanced. If storage is blocked, the choice still applies for the session.
 - **Applying:** changes apply at once. Resizes and DPR changes re-apply the policy; the DPR is checked every frame, because moving to another display may not fire `resize`.
 - **What stays full resolution:** canvas CSS size, camera aspect (taken from the window) and the DOM HUD do not depend on the preset. The minimap canvas follows the device ratio, not the preset, and now also updates when the DPR changes.
@@ -30,8 +32,8 @@ Why: the race clock discards any part of a frame over `MAX_GAP` (250 ms, `src/ti
 - **Once, and the player wins:** it switches at most once per device and never switches back. Any pick in the selector, before or after a switch, is final: nothing is switched automatically from then on. Since #66 every pick also stores `manual`. A preset saved before #66 has no such record, and there is no timestamp to tell whether it was a deliberate pick, so as a one-time correction (#148) it stays eligible: a slow first race can still switch it to Low once, with the usual undo, and after that switch, an undo or any pick it never switches again. There is no oscillation because no rule ever raises the preset.
 - **Undo:** while the switch is in force and the preset is still Low, the graphics selector (title and pause screens) shows the notice; on the title, Settings opens by itself the first time it is shown with "Undo: back to <preset>", which restores the preset it replaced. The undo counts as the player's pick.
 - **Storage:** `srgp.gfxAuto` holds `switched:<replaced preset>` or `manual`. The preset itself is saved in `srgp.graphics` as usual. With storage unavailable every access is caught: the fallback still works, at most once per page load.
-- **Unaffected:** race simulation, timing, results, records and the server. Only the drawing buffer changes, exactly as when the player picks Low. No protocol or rules change.
-- **Browser validation:** `scripts/browser-check.mjs` clicks a preset when it opens the game, which counts as a pick, so scenarios and `perf` captures stay on the preset they ask for.
+- **Unaffected:** race simulation, timing, results, records and the server. Only the drawing buffer and the shadows change, exactly as when the player picks Low (MSAA follows at the next load). No protocol or rules change.
+- **Browser validation:** `scripts/browser-check.mjs` clicks a preset when it opens the game, which counts as a pick, so scenarios and `perf` captures stay on the preset they ask for. `perf` also stores the preset before the page loads, so the renderer is built with that preset's MSAA.
 
 Checked on the production build in headless Chromium on SwiftShader at 1280×720 with an empty profile (diagnostic, not real hardware): the game switched from Balanced to Low during the first race's countdown (median gap 200 ms on a loaded host), the drawing buffer went 1280 → 640 wide, the toast showed, the pause screen offered the undo, undo restored Balanced and stored `manual`, and after a reload a further race stayed on Balanced. With storage blocked it still switched, with no page errors.
 
@@ -40,7 +42,7 @@ Checked on the production build in headless Chromium on SwiftShader at 1280×720
 - Low looks visibly soft: fine track rails and crowds blur in the close view. In the full-circuit view the rails shimmer and the lane arrow gets thin. The player marker, HUD chips and minimap stay clear.
 - Balanced is the default, so anyone on a DPR 2 display now gets a softer picture than before until they choose High. That is a quarter of the pixels they drew before.
 - At DPR 1, Balanced and High are the same, because the device ratio is the limit. At a DPR of 0.5 or below (browser zoomed far out), all three are the same.
-- Frame time does not fall in line with pixel count, in this software renderer at least: a quarter of the pixels took about 40% of the time. Shadows and about 440 draw calls are not reduced by any preset.
+- Frame time does not fall in line with pixel count, in this software renderer at least: a quarter of the pixels took about 40% of the time. Before #167, shadows and about 440 draw calls were not reduced by any preset; Low now skips the shadow pass's calls.
 
 ## Evidence
 

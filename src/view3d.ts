@@ -11,6 +11,7 @@ import type { BayPaint } from './bays';
 import { buildWorld, disposeWorld, arrowGeometry, type World } from './world';
 import { Y0, disposeObject } from './gfx';
 import { makeCar, makeGhostCar, makePlayerMarker, dimCar, type CarVisual } from './carModel';
+import { presetFor, type PresetId } from './graphics';
 
 /** The renderer could not be created (no WebGL): main.ts shows the readable message it showed before the split. */
 export class NoWebglError extends Error {}
@@ -59,10 +60,13 @@ export class View3D {
   /** the personal-best ghost's car, handed to GhostPlayer.attach */
   readonly ghostCar = makeGhostCar();
 
-  /** Throws NoWebglError when WebGL cannot initialise. The canvas goes first in `app`, under the HUD and menus. */
-  constructor(app: HTMLElement, size: { w: number; h: number }, pixelRatio: number) {
+  /**
+   * Throws NoWebglError when WebGL cannot initialise. The canvas goes first in `app`, under the HUD and menus. `preset` picks
+   * MSAA for the life of this renderer (it cannot change after creation) and the shadows, which fit() can change later.
+   */
+  constructor(app: HTMLElement, size: { w: number; h: number }, pixelRatio: number, preset: PresetId) {
     try {
-      this.renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
+      this.renderer = new THREE.WebGLRenderer({ antialias: presetFor(preset).antialias, powerPreference: 'high-performance' });
     } catch (err) {
       throw new NoWebglError(String(err));
     }
@@ -72,7 +76,6 @@ export class View3D {
     renderer.outputColorSpace = THREE.SRGBColorSpace;
     renderer.toneMapping = THREE.ACESFilmicToneMapping;
     renderer.toneMappingExposure = 1.05;
-    renderer.shadowMap.enabled = true;
     renderer.shadowMap.type = THREE.PCFShadowMap;
     app.prepend(renderer.domElement);
 
@@ -85,11 +88,11 @@ export class View3D {
     this.camera = new THREE.PerspectiveCamera(38, size.w / size.h, 0.5, 600);
     scene.add(new THREE.HemisphereLight(0xe8f2ff, 0x4d6b3a, 0.7));
     const sun = this.sun;
-    sun.castShadow = true;
     sun.shadow.mapSize.set(2048, 2048);
     sun.shadow.bias = -0.0004;
     sun.shadow.normalBias = 0.02;
     scene.add(sun, sun.target);
+    this.setShadows(presetFor(preset).shadows);
 
     this.world = buildWorld();
     scene.add(this.world.root);
@@ -128,12 +131,26 @@ export class View3D {
     this.world.paintBays(bays);
   }
 
-  /** Size the drawing buffer to the game's box and pixel ratio (preset). */
-  fit(size: { w: number; h: number }, pixelRatio: number): void {
+  /** Size the drawing buffer to the game's box and pixel ratio, and turn the shadows on or off, for `preset`. */
+  fit(size: { w: number; h: number }, pixelRatio: number, preset: PresetId): void {
     this.camera.aspect = size.w / size.h;
     this.camera.updateProjectionMatrix();
     this.renderer.setPixelRatio(pixelRatio);
     this.renderer.setSize(size.w, size.h, false);
+    this.setShadows(presetFor(preset).shadows);
+  }
+
+  /**
+   * The sun's shadow pass on or off (#167). castShadow changes the lights' state, so three.js recompiles the lit materials
+   * without (or with) shadow sampling; shadowMap.enabled skips the shadow pass. Off frees the 2048² shadow map's GPU target,
+   * and three.js makes a fresh one at the next shadowed frame, so switching presets back and forth leaks nothing.
+   */
+  private setShadows(on: boolean): void {
+    const sun = this.sun;
+    if (this.renderer.shadowMap.enabled === on && sun.castShadow === on) return;
+    this.renderer.shadowMap.enabled = on;
+    sun.castShadow = on;
+    if (!on && sun.shadow.map) { sun.shadow.map.dispose(); sun.shadow.map = null; }
   }
 
   /** Place the camera over `target` (world x/z) showing `span` of world height; shadows follow the view. */
@@ -242,8 +259,13 @@ export class View3D {
   render(): void { this.renderer.render(this.scene, this.camera); }
 
   /** diagnostics (__game.info) */
-  info(): { calls: number; tris: number; objects: number; frames: number; geometries: number; textures: number } {
+  info(): { calls: number; tris: number; objects: number; frames: number; geometries: number; textures: number; antialias: boolean; shadows: boolean; castShadow: boolean; shadowMap: [number, number] | null } {
     const i = this.renderer.info;
-    return { calls: i.render.calls, tris: i.render.triangles, objects: this.world.root.children.length, frames: i.render.frame, geometries: i.memory.geometries, textures: i.memory.textures };
+    // what the renderer reports (#167): the context's real MSAA and the size of the shadow map it actually holds, if any
+    const map = this.sun.shadow.map;
+    return {
+      calls: i.render.calls, tris: i.render.triangles, objects: this.world.root.children.length, frames: i.render.frame, geometries: i.memory.geometries, textures: i.memory.textures,
+      antialias: this.renderer.getContext().getContextAttributes()?.antialias ?? false, shadows: this.renderer.shadowMap.enabled, castShadow: this.sun.castShadow, shadowMap: map ? [map.width, map.height] : null,
+    };
   }
 }

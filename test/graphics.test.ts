@@ -1,6 +1,6 @@
 // Graphics preset resolution and persistence (localStorage replaced by a double).
 import { describe, it, expect, afterEach, vi } from 'vitest';
-import { DEFAULT_PRESET, GRAPHICS_KEY, PRESETS, PresetId, pixelRatioFor, savedPreset, savePreset } from '../src/graphics';
+import { DEFAULT_PRESET, GRAPHICS_KEY, PRESETS, PresetId, pixelRatioFor, presetFor, savedPreset, savePreset } from '../src/graphics';
 import { memStorage } from './helpers';
 
 afterEach(() => { vi.unstubAllGlobals(); });
@@ -33,6 +33,17 @@ describe('preset resolution', () => {
   });
   it('treats a missing or nonsensical device ratio as 1', () => {
     for (const dpr of [0, -1, NaN, Infinity, undefined as unknown as number]) expect(pixelRatioFor('high', dpr)).toBe(1);
+  });
+});
+
+describe('fixed GPU costs per preset (#167)', () => {
+  it('Low drops MSAA and the shadow map; Balanced and High keep both, as before', () => {
+    expect(presetFor('low')).toMatchObject({ antialias: false, shadows: false });
+    expect(presetFor('balanced')).toMatchObject({ antialias: true, shadows: true });
+    expect(presetFor('high')).toMatchObject({ antialias: true, shadows: true });
+  });
+  it('gives the default preset for an unknown id', () => {
+    expect(presetFor('ultra' as PresetId)).toBe(presetFor(DEFAULT_PRESET));
   });
 });
 

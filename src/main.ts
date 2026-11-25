@@ -521,13 +521,13 @@ function updateCamera(dt: number, p: Pose, look: 'follow' | 'full' = camMode, v 
 }
 
 /**
- * Size everything to the game's box, display and preset. Only the drawing buffer varies by preset: the canvas CSS size, aspect ratio and DOM HUD do not.
+ * Size everything to the game's box, display and preset. Only the drawing buffer and the shadows vary by preset (MSAA is fixed at load, #167): CSS size, aspect and HUD do not.
  * The race carries on.
  */
 function fitRenderer(): void {
   vp = viewSize();
   dpr = window.devicePixelRatio;
-  view?.fit(vp, pixelRatioFor(preset, dpr));
+  view?.fit(vp, pixelRatioFor(preset, dpr), preset);
   hud.fitMini();
 }
 
@@ -1245,7 +1245,7 @@ function loadView(): Promise<void> {
   viewLoading = import('./view3d').then((m) => {
     let v: View3D;
     try {
-      v = new m.View3D(app, vp, pixelRatioFor(preset, dpr));
+      v = new m.View3D(app, vp, pixelRatioFor(preset, dpr), preset);
     } catch (err) {
       if (err instanceof m.NoWebglError) { noWebgl(); return; }
       viewState = 'failed'; viewLoading = null; pendingStart = null; syncViewNote();
